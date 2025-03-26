@@ -1,262 +1,147 @@
 version: 2.1
 
 orbs:
-  win: circleci/windows@5.0
-  macos: circleci/macos@2.4
-  codecov: codecov/codecov@5.3.0
+  ocean: dwave/ocean@1
+  windows: circleci/windows@5.0
 
-commands:
-  run-cibuildwheel:
-    parameters:
-      cibw-version:
-        type: string
-        default: 2.21.3
-    steps:
-      - run:
-          name: run cibuildwheel
-          shell: bash -eo pipefail
-          command: |
-            if [[ $OS == Windows_NT ]]; then
-              python -m pip install --user cibuildwheel==<< parameters.cibw-version >>
-              python -m cibuildwheel --output-dir dist
-            else
-              python3 -m pip install --user cibuildwheel==<< parameters.cibw-version >>
-              python3 -m cibuildwheel --output-dir dist
-            fi
-
-      - store_artifacts: &store-artifacts
-          path: ./dist
-      - persist_to_workspace: &persist-to-workspace
-          root: ./dist/
-          paths: .
-
-environment: &global-environment
+environment:
   PIP_PROGRESS_BAR: 'off'
 
 jobs:
-  build-linux:
+  test-linux:
     parameters:
       python-version:
         type: string
 
     docker:
-      - image: cimg/python:3.12
-
-    environment:
-      <<: *global-environment
-      CIBW_PROJECT_REQUIRES_PYTHON: ~=<< parameters.python-version>>
-      CIBW_ARCHS_LINUX: x86_64
+      - image: python:<< parameters.python-version >>
 
     steps:
       - checkout
-      - setup_remote_docker
-      - run-cibuildwheel
 
-  build-linux-aarch64:
-    parameters:
-      python-version:
-        type: string
+      - ocean/pip-install:
+          requirements: tests/requirements.txt
+          cache: true
+          cache-generation: 3
 
-    machine:
-      image: default
+      - ocean/pip-install:
+          requirements: requirements.txt
+          packages: .
+          cache: false
 
-    resource_class: arm.medium
+      - ocean/coverage-run-unittest
 
-    environment:
-      <<: *global-environment
-      CIBW_PROJECT_REQUIRES_PYTHON: ~=<< parameters.python-version>>
-      CIBW_ARCHS_LINUX: aarch64
-
-    steps: &build-steps
-      - checkout
-      - run-cibuildwheel
-
-  build-osx:
-    parameters:
-      python-version:
-        type: string
-
-    macos:
-      xcode: 16.1.0
-    resource_class: macos.m1.medium.gen1
-
-    environment:
-      <<: *global-environment
-      CIBW_PROJECT_REQUIRES_PYTHON: ~=<< parameters.python-version>>
-
-    steps:
-      - checkout
-      - macos/install-rosetta
-      - run-cibuildwheel
-
-  build-windows:
+  test-macos:
     parameters:
       python-version:
         type: string
 
     executor:
-      name: win/default
-
-    environment:
-      <<: *global-environment
-      CIBW_PROJECT_REQUIRES_PYTHON: ~=<< parameters.python-version>>
-      CIBW_ARCHS_WINDOWS: AMD64
+      name: ocean/macos
+      xcode: "16.2.0"
 
     steps:
       - checkout
-      - run-cibuildwheel
 
-  build-sdist:
-    docker:
-      - image: cimg/python:3.12
+      - ocean/brew-install-pyenv:
+          update-homebrew: true
 
-    steps:
-      - checkout
-      - run:
-          name: build sdist
-          command: |
-            python -m venv env
-            . env/bin/activate
-            pip install -r requirements.txt
-            pip install build pip --upgrade
-            python -m build --sdist
-      - store_artifacts: *store-artifacts
-      - persist_to_workspace: *persist-to-workspace
+      - ocean/pyenv-install-python:
+          python-version: << parameters.python-version >>
+          cache: true
+          cache-generation: 2
 
-  deploy-all:
-    docker:
-      - image: cimg/python:3.12
+      - ocean/pip-install:
+          requirements: tests/requirements.txt
+          cache: true
+          cache-generation: 2
 
-    steps:
-      - attach_workspace:
-          at: dist
+      - ocean/pip-install:
+          requirements: requirements.txt
+          packages: .
+          cache: false
 
-      - store_artifacts:
-          path: ./dist
+      - ocean/coverage-run-unittest:
+          upload-coverage: true
 
-      - run:
-          name: deploy
-          command: |
-            python -m venv env
-            . env/bin/activate
-            python -m pip install twine
-            twine upload -u "$PYPI_USERNAME" -p "$PYPI_PASSWORD" --skip-existing ./dist/*
-
-  test-codecov:
-    docker:
-      - image: cimg/python:3.12
-
-    steps:
-      - checkout
-      - run:
-          name: install dependencies
-          command: |
-            python -m venv env
-            . env/bin/activate
-            pip install -r requirements.txt
-      - run: &unix-build
-          name: build
-          command: |
-            . env/bin/activate
-            pip install .
-      - run:
-          name: run coverage
-          command: |
-            . env/bin/activate
-            pytest tests/ --cov=dwave.plugins.torch
-      - codecov/upload
-
-  test-dependencies:
+  test-windows:
     parameters:
       python-version:
         type: string
-      dependencies:
-        type: string
 
-    docker:
-      - image: python:<< parameters.python-version >>-slim
+    executor:
+      name: windows/default
 
     steps:
       - checkout
-      - attach_workspace:
-          at: dist
-      - run:
-          name: install
-          command: |
-            python -m venv env
-            . env/bin/activate
-            pip install dwave-pytorch-plugin --no-index -f dist/ --force-reinstall --no-deps
-            pip install << parameters.dependencies >> --upgrade --only-binary=numpy
-      - run: &unix-run-tests
-          name: run tests
-          command: |
-            . env/bin/activate
-            cd tests/
-            pip install -r requirements.txt
-            python -m unittest
 
-  test-sdist:
+      - ocean/nuget-install-python:
+          python-version: << parameters.python-version >>
+          cache: true
+
+      - ocean/pip-install:
+          requirements: tests/requirements.txt
+          cache: false
+
+      - ocean/pip-install:
+          requirements: requirements.txt
+          packages: .
+          cache: false
+
+      - ocean/coverage-run-unittest
+
+  deploy:
     docker:
-      - image: cimg/python:3.12
+      - image: python:3.12
 
     steps:
       - checkout
-      - attach_workspace:
-          at: dist
+
       - run:
-          name: install from sdist
+          name: create virtualenv
           command: |
             python -m venv env
+
+      - run:
+          name: build sdist and bdist
+          command: |
             . env/bin/activate
-            pip install dist/dwave?pytorch?plugin*.tar.gz
-      - run: *unix-run-tests
+            pip install -U pip setuptools wheel
+            python setup.py sdist
+            python setup.py bdist_wheel
+
+      - run:
+          name: upload
+          command: |
+            . env/bin/activate
+            pip install twine
+            twine check dist/*
+            twine upload -u "$PYPI_USERNAME" -p "$PYPI_PASSWORD" --skip-existing ./dist/*
 
 workflows:
-  tests:
+  version: 2
+
+  test:
     jobs:
-      - build-linux: &build
+      - test-linux:
           matrix:
             parameters:
-              python-version: &python-versions [3.9.0, 3.10.0, 3.11.0, 3.12.0, 3.13.0]
-      - build-linux-aarch64: *build
-      - build-osx: *build
-      - build-windows: *build
-      - build-sdist
-      - test-codecov
-      - test-dependencies:
-          name: test-dependencies-<< matrix.dependencies >>-py<< matrix.python-version >>
-          requires:
-            - build-linux
+              python-version: &python-versions ["3.9.21", "3.10.16", "3.11.11", "3.12.8", "3.13.1"]
+      - test-macos:
           matrix:
             parameters:
-              # test the lowest supported numpy and the latest
-              dependencies: [oldest-supported-numpy, numpy]
               python-version: *python-versions
-            exclude:
-              - dependencies: oldest-supported-numpy  # oldest-supported-numpy deprecated after 3.12
-                python-version: 3.13.0
-      - test-sdist:
-          requires:
-            - build-sdist
+      - test-windows:
+          matrix:
+            parameters:
+              # note: limit to versions available via nuget
+              python-version: &python-versions-windows ["3.9.13", "3.10.11", "3.11.9", "3.12.8", "3.13.1"]
+
   deploy:
     jobs:
-      - build-linux: &deploy-build
-          <<: *build
-          filters: &on-tag
+      - deploy:
+          filters: &on-tag-push
             tags:
               only: /^[0-9]+(\.[0-9]+)*((\.dev|rc)([0-9]+)?)?$/
             branches:
               ignore: /.*/
-      - build-linux-aarch64: *deploy-build
-      - build-osx: *deploy-build
-      - build-sdist:
-          filters: *on-tag
-      - build-windows: *deploy-build
-      - deploy-all:
-          filters: *on-tag
-          requires:
-            - build-linux
-            - build-linux-aarch64
-            - build-osx
-            - build-sdist
-            - build-windows
