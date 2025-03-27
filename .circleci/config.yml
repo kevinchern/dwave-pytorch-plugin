@@ -22,7 +22,6 @@ jobs:
       - ocean/pip-install:
           requirements: tests/requirements.txt
           cache: true
-          cache-generation: 3
 
       - ocean/pip-install:
           requirements: requirements.txt
@@ -49,12 +48,10 @@ jobs:
       - ocean/pyenv-install-python:
           python-version: << parameters.python-version >>
           cache: true
-          cache-generation: 2
 
       - ocean/pip-install:
           requirements: tests/requirements.txt
           cache: true
-          cache-generation: 2
 
       - ocean/pip-install:
           requirements: requirements.txt
