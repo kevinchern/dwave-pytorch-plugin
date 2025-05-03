@@ -17,6 +17,7 @@ import unittest
 import networkx as nx
 import torch
 from dimod import BinaryQuadraticModel, IdentitySampler
+from dwave.system.temperatures import maximum_pseudolikelihood_temperature
 
 from dwave.plugins.torch.boltzmann_machine import (
     GraphRestrictedBoltzmannMachine as GRBM,
@@ -40,6 +41,15 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         bm.J.data = torch.tensor([1, 2, 3, 6], dtype=dtype)
 
         self.bm = bm
+        self.bqm = BinaryQuadraticModel.from_ising(
+            h,
+            {
+                e: j
+                for e, j in zip(
+                    zip(self.a.tolist(), self.b.tolist()), bm.J.data.tolist()
+                )
+            },
+        )
 
         self.ones = torch.ones(4).unsqueeze(0)
         self.mones = -torch.ones(4).unsqueeze(0)
@@ -77,6 +87,43 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             en_bqm = bqm.energies(fake_spins.numpy()).item()
             en_boltz = self.bm(fake_spins).item()
             self.assertAlmostEqual(en_bqm, en_boltz, 4)
+
+    def test_estimate_beta(self):
+        s1 = self.sample_1
+        s2 = self.sample_2
+        s3 = torch.vstack([self.sample_2, self.sample_2])
+        bqm = self.bqm
+        self.assertEqual(
+            1.0 / maximum_pseudolikelihood_temperature(bqm, s1.numpy())[0],
+            self.bm.estimate_beta(s1),
+        )
+        self.assertEqual(
+            1.0 / maximum_pseudolikelihood_temperature(bqm, s2.numpy())[0],
+            self.bm.estimate_beta(s2),
+        )
+        self.assertEqual(
+            1.0 / maximum_pseudolikelihood_temperature(bqm, s3.numpy())[0],
+            self.bm.estimate_beta(s3),
+        )
+
+        fake_spins = torch.randn_like(s3)
+        self.assertEqual(
+            1.0 / maximum_pseudolikelihood_temperature(bqm, fake_spins.numpy())[0],
+            self.bm.estimate_beta(fake_spins),
+        )
+
+    def test_compute_expectation_disconnected(self):
+        grbm = GRBM(3, torch.tensor([0, 0, 1]), torch.tensor([1, 2, 2]))
+        grbm.h.data = torch.tensor([-0.1, -0.2, 0.4])
+        grbm.J.data = torch.tensor([-0.7, 0.13, -0.17])
+        beta = 1.337
+        corrupted = torch.tensor([[-1, 1, torch.nan]])
+        expected = grbm.compute_expectation_disconnected(corrupted, beta)[0].tolist()
+        self.assertListEqual(expected[:2], [-1, 1])
+        # -0.13 - 0.17 + 0.3 = 0.1
+        # 0.1 * 1.337 = 0.1337
+        # -tanh(0.1337)
+        self.assertAlmostEqual(expected[-1], -0.132909)
 
     def test_objective(self):
         s1 = self.sample_1

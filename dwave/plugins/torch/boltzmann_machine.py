@@ -30,6 +30,8 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 import torch
+from dimod import BinaryQuadraticModel
+from dwave.system.temperatures import maximum_pseudolikelihood_temperature
 
 from dwave.plugins.torch.utils import sample_to_tensor, spread
 
@@ -86,6 +88,54 @@ class AbstractBoltzmannMachine(ABC, torch.nn.Module):
         Returns:
             tuple[torch.Tensor, torch.Tensor]: The sufficient statistics of ``x``.
         """
+
+    def estimate_beta(self, spins: torch.Tensor) -> float:
+        """Estimate the maximum pseudolikelihood temperature using
+        ``dwave.system.temperature``.
+
+        Args:
+            spins (torch.Tensor): A tensor of shape (b, N) where b is the sample size,
+            and N denotes the number of variables in the model.
+
+        Returns:
+            float: the estimated effective inverse temperature of the model."""
+        h, J = self.ising
+        bqm = BinaryQuadraticModel.from_ising(h, J)
+        beta = 1.0 / maximum_pseudolikelihood_temperature(bqm, spins.numpy())[0]
+        return beta
+
+    def compute_expectation_disconnected(
+        self, corrupted_spins: torch.Tensor, beta: float
+    ) -> torch.Tensor:
+        """Assuming the missing spins are disconnected from each other, compute the
+        conditional expectation of missing spins (as indicated by `torch.nan`s).
+
+        Args:
+            corrupted_spins (torch.Tensor): a tensor of spins with shape (b, N) where b
+            is the samlpe size and N is the number of variables in the model. Entries
+            with values `torch.nan` are assumed to be disconnected from each other and
+            the resulting tensor will have these values populated with expectations.
+
+            beta (float): the effective inverse temperature of the model and sampler.
+            This quantity is, in the typical context of using a D-Wave QPU, estimated
+            with samples from the QPU and `AbstractBoltzmannMachine.estimate_beta`.
+
+        Returns:
+            torch.Tensor: a tensor of spins, as in `corrupted_spins`, but with
+            `torch.nan`s replaced by the expected values.
+        """
+        bqm_full = BinaryQuadraticModel.from_ising(*self.ising)
+        result = []
+        for cs in corrupted_spins:
+            vis_indices = (~cs.isnan()).argwhere().flatten()
+            bqm = bqm_full.copy()
+            cs = cs.clone()
+            for idx, spin in zip(vis_indices.tolist(), cs[vis_indices].tolist()):
+                bqm.fix_variable(idx, spin)
+            for idx, h in bqm.iter_linear():
+                cs[idx] = -torch.tanh(torch.tensor(beta * h))
+            result.append(cs)
+        return torch.stack(result)
 
     def clip_parameters(self) -> None:
         """Clips linear and quadratic bias weights in-place."""
