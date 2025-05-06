@@ -113,12 +113,15 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         )
 
     def test_compute_expectation_disconnected(self):
-        grbm = GRBM(3, torch.tensor([0, 0, 1]), torch.tensor([1, 2, 2]))
+        grbm = GRBM(
+            3, torch.tensor([0, 0, 1]), torch.tensor([1, 2, 2]), hidx=torch.tensor([2])
+        )
         grbm.h.data = torch.tensor([-0.1, -0.2, 0.4])
         grbm.J.data = torch.tensor([-0.7, 0.13, -0.17])
         beta = 1.337
-        corrupted = torch.tensor([[-1, 1, torch.nan]])
-        expected = grbm.compute_expectation_disconnected(corrupted, beta)[0].tolist()
+        obs = torch.tensor([[-1, 1.0]])
+        # TODO: more granular unit tests within `compute_expectation_disconnected`
+        expected = grbm.compute_expectation_disconnected(obs, beta)[0].tolist()
         self.assertListEqual(expected[:2], [-1, 1])
         # -0.13 - 0.17 + 0.3 = 0.1
         # 0.1 * 1.337 = 0.1337

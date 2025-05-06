@@ -71,14 +71,15 @@ if __name__ == "__main__":
 
     # Generate fake data to fit the Boltzmann machine to
     # Make sure ``x`` is of type float
-    x = 1 - 2.0 * torch.randint(0, 2, (SAMPLE_SIZE, num_nodes))
-
-    # Mark the qubit indices as hidden by setting them to `torch.nan`
-    x[:, indices_hid] = torch.nan
+    x = 1 - 2.0 * torch.randint(0, 2, (SAMPLE_SIZE, indices_vis.shape[0]))
 
     # Instantiate the model
     grbm = GraphRestrictedBoltzmannMachine(
-        num_nodes, *torch.tensor(list(G.edges)).mT, h_range=h_range, j_range=j_range
+        num_nodes,
+        *torch.tensor(list(G.edges)).mT,
+        h_range=h_range,
+        j_range=j_range,
+        hidx=indices_hid,
     )
 
     # Instantiate the optimizer

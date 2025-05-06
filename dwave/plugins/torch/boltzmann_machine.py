@@ -51,10 +51,15 @@ class AbstractBoltzmannMachine(ABC, torch.nn.Module):
             If ``None``, uses an infinite range.
         j_range (tuple[float, float], optional): Range of quadratic weights.
             If ``None``, uses an infinite range.
+        hidx (torch.Tensor, optional): Indices of hidden units.
+            If ``None``, the model is fully visible.
     """
 
     def __init__(
-        self, h_range: tuple[float, float] = None, j_range: tuple[float, float] = None
+        self,
+        h_range: tuple[float, float] = None,
+        j_range: tuple[float, float] = None,
+        hidx: torch.Tensor = None,
     ) -> None:
         super().__init__()
 
@@ -66,6 +71,9 @@ class AbstractBoltzmannMachine(ABC, torch.nn.Module):
             "j_range",
             torch.tensor(j_range if j_range is not None else [-torch.inf, torch.inf]),
         )
+        self.fully_visible = hidx is None
+        if hidx is not None:
+            self.register_buffer("hidx", hidx)
 
         if (h_range and not j_range) or (j_range and not h_range):
             raise NotImplementedError(
@@ -104,8 +112,26 @@ class AbstractBoltzmannMachine(ABC, torch.nn.Module):
         beta = 1.0 / maximum_pseudolikelihood_temperature(bqm, spins.numpy())[0]
         return beta
 
+    def _pad(self, x: torch.Tensor) -> torch.Tensor:
+        if self.fully_visible:
+            raise ValueError("Fully-visible models should not `_pad` data.")
+        bs, n_vis = x.shape
+        n_hid = self.hidx.shape[0]
+        n = n_vis + n_hid
+        padded = torch.ones((bs, n)) * torch.nan
+        padded[:, self.vidx] = x
+        return padded
+
+    @abstractmethod
+    def _compute_effective_field(self) -> torch.Tensor:
+        """Compute the effective field of disconnected hidden units.
+
+        Returns:
+            torch.Tensor: effective field of hidden units
+        """
+
     def compute_expectation_disconnected(
-        self, corrupted_spins: torch.Tensor, beta: float
+        self, spins: torch.Tensor, beta: float
     ) -> torch.Tensor:
         """Assuming the missing spins are disconnected from each other, compute the
         conditional expectation of missing spins (as indicated by `torch.nan`s).
@@ -124,18 +150,10 @@ class AbstractBoltzmannMachine(ABC, torch.nn.Module):
             torch.Tensor: a tensor of spins, as in `corrupted_spins`, but with
             `torch.nan`s replaced by the expected values.
         """
-        bqm_full = BinaryQuadraticModel.from_ising(*self.ising)
-        result = []
-        for cs in corrupted_spins:
-            vis_indices = (~cs.isnan()).argwhere().flatten()
-            bqm = bqm_full.copy()
-            cs = cs.clone()
-            for idx, spin in zip(vis_indices.tolist(), cs[vis_indices].tolist()):
-                bqm.fix_variable(idx, spin)
-            for idx, h in bqm.iter_linear():
-                cs[idx] = -torch.tanh(torch.tensor(beta * h))
-            result.append(cs)
-        return torch.stack(result)
+        padded = self._pad(spins)
+        h_eff = self._compute_effective_field(padded)
+        padded[:, self.hidx] = -torch.tanh(h_eff * beta)
+        return padded
 
     def clip_parameters(self) -> None:
         """Clips linear and quadratic bias weights in-place."""
@@ -221,8 +239,9 @@ class GraphRestrictedBoltzmannMachine(AbstractBoltzmannMachine):
         *,
         h_range: tuple = None,
         j_range: tuple = None,
+        hidx: torch.Tensor | None = None,
     ):
-        super().__init__(h_range=h_range, j_range=j_range)
+        super().__init__(h_range=h_range, j_range=j_range, hidx=hidx)
 
         num_edges = len(edge_idx_i)
         if edge_idx_i.size(0) != edge_idx_j.size(0):
@@ -232,12 +251,31 @@ class GraphRestrictedBoltzmannMachine(AbstractBoltzmannMachine):
             raise ValueError(
                 "Vertices are required to be contiguous nonnegative integers starting from 0 (inclusive). The input edge set implies otherwise."
             )
+        self.register_buffer("edge_idx_i", edge_idx_i)
+        self.register_buffer("edge_idx_j", edge_idx_j)
+
+        if not self.fully_visible:
+            vidx = torch.tensor([i for i in range(num_nodes) if i not in self.hidx])
+            self.register_buffer("vidx", vidx)
+            adj = list()
+            bidx = list()
+            bin_pointer = -1
+            J_indices = torch.arange(num_edges)
+            jidx = list()
+            for idx in self.hidx.tolist():
+                mask_i = self.edge_idx_i == idx
+                mask_j = self.edge_idx_j == idx
+                edges = torch.cat([self.edge_idx_j[mask_i], self.edge_idx_i[mask_j]])
+                jidx.extend(J_indices[mask_i + mask_j].tolist())
+                bin_pointer += edges.shape[0]
+                bidx.append(bin_pointer)
+                adj.extend(edges.tolist())
+            self.register_buffer("flat_adj", torch.tensor(adj))
+            self.register_buffer("jidx", torch.tensor(jidx))
+            self.register_buffer("bidx", torch.tensor(bidx))
 
         self.h = torch.nn.Parameter(0.01 * (2 * torch.randint(0, 2, (num_nodes,)) - 1))
         self.J = torch.nn.Parameter(1.0 * (2 * torch.randint(0, 2, (num_edges,)) - 1))
-
-        self.register_buffer("edge_idx_i", edge_idx_i)
-        self.register_buffer("edge_idx_j", edge_idx_j)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Evaluates the Hamiltonian.
@@ -263,6 +301,17 @@ class GraphRestrictedBoltzmannMachine(AbstractBoltzmannMachine):
                 the number of edges in the model.
         """
         return x[..., self.edge_idx_i] * x[..., self.edge_idx_j]
+
+    def _compute_effective_field(self, padded: torch.Tensor) -> torch.Tensor:
+        bs = padded.shape[0]
+
+        self.clip_parameters()
+        contribution = padded[:, self.flat_adj] * self.J[self.jidx]
+        cc = contribution.cumsum(1)
+        h_eff = self.h[self.hidx] + cc[:, self.bidx].diff(
+            dim=1, prepend=torch.zeros(bs).unsqueeze(1)
+        )
+        return h_eff
 
     def sufficient_statistics(
         self, x: torch.Tensor
