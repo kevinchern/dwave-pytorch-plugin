@@ -112,20 +112,51 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             self.bm.estimate_beta(fake_spins),
         )
 
+    def test_pad(self):
+        grbm = GRBM(
+            3, torch.tensor([0, 0, 1]), torch.tensor([1, 2, 2]), hidx=torch.tensor([1])
+        )
+        x = torch.zeros((99, 2))
+        padded = grbm._pad(x)
+        self.assertTrue(padded[:, 1].isnan().all())
+        self.assertRaises(ValueError, self.bm._pad, x)
+
+    def test_compute_effective_field(self):
+        grbm = GRBM(
+            3, torch.tensor([0, 0, 1]), torch.tensor([1, 2, 2]), hidx=torch.tensor([2])
+        )
+        #         (0.13)
+        # Model: 2 ----- 0
+        #         \      |
+        #  (-0.17) \     |  (-0.7)
+        #           \ 1 /
+        # effective field = quadratic(0,1) + quadratic(0,2) + linear(2)
+        #                 = -0.13 - 0.17 + 0.4 = 0.1
+        grbm.h.data = torch.tensor([-0.1, -0.2, 0.4])
+        grbm.J.data = torch.tensor([-0.7, 0.13, -0.17])
+        padded = torch.tensor([[-1.0, 1.0, float("nan")]])
+        h_eff = grbm._compute_effective_field(padded)
+        self.assertAlmostEqual(h_eff.item(), 0.1)
+
     def test_compute_expectation_disconnected(self):
         grbm = GRBM(
             3, torch.tensor([0, 0, 1]), torch.tensor([1, 2, 2]), hidx=torch.tensor([2])
         )
+        #         (0.13)
+        # Model: 2 ----- 0
+        #         \      |
+        #  (-0.17) \     |  (-0.7)
+        #           \ 1 /
         grbm.h.data = torch.tensor([-0.1, -0.2, 0.4])
         grbm.J.data = torch.tensor([-0.7, 0.13, -0.17])
         beta = 1.337
-        obs = torch.tensor([[-1, 1.0]])
-        # TODO: more granular unit tests within `compute_expectation_disconnected`
-        expected = grbm.compute_expectation_disconnected(obs, beta)[0].tolist()
+        obs = torch.tensor([[-1.0, 1.0]])
+        expected = grbm._compute_expectation_disconnected(obs, beta)[0].tolist()
         self.assertListEqual(expected[:2], [-1, 1])
-        # -0.13 - 0.17 + 0.3 = 0.1
-        # 0.1 * 1.337 = 0.1337
-        # -tanh(0.1337)
+        # effective field = quadratic(0,1) + quadratic(0,2) + linear(2)
+        #                 = -0.13 - 0.17 + 0.4 = 0.1
+        # expectation = -tanh(beta*effective field) = tanh(0.1 * 1.337)
+        # -tanh(0.1337) ~= -0.132909
         self.assertAlmostEqual(expected[-1], -0.132909)
 
     def test_objective(self):

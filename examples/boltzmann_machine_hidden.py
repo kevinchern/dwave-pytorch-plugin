@@ -23,7 +23,7 @@ from dwave_networkx import zephyr_graph, zephyr_four_color, zephyr_coordinates
 
 
 if __name__ == "__main__":
-    USE_QPU = True
+    USE_QPU = False
     NUM_READS = 100
     SAMPLE_SIZE = 17
 
@@ -61,17 +61,20 @@ if __name__ == "__main__":
     num_nodes = G.number_of_nodes()
 
     # Use Zephyr-colours to identify a set of qubits for which we will use as hiddens.
-    linear2qpu = lambda lin: sampler.embedding.get(lin)[0]
+    if USE_QPU:
+        linear2qpu = lambda lin: sampler.embedding.get(lin)[0]
+    else:
+        linear2qpu = lambda lin: lin
     zcoord = zephyr_coordinates(m, t)
     qpu2zephyr = zcoord.linear_to_zephyr
     colours = torch.tensor([zephyr_four_color(qpu2zephyr(linear2qpu(g))) for g in G])
     mask_hid = colours == 0
-    indices_hid = mask_hid.argwhere().flatten()
-    indices_vis = (~mask_hid).argwhere().flatten()
+    hidx = mask_hid.argwhere().flatten()
 
     # Generate fake data to fit the Boltzmann machine to
     # Make sure ``x`` is of type float
-    x = 1 - 2.0 * torch.randint(0, 2, (SAMPLE_SIZE, indices_vis.shape[0]))
+    n_vis = num_nodes - hidx.shape[0]
+    x = 1 - 2.0 * torch.randint(0, 2, (SAMPLE_SIZE, n_vis))
 
     # Instantiate the model
     grbm = GraphRestrictedBoltzmannMachine(
@@ -79,7 +82,7 @@ if __name__ == "__main__":
         *torch.tensor(list(G.edges)).mT,
         h_range=h_range,
         j_range=j_range,
-        hidx=indices_hid,
+        hidx=hidx,
     )
 
     # Instantiate the optimizer
@@ -88,15 +91,11 @@ if __name__ == "__main__":
     # Example of one iteration in a training loop
     # Generate a sample set from the model
     s = grbm.sample(sampler, **sample_kwargs)
-    # Estimate the effective inverse temperature
-    beta = grbm.estimate_beta(s)
     # Reset the gradients of the model weights
     opt_grbm.zero_grad()
-    # Compute the expectation for hidden units
-    x_filled = grbm.compute_expectation_disconnected(x, beta)
     # Compute the objective---this objective yields the same gradient as the negative
     # log likelihood of the model
-    objective = grbm.objective(x_filled, s)
+    objective = grbm.objective(x, s)
     # Backpropgate gradients
     objective.backward()
     # Update model weights with a step of stochastic gradient descent

@@ -103,16 +103,31 @@ class AbstractBoltzmannMachine(ABC, torch.nn.Module):
 
         Args:
             spins (torch.Tensor): A tensor of shape (b, N) where b is the sample size,
-            and N denotes the number of variables in the model.
+                and N denotes the number of variables in the model.
 
         Returns:
-            float: the estimated effective inverse temperature of the model."""
+            float: The estimated effective inverse temperature of the model.
+        """
         h, J = self.ising
         bqm = BinaryQuadraticModel.from_ising(h, J)
         beta = 1.0 / maximum_pseudolikelihood_temperature(bqm, spins.numpy())[0]
         return beta
 
     def _pad(self, x: torch.Tensor) -> torch.Tensor:
+        """Pads the observed spins with ``torch.nan``s at ``self.hidx`` to mark them as
+        hidden units.
+
+        Args:
+            x (torch.Tensor): Partially-observed spins of shape (b, N) where b is the
+                batch size and N is the number of visible units in the model.
+
+        Raises:
+            ValueError: Fully-visible models should not ``_pad`` data.
+
+        Returns:
+            torch.Tensor: A (b, N) tensor of spin variables where N is the total number
+                of variables, i.e., number of visible and hidden units.
+        """
         if self.fully_visible:
             raise ValueError("Fully-visible models should not `_pad` data.")
         bs, n_vis = x.shape
@@ -130,30 +145,30 @@ class AbstractBoltzmannMachine(ABC, torch.nn.Module):
             torch.Tensor: effective field of hidden units
         """
 
-    def compute_expectation_disconnected(
-        self, spins: torch.Tensor, beta: float
+    def _compute_expectation_disconnected(
+        self, obs: torch.Tensor, beta: float
     ) -> torch.Tensor:
-        """Assuming the missing spins are disconnected from each other, compute the
-        conditional expectation of missing spins (as indicated by `torch.nan`s).
+        """Compute and return the conditional expectation of spins including observed
+        spins.
 
         Args:
-            corrupted_spins (torch.Tensor): a tensor of spins with shape (b, N) where b
-            is the samlpe size and N is the number of variables in the model. Entries
-            with values `torch.nan` are assumed to be disconnected from each other and
-            the resulting tensor will have these values populated with expectations.
+            obs (torch.Tensor): A tensor of spins with shape (b, N) where b is the
+                sample size and N is the number of visible units in the model.
 
-            beta (float): the effective inverse temperature of the model and sampler.
-            This quantity is, in the typical context of using a D-Wave QPU, estimated
-            with samples from the QPU and `AbstractBoltzmannMachine.estimate_beta`.
+            beta (float): The effective inverse temperature of the model and sampler.
+                This quantity is, in the typical context of using a D-Wave QPU,
+                estimated with samples from the QPU and
+                :meth:`AbstractBoltzmannMachine.estimate_beta`.
 
         Returns:
-            torch.Tensor: a tensor of spins, as in `corrupted_spins`, but with
-            `torch.nan`s replaced by the expected values.
+            torch.Tensor: A (b, N)-shaped tensor of expected spins conditioned on
+                ``obs`` where b is the sample size and N is the total number of
+                variables in the model, i.e., number of hidden and visible units.
         """
-        padded = self._pad(spins)
-        h_eff = self._compute_effective_field(padded)
-        padded[:, self.hidx] = -torch.tanh(h_eff * beta)
-        return padded
+        m = self._pad(obs)
+        h_eff = self._compute_effective_field(m)
+        m[:, self.hidx] = -torch.tanh(h_eff * beta)
+        return m
 
     def clip_parameters(self) -> None:
         """Clips linear and quadratic bias weights in-place."""
@@ -189,7 +204,12 @@ class AbstractBoltzmannMachine(ABC, torch.nn.Module):
             torch.Tensor: Scalar difference of the average energy of data and model.
         """
         self.clip_parameters()
-        return self(s_observed).mean() - self(s_model).mean()
+        if self.fully_visible:
+            return self(s_observed).mean() - self(s_model).mean()
+        else:
+            beta = self.estimate_beta(s_model)
+            m = self._compute_expectation_disconnected(s_observed, beta)
+            return self(m).mean() - self(s_model).mean()
 
     def sample(
         self, sampler: Sampler, device: torch.device = None, **sample_params: dict
@@ -229,6 +249,8 @@ class GraphRestrictedBoltzmannMachine(AbstractBoltzmannMachine):
             If ``None``, uses an infinite range.
         j_range (tuple[float, float], optional): Range of quadratic weights.
             If ``None``, uses an infinite range.
+        hidx (torch.Tensor, optional): Indices of hidden units.
+            If ``None``, model is defined as fully-visible.
     """
 
     def __init__(
@@ -255,8 +277,10 @@ class GraphRestrictedBoltzmannMachine(AbstractBoltzmannMachine):
         self.register_buffer("edge_idx_j", edge_idx_j)
 
         if not self.fully_visible:
-            vidx = torch.tensor([i for i in range(num_nodes) if i not in self.hidx])
-            self.register_buffer("vidx", vidx)
+            # If hidden units are present, we need to keep track of several sets of
+            # indices in order to vectorize computations. These indices will be used in
+            # the :meth:`GraphRestrictedBoltzmannMachine._compute_effective_field` and
+            # details are described there.
             adj = list()
             bidx = list()
             bin_pointer = -1
@@ -270,9 +294,27 @@ class GraphRestrictedBoltzmannMachine(AbstractBoltzmannMachine):
                 bin_pointer += edges.shape[0]
                 bidx.append(bin_pointer)
                 adj.extend(edges.tolist())
+
+            # ``self.flat_adj`` is a flattened adjacency list. It is flattened because
+            # it would otherwise be a ragged tensor.
             self.register_buffer("flat_adj", torch.tensor(adj))
+            # ``self.jidx`` is used to track the corresponding edge weights of the
+            # flattened adjacency.
             self.register_buffer("jidx", torch.tensor(jidx))
+            # Because the adjacency list has been flattened, we need to track the
+            # bin indices for each hidden unit.
             self.register_buffer("bidx", torch.tensor(bidx))
+            # Visible indices complement hidden indices.
+            self.register_buffer(
+                "vidx",
+                torch.tensor([i for i in range(num_nodes) if i not in self.hidx]),
+            )
+            # Visually, this is the data structure we want to track.
+            # [0 1 4 5 | 0 | 0 | 1 3 4 | ... ]
+            # The bin indices denoted by pipes |.
+            # Each bin corresponds to edges of a single hidden unit.
+            # For example, the sequence 0 1 4 5 corresponds to the adjacency of the
+            # first hidden unit.
 
         self.h = torch.nn.Parameter(0.01 * (2 * torch.randint(0, 2, (num_nodes,)) - 1))
         self.J = torch.nn.Parameter(1.0 * (2 * torch.randint(0, 2, (num_edges,)) - 1))
@@ -303,14 +345,35 @@ class GraphRestrictedBoltzmannMachine(AbstractBoltzmannMachine):
         return x[..., self.edge_idx_i] * x[..., self.edge_idx_j]
 
     def _compute_effective_field(self, padded: torch.Tensor) -> torch.Tensor:
-        bs = padded.shape[0]
+        """Compute the effective field of disconnected hidden units.
 
+        Args:
+            padded (torch.tensor): Tensor of shape (..., N) where N denotes the total
+                number of variables in the model, i.e., number of visible and hidden
+                units.
+
+        Returns:
+            torch.Tensor: effective field of hidden units
+        """
+        bs = padded.shape[0]
         self.clip_parameters()
+
+        # Ideally, we can apply a scatter-add here for fast vectorized computation.
+        # An optimized implementation of scatter-add is available in the pip package
+        # ``torch-scatter`` but is unsupported on MacOS as of 2025-05.
+        # The following is a work-around.
+
+        # Extract the spins prescribed by a flattened adjacency list and multiply them
+        # by the corresponding edges. Transforming this contribution vector by a
+        # cumulative sum yields cumulative contributions to effective fields.
+        # Differencing removes the extra gobbledygook.
         contribution = padded[:, self.flat_adj] * self.J[self.jidx]
-        cc = contribution.cumsum(1)
-        h_eff = self.h[self.hidx] + cc[:, self.bidx].diff(
+        cumulative_contribution = contribution.cumsum(1)
+        # Don't forget to add the linear fields!
+        h_eff = self.h[self.hidx] + cumulative_contribution[:, self.bidx].diff(
             dim=1, prepend=torch.zeros(bs).unsqueeze(1)
         )
+
         return h_eff
 
     def sufficient_statistics(
