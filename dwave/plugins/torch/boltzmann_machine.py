@@ -31,7 +31,10 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from torch.nn.utils.parametrize import register_parametrization
+
 from dwave.plugins.torch.utils import sample_to_tensor, spread
+from dwave.plugins.torch.parametrizations import Bounded
 
 if TYPE_CHECKING:
     from dimod import Sampler
@@ -70,8 +73,6 @@ class AbstractBoltzmannMachine(ABC, torch.nn.Module):
                 "Both or neither weight range should be specified."
             )
 
-        self.register_forward_pre_hook(lambda *args: self.clip_parameters())
-
     @abstractmethod
     def sufficient_statistics(
         self, x: torch.Tensor
@@ -87,15 +88,9 @@ class AbstractBoltzmannMachine(ABC, torch.nn.Module):
             tuple[torch.Tensor, torch.Tensor]: The sufficient statistics of ``x``.
         """
 
-    def clip_parameters(self) -> None:
-        """Clips linear and quadratic bias weights in-place."""
-        self.get_parameter("h").data.clamp_(*self.h_range)
-        self.get_parameter("J").data.clamp_(*self.j_range)
-
     @property
     def ising(self) -> tuple[dict, dict]:
         """Converts the model to Ising format."""
-        self.clip_parameters()
         return self._ising
 
     @property
@@ -120,7 +115,6 @@ class AbstractBoltzmannMachine(ABC, torch.nn.Module):
         Returns:
             torch.Tensor: Scalar difference of the average energy of data and model.
         """
-        self.clip_parameters()
         return self(s_observed).mean() - self(s_model).mean()
 
     def sample(
@@ -188,6 +182,11 @@ class GraphRestrictedBoltzmannMachine(AbstractBoltzmannMachine):
 
         self.register_buffer("edge_idx_i", edge_idx_i)
         self.register_buffer("edge_idx_j", edge_idx_j)
+
+        if h_range is not None:
+            register_parametrization(self, "h", Bounded(*h_range))
+        if j_range is not None:
+            register_parametrization(self, "J", Bounded(*j_range))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Evaluates the Hamiltonian.

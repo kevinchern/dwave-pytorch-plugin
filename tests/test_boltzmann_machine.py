@@ -50,11 +50,6 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         self.sample_2 = torch.vstack([self.ones, self.ones, self.ones, self.mpones])
         return super().setUp()
 
-    def test_register_forward_pre_hook(self):
-        self.bm.h_range = torch.tensor([-0.1, 0.1])
-        self.bm.j_range = torch.tensor([-0.1, 0.2])
-        self.assertEqual(-0.1 * 3 + 4 * 0.2, self.bm(self.mones).item())
-
     def test_forward(self):
         with self.subTest("Manually-computed energies"):
             self.assertEqual(18, self.bm(self.ones).item())
@@ -146,8 +141,9 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
                 h_range=hr,
                 j_range=jr,
             )
-            bm.h.data = torch.tensor([-123, 0, 0, 567.0])
-            bm.J.data = torch.tensor([5555, -333.3, 0, 0])
+
+            bm.parametrizations["h"].original.data = torch.tensor([-123, 0, 0, 567.0])
+            bm.parametrizations["J"].original.data = torch.tensor([5555, -333.3, 0, 0])
             h, J = bm.ising
 
             self.assertEqual(min(h), hr[0])
