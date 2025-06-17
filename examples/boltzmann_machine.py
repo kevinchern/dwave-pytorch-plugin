@@ -91,7 +91,8 @@ def run(use_qpu: bool, num_reads: int, batch_size: int, n_iterations: int, fully
     # Generate a sample set from the model
     for iteration, x in enumerate(X):
         # Sample from the model
-        s = grbm.sample(sampler, prefactor, h_range, j_range, sample_params=sample_kwargs)
+        s = grbm.sample(sampler, prefactor=prefactor, linear_range=h_range,
+                        quadratic_range=j_range, sample_params=sample_kwargs)
 
         # Measure the effective inverse temperature
         measured_beta = grbm.estimate_beta(s)
@@ -103,7 +104,8 @@ def run(use_qpu: bool, num_reads: int, batch_size: int, n_iterations: int, fully
         # log likelihood of the model
         quasi = grbm.quasi_objective(
             x, s, kind="sampling", sampler=sampler, sample_kwargs=sample_kwargs,
-            prefactor=prefactor, linear_range=h_range, quadratic_range=j_range)
+            prefactor=prefactor, linear_range=h_range, quadratic_range=j_range
+        )
 
         # Backpropgate gradients
         quasi.backward()
@@ -120,8 +122,5 @@ def run(use_qpu: bool, num_reads: int, batch_size: int, n_iterations: int, fully
 
 
 if __name__ == "__main__":
-    # Run example of fitting a Boltzmann machine with a classical sampler
-    run(use_qpu=False, num_reads=100, batch_size=100, n_iterations=100, fully_visible=False)
-    run(use_qpu=False, num_reads=100, batch_size=100, n_iterations=100, fully_visible=False)
-    run(use_qpu=True, num_reads=100, batch_size=100, n_iterations=100, fully_visible=True)
-    run(use_qpu=True, num_reads=100, batch_size=100, n_iterations=100, fully_visible=False)
+    # Run example of fitting a fully-visible Boltzmann machine with a classical sampler
+    run(use_qpu=False, num_reads=100, batch_size=100, n_iterations=3, fully_visible=True)
