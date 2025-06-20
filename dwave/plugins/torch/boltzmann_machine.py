@@ -54,6 +54,10 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         edges (Iterable[tuple[Hashable, Hashable]]): List of edges.
         hidden_nodes (Iterable[Hashable], optional): List of hidden nodes. Each hidden node should
             also be listed in the input ``nodes``.
+        linear (dict[tuple[Hashable], float], optional): A dictionary mapping from nodes of the
+            model to its corresponding linear bias.
+        quadratic (dict[tuple[Hashable, Hashable], float]): A dictionary mapping from edges of the
+            model to its corresponding quadratic bias.
     """
 
     def __init__(
@@ -116,8 +120,8 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         """Set quadratic biases of the model.
 
         Args:
-            linear (dict[tuple[Hashable], float]): A dictionary mapping from edges of the model to
-                its corresponding linear bias.
+            quadratic (dict[tuple[Hashable, Hashable], float]): A dictionary mapping from edges of
+                the model to its corresponding quadratic bias.
         """
         for (u, v), bias in quadratic.items():
             idx = self._edge_to_idx.get((u, v), self._edge_to_idx.get((v, u)))
