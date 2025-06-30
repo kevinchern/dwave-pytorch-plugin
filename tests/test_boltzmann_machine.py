@@ -57,10 +57,28 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             [self.bm._idx_to_node[i] for i in range(self.bm._n_nodes)], self.bm._nodes
         )
         self.assertRaises(NotImplementedError, GRBM, [0, 1, 2], [[0, 1]], [0, 1])
-        self.bm.set_linear({"d": 999})
-        self.assertEqual(999, self.bm.linear[0])
+        # Create a triangle graph with an additional dangling vertex
+        #       a
+        #     / | \
+        #    b--c  d
+        # Note the node order is deliberately "dbac" in order to test variable orderings
+        self.nodes = list("dbac")
+        self.edges = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"]]
+        w1 = 13337.14
+        w2 = 4812.23
+        bm = GRBM(self.nodes, self.edges, None, {"a": w1}, {("b", "c"): w2})
+        self.assertAlmostEqual(bm.linear[2].item(), w1, 2)
+        self.assertAlmostEqual(bm.quadratic[3].item(), w2, 2)
+
+    def test_quadratic(self):
         self.bm.set_quadratic({("d", "b"): 999})
         self.assertEqual(999, self.bm.quadratic[0])
+        self.bm.set_quadratic({})
+
+    def test_set_linear(self):
+        self.bm.set_linear({"d": 999})
+        self.assertEqual(999, self.bm.linear[0])
+        self.bm.set_linear({})
 
     def test_forward(self):
         # Model for reference:

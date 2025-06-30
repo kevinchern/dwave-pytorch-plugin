@@ -105,7 +105,7 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         #     defined above
         self._setup_hidden()
 
-    def set_linear(self, linear: dict[tuple[Hashable], float]):
+    def set_linear(self, linear: dict[tuple[Hashable], float]) -> None:
         """Set linear biases of the model.
 
         Args:
@@ -116,7 +116,7 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
             idx = self.node_to_idx[node]
             self._linear.data[idx] = bias
 
-    def set_quadratic(self, quadratic: dict[tuple[Hashable, Hashable], float]):
+    def set_quadratic(self, quadratic: dict[tuple[Hashable, Hashable], float]) -> None:
         """Set quadratic biases of the model.
 
         Args:
