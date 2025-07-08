@@ -110,7 +110,8 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
 
         Args:
             linear (dict[tuple[Hashable], float]): A dictionary mapping from nodes of the model to
-                its corresponding linear bias.
+                its corresponding linear bias. Not all linear biases need to be set; nodes without a
+                mapping will default to its initialized values.
         """
         for node, bias in linear.items():
             idx = self.node_to_idx[node]
@@ -121,7 +122,8 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
 
         Args:
             quadratic (dict[tuple[Hashable, Hashable], float]): A dictionary mapping from edges of
-                the model to its corresponding quadratic bias.
+                the model to its corresponding quadratic bias. Not all quadratic biases need to be
+                set; edges without a mapping will default to its initialized values.
         """
         for (u, v), bias in quadratic.items():
             idx = self._edge_to_idx.get((u, v), self._edge_to_idx.get((v, u)))
