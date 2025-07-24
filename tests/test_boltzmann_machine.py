@@ -275,9 +275,27 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             sample_params=dict(
                 initial_states=([[1, 1, 1, 1], [1, 1, 1, 1], [-1, -1, 1, -1]], "abcd")
             ),
+            as_tensor=True,
         )
         self.assertTupleEqual((3, 4), tuple(spins.shape))
         self.assertIsInstance(spins, torch.Tensor)
+
+    def test_sample_return_sampleset(self):
+        grbm = GRBM(list("abcd"), [("a", "b")])
+        sampleset = grbm.sample(
+            IdentitySampler(),
+            prefactor=1,
+            linear_range=None, quadratic_range=None,
+            sample_params=dict(
+                initial_states=([[1, 1, 1, 1], [1, 1, 1, 1], [-1, -1, 1, -1]], "abcd")
+            ),
+            as_tensor=False,
+        )
+        self.assertIsInstance(sampleset, SampleSet)
+
+        self.assertEqual(3, len(sampleset.samples()))
+        self.assertEqual(4, len(sampleset.variables))
+        self.assertEqual(set(grbm.nodes), set(sampleset.variables))
 
     def test_objective(self):
         # Create a triangle graph with an additional dangling vertex
