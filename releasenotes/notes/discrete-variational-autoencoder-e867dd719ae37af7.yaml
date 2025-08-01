@@ -1,0 +1,4 @@
+---
+features:
+  - Add ``DiscreteVariationalAutoencoder`` class for training discrete models as priors.
+  - Add pseudo KL divergence loss function for use with Discrete Variational Autoencoder.
