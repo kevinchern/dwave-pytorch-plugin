@@ -80,28 +80,26 @@ class DiscreteVariationalAutoencoder(torch.nn.Module):
         self._decoder = decoder
         if latent_to_discrete is None:
 
-            def latent_to_discrete(
-                logits: torch.Tensor, n_samples: int
-            ) -> torch.Tensor:
-                # Logits is of shape (batch_size, n_discrete), we assume these logits
+            def latent_to_discrete(logits: torch.Tensor, n_samples: int) -> torch.Tensor:
+                # Logits is of shape (batch_size, l1, l2, ...), we assume these logits
                 # refer to the probability of each discrete variable being 1. To use the
                 # gumbel softmax function we need to reshape the logits to (batch_size,
-                # n_discrete, 1), and then stack the logits to a zeros tensor of the
+                # l1, l2, ..., 1), and then stack the logits to a zeros tensor of the
                 # same shape. This is done to ensure that the gumbel softmax function
                 # works correctly.
-
+                n_feature_dims = logits.dim() - 1
                 logits = logits.unsqueeze(-1)
                 logits = torch.cat((logits, torch.zeros_like(logits)), dim=-1)
                 # We now create a new leading dimension and repeat the logits n_samples
                 # times:
-                logits = logits.unsqueeze(1).repeat(1, n_samples, 1, 1)
-                one_hots = torch.nn.functional.gumbel_softmax(
-                    logits, tau=1 / 7, hard=True
+                logits = logits.unsqueeze(1).repeat(
+                    *((1, n_samples) + (1,) * n_feature_dims + (1,))
                 )
+                one_hots = torch.nn.functional.gumbel_softmax(logits, tau=1 / 7, hard=True)
                 # The constant 1/7 is used because it was used in
                 # https://iopscience.iop.org/article/10.1088/2632-2153/aba220
 
-                # one_hots is of shape (batch_size, n_samples, n_discrete, 2), we need
+                # one_hots is of shape (batch_size, n_samples, f_1, f_2, ..., 2), we need
                 # to take the first element of the last dimension and convert it to spin
                 # variables to make the latent space compatible with QPU models.
                 return one_hots[..., 0] * 2 - 1
