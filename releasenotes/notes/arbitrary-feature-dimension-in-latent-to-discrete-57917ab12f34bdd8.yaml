@@ -1,0 +1,9 @@
+---
+fixes:
+  - |
+    The default ``latent_to_discrete`` transformation in
+    ``dwave.plugins.torch.models.discrete_variational_autoencoder.DiscreteVariationalAutoencoder``
+    has been fixed to accommodate arbitrary encoders. Before, the default
+    transformation only allowed encoders whose output shape was (B, l). Now,
+    encoders can have an arbitrary number of feature dimensions, i.e., the
+    shape can be (B, l1, l2, ...).
