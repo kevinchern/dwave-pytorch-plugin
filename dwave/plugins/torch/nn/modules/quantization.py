@@ -41,3 +41,19 @@ class StraightThroughHardTanh(nn.Module):
         bits = straight_through_bitrounding(fuzzy_bits)
         spins = bit2spin_soft(bits)
         return spins
+
+
+class Bit2SpinSoft(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return bit2spin_soft(x)
+
+
+class Spin2BitSoft(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return spin2bit_soft(x)
