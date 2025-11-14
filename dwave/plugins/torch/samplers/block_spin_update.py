@@ -20,6 +20,12 @@ class BlockSpinUpdateSampler(nn.Module):
     tricks were employed. Ideally, an adjacency list can be used, however, adjacencies are ragged,
     which makes vectorization inapplicable.
 
+    Block-Gibbs and Block-Metropolis obey detailed balance and are ergodic methods at finite
+    temperature, which at fixed parameters converge upon Boltzmann distributions. Block-Metropolis
+    allows higher acceptance rates for proposals (faster single-step mixing), but is non-ergodic in
+    the limit of zero temperature. Decorrelation from an initial condition can be slower.
+    Block-Gibbs represents best practice for independent sampling.
+
     Args:
         G (Graph): A Chimera, Pegasus, or Zephyr graph.
         grbm (GRBM): The Graph-Restricted Boltzmann Machine to sample from.
