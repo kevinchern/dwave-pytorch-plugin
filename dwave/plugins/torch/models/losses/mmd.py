@@ -18,6 +18,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
+from dwave.plugins.torch.nn.modules.utils import store_config
+
 __all__ = ["Kernel", "RBFKernel", "mmd_loss"]
 
 
@@ -87,6 +89,7 @@ class RBFKernel(Kernel):
             from the data. Defaults to None.
     """
 
+    @store_config
     def __init__(
         self, num_features: int, mul_factor: int | float = 2.0, bandwidth: Optional[float] = None
     ):
