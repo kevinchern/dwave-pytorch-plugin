@@ -75,71 +75,52 @@ class TestBlockSpinSampler(unittest.TestCase):
             self.assertListEqual(bss1.x.tolist(), bss2.x.tolist())
 
     def test_gibbs_update(self):
-        # Create a triangle graph with an additional dangling vertex
-        #       a
-        #     / | \
-        #    b--c  d
-        self.nodes = list("abcd")
-        self.edges = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"]]
-
-        # Manually set the parameter weights for testing
-        dtype = torch.float32
-        grbm = GRBM(self.nodes, self.edges)
-        grbm._linear.data = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=dtype)
-        grbm._quadratic.data = torch.tensor([1.1, 2.2, 3.3, 6.6], dtype=dtype)
+        grbm = GRBM(list("ab"), [["a", "b"]])
 
         def crayon(v):
-            if v == "a":
-                return 0
-            if v == "b":
-                return 1
-            if v == "c":
-                return 2
-            if v == "d":
-                return 1
-        bss = BlockSpinSampler(grbm, crayon, 2, seed=2)
-        bss.x.data[:] = torch.tensor([[1, 1, 1, 1],
-                                      [1, 1, 1, 1]])
-        bss._gibbs_update(9999999, bss._partition[0],
-                          torch.tensor([[1], [1]]))
-        bss._gibbs_update(9999999, bss._partition[1],
-                          torch.tensor([[1, 1], [1, 1]]))
-        bss._gibbs_update(9999999, bss._partition[2],
-                          torch.tensor([[1], [1]]))
-        self.assertTrue((bss.x == -1).all())
+            return v == "a"
+        sample_size = 1_000_000
+        bss = BlockSpinSampler(grbm, crayon, sample_size, "Gibbs", seed=2)
+        bss.x.data[:] = 1
+        zero = torch.tensor(0.0)
+        ones = torch.ones((sample_size, 1))
+        bss._gibbs_update(0.0, bss._partition[0], ones*zero)
+        torch.testing.assert_close(torch.tensor(0.5), bss.x.mean(), atol=1e-3, rtol=1e-3)
+        bss._gibbs_update(0.0, bss._partition[1], ones*zero)
+        torch.testing.assert_close(torch.tensor(0.0), bss.x.mean(), atol=1e-3, rtol=1e-3)
 
-    def test_metropolis_update(self):
-        # Create a triangle graph with an additional dangling vertex
-        #       a
-        #     / | \
-        #    b--c  d
-        self.nodes = list("abcd")
-        self.edges = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"]]
+        effective_field = torch.tensor(1.2)
+        bss._gibbs_update(1.0, bss._partition[0], effective_field*ones)
+        bss._gibbs_update(1.0, bss._partition[1], effective_field*ones)
+        torch.testing.assert_close(torch.tanh(-effective_field), bss.x.mean(), atol=1e-3, rtol=1e-3)
 
-        # Manually set the parameter weights for testing
-        dtype = torch.float32
-        grbm = GRBM(self.nodes, self.edges)
-        grbm._linear.data = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=dtype)
-        grbm._quadratic.data = torch.tensor([1.1, 2.2, 3.3, 6.6], dtype=dtype)
+    def test_metropolis_update_average(self):
+        grbm = GRBM(list("ab"), [["a", "b"]])
 
         def crayon(v):
-            if v == "a":
-                return 0
-            if v == "b":
-                return 1
-            if v == "c":
-                return 2
-            if v == "d":
-                return 1
-        bss = BlockSpinSampler(grbm, crayon, 2, seed=1)
-        bss.x.data[:] = torch.tensor([[1, 1, 1, 1],
-                                      [1, 1, 1, 1]])
-        bss._metropolis_update(9999999, bss._partition[0],
-                               torch.tensor([[1], [1]]))
-        bss._metropolis_update(9999999, bss._partition[1],
-                               torch.tensor([[1, 1], [1, 1]]))
-        bss._metropolis_update(9999999, bss._partition[2],
-                               torch.tensor([[1], [1]]))
+            return v == "a"
+        sample_size = 1_000_000
+        bss = BlockSpinSampler(grbm, crayon, sample_size, "Metropolis", seed=2)
+        bss.x.data[:] = 1
+        ones = torch.ones((sample_size, 1))
+        effective_field = torch.tensor(1.2)
+        for i in range(10):
+            bss._metropolis_update(1.0, bss._partition[0], effective_field*ones)
+            bss._metropolis_update(1.0, bss._partition[1], effective_field*ones)
+        torch.testing.assert_close(torch.tanh(-effective_field), bss.x.mean(), atol=1e-3, rtol=1e-3)
+
+    def test_metropolis_update_oscillates(self):
+        grbm = GRBM(list("ab"), [["a", "b"]])
+
+        def crayon(v):
+            return v == "a"
+        sample_size = 1_00
+        bss = BlockSpinSampler(grbm, crayon, sample_size, "Metropolis", seed=2)
+        bss.x.data[:] = 1
+        zero_effective_field = torch.zeros((sample_size, 1))
+        bss._metropolis_update(0.0, bss._partition[0], zero_effective_field)
+        self.assertTrue((bss.x[:, 1] == -1).all())
+        bss._metropolis_update(0.0, bss._partition[1], zero_effective_field)
         self.assertTrue((bss.x == -1).all())
 
     def test_effective_field(self):
