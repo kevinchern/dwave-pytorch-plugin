@@ -20,7 +20,7 @@ import torch
 from parameterized import parameterized
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
-from dwave.plugins.torch.samplers.block_spin_update import BlockSpinSampler
+from dwave.plugins.torch.samplers.block_spin_sampler import BlockSpinSampler
 
 
 class TestBlockSpinSampler(unittest.TestCase):
