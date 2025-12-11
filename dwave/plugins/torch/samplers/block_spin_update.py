@@ -1,60 +1,112 @@
 from collections import defaultdict
 from time import perf_counter
+from typing import Callable, Literal
 
-import dwave_networkx as dnx
 import torch
-from networkx import Graph
 from torch import nn
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
-from dwave.plugins.torch.utils import bit2spin_soft, rands
 
 
-class BlockSpinUpdateSampler(nn.Module):
-    """A block-spin update sampler for Chimera-, Pegasus-, and Zephyr-structured graph-restricted Boltzmann machines.
+def rands(shape, generator, device=None):
+    if isinstance(shape, int):
+        shape = (shape,)
+    return bit2spin_soft(torch.randint(0, 2, shape, device=device, generator=generator))
+
+
+def bit2spin_soft(b):
+    if not ((b >= 0) & (b <= 1)).all():
+        raise ValueError(f"Not all inputs are in [0, 1]: {b}")
+    return b * 2.0 - 1.0
+
+
+class BlockSpinSampler(nn.Module):
+    """A block-spin update sampler for graph-restricted Boltzmann machines.
 
     Note this is a sampler and not a neural network. It extends `nn.Module` for the convenience of
     managing devices of indices (stored as parameters).
 
-    Due to the sparse definition of GRBMs (for better or worse), some tedious, and ugly, indexing
-    tricks were employed. Ideally, an adjacency list can be used, however, adjacencies are ragged,
-    which makes vectorization inapplicable.
+    Due to the sparse definition of GRBMs, some tedious, and ugly, indexing tricks are required for
+    efficiently sampling in blocks of spins. Ideally, an adjacency list can be used, however,
+    adjacencies are ragged, making vectorization inapplicable.
 
     Block-Gibbs and Block-Metropolis obey detailed balance and are ergodic methods at finite
-    temperature, which at fixed parameters converge upon Boltzmann distributions. Block-Metropolis
+    temperature which, at fixed parameters, converge upon Boltzmann distributions. Block-Metropolis
     allows higher acceptance rates for proposals (faster single-step mixing), but is non-ergodic in
     the limit of zero temperature. Decorrelation from an initial condition can be slower.
     Block-Gibbs represents best practice for independent sampling.
 
     Args:
-        G (Graph): A Chimera, Pegasus, or Zephyr graph.
         grbm (GRBM): The Graph-Restricted Boltzmann Machine to sample from.
+        crayon (Callable): A colouring function; a function that maps a single node of the `grbm` to
+            its colour.
+        num_reads (int): Sample size.
+        proposal_acceptance_criteria (Literal["Gibbs", "Metropolis"]): The proposal acceptance
+            criterion used to accept or reject states in the Markov chain. Defaults to "Gibbs".
+        seed (Optional[int]): Random seed. Defaults to None.
     """
 
-    def __init__(self, G: Graph, grbm: GRBM, num_reads: int, kind: str):
+    def __init__(self, grbm: GRBM, crayon: Callable, num_reads: int,
+                 proposal_acceptance_criteria: Literal["Gibbs", "Metropolis"] = "Gibbs", seed=None):
         super().__init__()
-        topology = G.graph.get("family", None)
-        if topology not in {"zephyr", "pegasus", "chimera"}:
-            raise NotImplementedError("TODO")
-        G = G.copy()
-        self._kind = kind
-        self.G = G
-        self.grbm = grbm
-        self.edge_idx_i = grbm.edge_idx_i
-        self.edge_idx_j = grbm.edge_idx_j
-        self.node_to_idx = grbm.node_to_idx
-        self.idx_to_node = grbm.idx_to_node
-        self.partition = self.get_partition(topology)
-        self.padded_adjacencies, self.padded_adjacencies_weight = self.get_adjacencies()
-        self.x = nn.Parameter(rands((num_reads, grbm.n_nodes)), requires_grad=False)
-        self.linear = grbm._linear
-        self.quadratic = grbm._quadratic
+        if num_reads < 1 or not isinstance(num_reads, int):
+            raise ValueError("Number of reads should be a positive integer.")
+        self._proposal_acceptance_criteria = proposal_acceptance_criteria.title()
+        if self._proposal_acceptance_criteria not in {"Gibbs", "Metropolis"}:
+            raise ValueError(
+                f'Proposal acceptance criterion should be one of "Gibbs" or "Metropolis"'
+            )
+        self._grbm = grbm
+        self._crayon = crayon
+        if not self._valid_crayon():
+            raise ValueError("`crayon` is not a valid colouring of `grbm`")
+        self._partition = self._get_partition()
+        self._padded_adjacencies, self._padded_adjacencies_weight = self._get_adjacencies()
+        self.rng = None
+        if seed is not None:
+            self.rng = torch.Generator()
+            self.rng.manual_seed(seed)
+        self.x = nn.Parameter(
+            rands((num_reads, grbm.n_nodes),
+                  generator=self.rng),
+            requires_grad=False)
+        self.zeros = nn.Parameter(torch.zeros((num_reads, 1)), requires_grad=False)
+        self._metadata = dict()
 
     @property
-    def kind(self):
-        return self._kind
+    def metadata(self) -> dict:
+        """Metadata to be updated by `BlockSpinSampler.sample`"""
+        return self._metadata.copy()
 
-    def get_adjacencies(self) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    def _valid_crayon(self) -> bool:
+        """Determines whether `crayon` is a valid colouring of `grbm`.
+
+        Returns:
+            bool: True if the colouring is valid and False otherwise.
+        """
+        for u, v in self._grbm.edges:
+            if self._crayon(u) == self._crayon(v):
+                return False
+        return True
+
+    def _get_partition(self) -> nn.ParameterList:
+        """Computes the vertex partition induced by the colouring function `crayon`.
+
+        Returns:
+            nn.ParameterList: The partition induced by the colouring.
+        """
+        partition = defaultdict(list)
+        for node in self._grbm.nodes:
+            idx = self._grbm.node_to_idx[node]
+            c = self._crayon(node)
+            partition[c].append(idx)
+        partition = nn.ParameterList([
+            nn.Parameter(torch.tensor(partition[k], requires_grad=False), requires_grad=False)
+            for k in sorted(partition)
+        ])
+        return partition
+
+    def _get_adjacencies(self) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Create two lists of padded adjacency lists (tensors), one for neighbouring indices and
         another for the corresponding weight indices.
 
@@ -68,24 +120,27 @@ class BlockSpinUpdateSampler(nn.Module):
             list of weight indices (in sparse indexing) used to retrieve the corresponding edge
             weight.
         """
-        max_degree = max([self.G.degree[v] for v in self.G])
+        max_degree = 0
+        if self._grbm.n_edges:
+            max_degree = torch.unique(torch.cat([self._grbm.edge_idx_i, self._grbm.edge_idx_j]),
+                                      return_counts=True)[1].max().item()
         padded_adjacencies = nn.Parameter(
-            -torch.ones(len(self.G), max_degree, dtype=int), requires_grad=False
+            -torch.ones(self._grbm.n_nodes, max_degree, dtype=int), requires_grad=False
         )
         padded_adjacencies_weight = nn.Parameter(
-            -torch.ones(len(self.G), max_degree, dtype=int), requires_grad=False
+            -torch.ones(self._grbm.n_nodes, max_degree, dtype=int), requires_grad=False
         )
 
         adjacency_dict = defaultdict(list)
         edge_to_idx = dict()
         for idx, (u, v) in enumerate(
-            zip(self.edge_idx_i.tolist(),
-                self.edge_idx_j.tolist())):
+            zip(self._grbm.edge_idx_i.tolist(),
+                self._grbm.edge_idx_j.tolist())):
             adjacency_dict[v].append(u)
             adjacency_dict[u].append(v)
             edge_to_idx[u, v] = idx
             edge_to_idx[v, u] = idx
-        for u in self.idx_to_node:
+        for u in self._grbm.idx_to_node:
             neighbours = adjacency_dict[u]
             adj_weight_idxs = [edge_to_idx[u, v] for v in neighbours]
             num_neighbours = len(neighbours)
@@ -93,73 +148,84 @@ class BlockSpinUpdateSampler(nn.Module):
             padded_adjacencies_weight[u][:num_neighbours] = torch.tensor(adj_weight_idxs)
         return padded_adjacencies, padded_adjacencies_weight
 
-    def get_partition(self, topology):
-        partition = defaultdict(list)
-        if topology == "zephyr":
-            lin2lattice = dnx.zephyr_coordinates(self.G.graph['rows']).linear_to_zephyr
-            crayon = dnx.zephyr_four_color
-        elif topology == "pegasus":
-            lin2lattice = dnx.pegasus_coordinates(self.G.graph['rows']).linear_to_pegasus
-            crayon = dnx.pegasus_four_color
-        elif topology == "chimera":
-            lin2lattice = dnx.chimera_coordinates(self.G.graph['rows']).linear_to_chimera
-            crayon = dnx.chimera_two_color
-        else:
-            raise ValueError("Invalid topology.")
-
-        for lin in self.G:
-            idx = self.node_to_idx[lin]
-            c = crayon(lin2lattice(lin))
-            partition[c].append(idx)
-        partition = nn.ParameterList([
-            nn.Parameter(torch.tensor(partition[k], requires_grad=False), requires_grad=False)
-            for k in sorted(partition)
-        ])
-
-        return partition
-
-    @torch.compile
     @torch.no_grad
-    def step_(self, beta: torch.Tensor):
-        """Performs a block-Gibbs update in-place.
+    def _compute_effective_field(self, block) -> torch.Tensor:
+        """Computes the effective field for all vertices in `block`.
 
         Args:
-            beta (float): Effective inverse temperature to sample at.
+            block (nn.ParameterList): A list of integers (indices) corresponding to the vertices of
+                a colour.
+
+        Returns:
+            torch.Tensor: The effective fields of each vertex in `block`.
         """
-        num_reads = self.x.shape[0]
-        zeros = torch.zeros(num_reads, device=self.x.device).unsqueeze(1)
-        for block in self.partition:
-            xnbr = torch.hstack([self.x, zeros])[:, self.padded_adjacencies[block]]
-            h = self.linear[block]
-            J = self.quadratic[self.padded_adjacencies_weight[block]]
-            effective_field = (xnbr * J.unsqueeze(0)).sum(2) + h
-            if self.kind == "metropolis":
-                delta = -2*self.x[:, block]*effective_field
-                prob = (-delta*beta).exp().clip(0, 1)
-                # if the delta field is negative, then flipping the spin will improve the energy
-                prob[delta <= 0] = 1
-                flip = -bit2spin_soft(prob.bernoulli())
-                self.x[:, block] = self.x[:, block]*flip
-            elif self.kind == "gibbs":
-                prob = 1/(1+torch.exp(2*effective_field*beta))
-                spins = bit2spin_soft(prob.bernoulli())
-                self.x[:, block] = spins
-            else:
-                raise ValueError(f"Invalid kind: {self.kind}")
+        xnbr = torch.hstack([self.x, self.zeros])[:, self._padded_adjacencies[block]]
+        h = self._grbm.linear[block]
+        J = self._grbm.quadratic[self._padded_adjacencies_weight[block]]
+        return (xnbr * J.unsqueeze(0)).sum(2) + h
 
     @torch.no_grad
-    def run_(self, schedule: torch.Tensor):
-        # NOTE: this is a silly way to force compilation for native and tensor-valued scalars.
-        # There is a further distinction between 0 and nonzero values.
-        # TODO: investigate the cases to cover and find a better way to force compilation.
-        self.step_(0)
-        self.step_(0.0)
-        self.step_(0.01)
-        self.step_(torch.tensor(0))
-        self.step_(torch.tensor(0.0))
-        self.step_(torch.tensor(0.01))
-        torch.cuda.empty_cache()
+    def _metropolis_update(self, beta: float, block: nn.ParameterList,
+                           effective_field: torch.Tensor) -> None:
+        """Performs a Metropolis update in-place.
+
+        Args:
+            beta (float): The inverse temperature to sample at.
+            block (nn.ParameterList): A list of integers (indices) corresponding to the vertices of
+                a colour.
+            effective_field (torch.Tensor): Effective fields of each spin corresponding to indices
+                of the block.
+        """
+        delta = -2*self.x[:, block]*effective_field
+        prob = (-delta*beta).exp().clip(0, 1)
+        # if the delta field is negative, then flipping the spin will improve the energy
+        prob[delta <= 0] = 1
+        flip = -bit2spin_soft(prob.bernoulli(generator=self.rng))
+        self.x[:, block] = self.x[:, block]*flip
+
+    @torch.no_grad
+    def _gibbs_update(self, beta, block, effective_field):
+        """Performs a Gibbs update in-place.
+
+        Args:
+            beta (float): The inverse temperature to sample at.
+            block (nn.ParameterList): A list of integers (indices) corresponding to the vertices of
+                a colour.
+            effective_field (torch.Tensor): Effective fields of each spin corresponding to indices
+                of the block.
+        """
+        prob = 1/(1+torch.exp(2*effective_field*beta))
+        spins = bit2spin_soft(prob.bernoulli(generator=self.rng))
+        self.x[:, block] = spins
+
+    @torch.no_grad
+    def step_(self, beta: torch.Tensor) -> None:
+        """Performs a block-spin update in-place.
+
+        Args:
+            beta (float): Inverse temperature to sample at.
+        """
+        for block in self._partition:
+            effective_field = self._compute_effective_field(block)
+            if self._proposal_acceptance_criteria == "Metropolis":
+                self._metropolis_update(beta, block, effective_field)
+            elif self._proposal_acceptance_criteria == "Gibbs":
+                self._gibbs_update(beta, block, effective_field)
+            else:
+                # NOTE: This line should never be reached because acceptance proposal criterion
+                # should've been checked on instantiation
+                raise ValueError(f"Invalid proposal acceptance criterion.")
+
+    @torch.no_grad
+    def sample(self, schedule: torch.Tensor) -> None:
+        """Performs block-spin updates in-place as prescribed by the inverse temperature schedule.
+
+        Args:
+            schedule (torch.Tensor): The inverse temperature schedule.
+        """
         t0 = perf_counter()
         for beta in schedule:
             self.step_(beta)
-        return perf_counter() - t0
+        sampling_time_s = perf_counter() - t0
+        self._metadata["sampling_time_s"] = sampling_time_s
+        return self.x, self.metadata
