@@ -14,21 +14,45 @@
 
 from collections import defaultdict
 from time import perf_counter
-from typing import Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal, Optional
 
 import torch
 from torch import nn
+from torch._prims_common import DeviceLikeType
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 
 
-def rands(shape, generator, device=None):
-    if isinstance(shape, int):
-        shape = (shape,)
-    return bit2spin_soft(torch.randint(0, 2, shape, device=device, generator=generator))
+def rands(size, *, generator: Optional[torch.Generator] = None,
+          device: Optional[Optional[DeviceLikeType]] = None) -> torch.Tensor:
+    """Returns a tensor of random spin values (+/-1) sampled with equal probability.
+
+    Args:
+        size (tuple[int, ...]): Size of random spin tensor.
+        generator (Optional[Generator], optional): A pseudorandom number generator for sampling. Defaults to None.
+        device (Optional[Optional[DeviceLikeType]], optional): The desired device of returned tensor. Defaults to None.
+
+    Returns:
+        torch.Tensor: A tensor of spins.
+    """
+    torch.randn
+    if isinstance(size, int):
+        size = (size,)
+    return bit2spin_soft(torch.randint(0, 2, size, device=device, generator=generator))
 
 
-def bit2spin_soft(b):
+def bit2spin_soft(b) -> torch.Tensor:
+    """Maps input `b` to `2b-1`.
+
+    Args:
+        b (torch.Tensor): Input tensor of values in `[0, 1]`.
+
+    Raises:
+        ValueError: If not all ``b`` values are in `[0, 1]`.
+
+    Returns:
+        torch.Tensor: A tensor with values `2b-1`.
+    """
     if not ((b >= 0) & (b <= 1)).all():
         raise ValueError(f"Not all inputs are in [0, 1]: {b}")
     return b * 2.0 - 1.0
