@@ -20,6 +20,7 @@ from torch import nn
 
 from dwave.plugins.torch.functional import bit2spin_soft
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
+from dwave.plugins.torch.tensor import rands
 
 
 class BlockSpinSampler(nn.Module):
@@ -69,16 +70,10 @@ class BlockSpinSampler(nn.Module):
             self.rng = torch.Generator()
             self.rng.manual_seed(seed)
         self.x = nn.Parameter(
-            rands((num_chains, grbm.n_nodes),
-                  generator=self.rng),
-            requires_grad=False)
+            rands((num_chains, grbm.n_nodes), generator=self.rng).float(),
+            requires_grad=False
+        )
         self.zeros = nn.Parameter(torch.zeros((num_chains, 1)), requires_grad=False)
-        self._metadata = dict()
-
-    @property
-    def metadata(self) -> dict:
-        """Metadata to be updated by `BlockSpinSampler.sample`"""
-        return self._metadata.copy()
 
     def _valid_crayon(self) -> bool:
         """Determines whether `crayon` is a valid colouring of `grbm`.

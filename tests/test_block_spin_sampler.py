@@ -39,28 +39,6 @@ class TestBlockSpinSampler(unittest.TestCase):
                               (GRBM_BIPARTITE, CRAYON_BIPARTITE),
                               (GRBM_SINGLE, CRAYON_SINGLE)]
 
-    def test_sample_metadata(self):
-        # Create a triangle graph with an additional dangling vertex
-        #       a
-        #     / | \
-        #    b--c  d
-        self.nodes = list("abcd")
-        self.edges = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"]]
-        grbm = GRBM(self.nodes, self.edges)
-
-        def crayon(v):
-            if v == "a":
-                return 0
-            if v == "b":
-                return 1
-            if v == "c":
-                return 2
-            if v == "d":
-                return 1
-        bss = BlockSpinSampler(grbm, crayon, 2, seed=2)
-        bss.sample([0, 1, 2])
-        self.assertIn("sampling_time_s", bss.metadata)
-
     @parameterized.expand(GRBM_CRAYON_TEST_CASES)
     def test_sample(self, grbm, crayon):
         for pac in "Metropolis", "Gibbs":

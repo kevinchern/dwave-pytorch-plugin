@@ -35,4 +35,4 @@ def rands(size: _size, **kwargs) -> torch.Tensor:
         raise ValueError("Invalid keyword argument `low`.")
     if "high" in kwargs:
         raise ValueError("Invalid keyword argument `high`.")
-    return bit2spin_soft(torch.randint(0, 2, size,))
+    return bit2spin_soft(torch.randint(0, 2, size, **kwargs))
