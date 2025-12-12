@@ -13,49 +13,13 @@
 # limitations under the License.
 
 from collections import defaultdict
-from time import perf_counter
-from typing import TYPE_CHECKING, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Callable, Literal
 
 import torch
 from torch import nn
-from torch._prims_common import DeviceLikeType
 
+from dwave.plugins.torch.functional import bit2spin_soft
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
-
-
-def rands(size, *, generator: Optional[torch.Generator] = None,
-          device: Optional[Optional[DeviceLikeType]] = None) -> torch.Tensor:
-    """Returns a tensor of random spin values (+/-1) sampled with equal probability.
-
-    Args:
-        size (tuple[int, ...]): Size of random spin tensor.
-        generator (Optional[Generator], optional): A pseudorandom number generator for sampling. Defaults to None.
-        device (Optional[Optional[DeviceLikeType]], optional): The desired device of returned tensor. Defaults to None.
-
-    Returns:
-        torch.Tensor: A tensor of spins.
-    """
-    torch.randn
-    if isinstance(size, int):
-        size = (size,)
-    return bit2spin_soft(torch.randint(0, 2, size, device=device, generator=generator))
-
-
-def bit2spin_soft(b) -> torch.Tensor:
-    """Maps input `b` to `2b-1`.
-
-    Args:
-        b (torch.Tensor): Input tensor of values in `[0, 1]`.
-
-    Raises:
-        ValueError: If not all ``b`` values are in `[0, 1]`.
-
-    Returns:
-        torch.Tensor: A tensor with values `2b-1`.
-    """
-    if not ((b >= 0) & (b <= 1)).all():
-        raise ValueError(f"Not all inputs are in [0, 1]: {b}")
-    return b * 2.0 - 1.0
 
 
 class BlockSpinSampler(nn.Module):
@@ -78,16 +42,16 @@ class BlockSpinSampler(nn.Module):
         grbm (GRBM): The Graph-Restricted Boltzmann Machine to sample from.
         crayon (Callable): A colouring function; a function that maps a single node of the `grbm` to
             its colour.
-        num_reads (int): Sample size.
+        num_chains (int): Number of Markov chains to run in parallel.
         proposal_acceptance_criteria (Literal["Gibbs", "Metropolis"]): The proposal acceptance
             criterion used to accept or reject states in the Markov chain. Defaults to "Gibbs".
         seed (Optional[int]): Random seed. Defaults to None.
     """
 
-    def __init__(self, grbm: GRBM, crayon: Callable, num_reads: int,
+    def __init__(self, grbm: GRBM, crayon: Callable, num_chains: int,
                  proposal_acceptance_criteria: Literal["Gibbs", "Metropolis"] = "Gibbs", seed=None):
         super().__init__()
-        if num_reads < 1 or not isinstance(num_reads, int):
+        if num_chains < 1 or not isinstance(num_chains, int):
             raise ValueError("Number of reads should be a positive integer.")
         self._proposal_acceptance_criteria = proposal_acceptance_criteria.title()
         if self._proposal_acceptance_criteria not in {"Gibbs", "Metropolis"}:
@@ -105,10 +69,10 @@ class BlockSpinSampler(nn.Module):
             self.rng = torch.Generator()
             self.rng.manual_seed(seed)
         self.x = nn.Parameter(
-            rands((num_reads, grbm.n_nodes),
+            rands((num_chains, grbm.n_nodes),
                   generator=self.rng),
             requires_grad=False)
-        self.zeros = nn.Parameter(torch.zeros((num_reads, 1)), requires_grad=False)
+        self.zeros = nn.Parameter(torch.zeros((num_chains, 1)), requires_grad=False)
         self._metadata = dict()
 
     @property
@@ -255,15 +219,12 @@ class BlockSpinSampler(nn.Module):
                 raise ValueError(f"Invalid proposal acceptance criterion.")
 
     @torch.no_grad
-    def sample(self, schedule: torch.Tensor) -> None:
+    def sample(self, schedule: torch.Tensor) -> torch.Tensor:
         """Performs block-spin updates in-place as prescribed by the inverse temperature schedule.
 
         Args:
             schedule (torch.Tensor): The inverse temperature schedule.
         """
-        t0 = perf_counter()
         for beta in schedule:
             self.step_(beta)
-        sampling_time_s = perf_counter() - t0
-        self._metadata["sampling_time_s"] = sampling_time_s
-        return self.x, self.metadata
+        return self.x
