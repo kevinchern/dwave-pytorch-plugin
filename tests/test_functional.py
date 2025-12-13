@@ -17,7 +17,7 @@ import unittest
 import torch
 from parameterized import parameterized
 
-from dwave.plugins.torch.functional import bit2spin_soft, spin2bit_soft
+from dwave.plugins.torch.nn.functional import bit2spin_soft, spin2bit_soft
 
 
 class TestFunctional(unittest.TestCase):

@@ -14,7 +14,7 @@
 import torch
 from torch.types import _size
 
-from dwave.plugins.torch.functional import bit2spin_soft
+__all__ = ["rands"]
 
 
 def rands(size: _size, **kwargs) -> torch.Tensor:
@@ -35,4 +35,4 @@ def rands(size: _size, **kwargs) -> torch.Tensor:
         raise ValueError("Invalid keyword argument `low`.")
     if "high" in kwargs:
         raise ValueError("Invalid keyword argument `high`.")
-    return bit2spin_soft(torch.randint(0, 2, size, **kwargs))
+    return 2*torch.randint(0, 2, size, **kwargs)-1

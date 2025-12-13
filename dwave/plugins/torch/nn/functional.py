@@ -14,6 +14,8 @@
 
 import torch
 
+__all__ = ["bit2spin_soft", "spin2bit_soft"]
+
 
 def bit2spin_soft(b: torch.Tensor) -> torch.Tensor:
     """Maps input `b` to `2b-1`.

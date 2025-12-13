@@ -18,9 +18,11 @@ from typing import TYPE_CHECKING, Callable, Literal
 import torch
 from torch import nn
 
-from dwave.plugins.torch.functional import bit2spin_soft
+from dwave.plugins.torch.nn.functional import bit2spin_soft
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.tensor import rands
+
+__all__ = ["BlockSpinSampler"]
 
 
 class BlockSpinSampler(nn.Module):
