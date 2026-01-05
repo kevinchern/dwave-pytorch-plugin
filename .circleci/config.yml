@@ -2,7 +2,7 @@ version: 2.1
 
 orbs:
   ocean: dwave/ocean@1
-  windows: circleci/windows@5.0
+  windows: circleci/windows@5.1  # latest as of Jan 2026
 
 environment:
   PIP_PROGRESS_BAR: 'off'
@@ -37,7 +37,7 @@ jobs:
 
     executor:
       name: ocean/macos
-      xcode: "16.4.0"
+      xcode: "26.2.0"  # latest as of Jan 2026
 
     steps:
       - checkout
