@@ -1,3 +1,7 @@
+# skip numpy 2.4.0 due to a bug fixed in numpy#30500
+# TODO: remove the constraint once numpy 2.4.0 gets yanked
+numpy~=2.0,!=2.4.0
+
 torch==2.9.1
 dimod==0.12.18
 dwave-system==1.28.0
