@@ -46,7 +46,7 @@ class BlockSampler:
 
     Args:
         grbm (GRBM): The Graph-Restricted Boltzmann Machine to sample from.
-        crayon (Callable[Hashable, Hashable]): A colouring function that maps a single
+        colouring (Callable[Hashable, Hashable]): A colouring function that maps a single
             node of the ``grbm`` to its colour.
         num_chains (int): Number of Markov chains to run in parallel.
         initial_states (torch.Tensor | None): A tensor of +/-1 values of shape
@@ -63,7 +63,7 @@ class BlockSampler:
             "Gibbs" or "Metropolis".
     """
 
-    def __init__(self, grbm: GRBM, crayon: Callable[[Hashable], Hashable], num_chains: int,
+    def __init__(self, grbm: GRBM, colouring: Callable[[Hashable], Hashable], num_chains: int,
                  schedule: Iterable[float],
                  proposal_acceptance_criteria: Literal["Gibbs", "Metropolis"] = "Gibbs",
                  initial_states: torch.Tensor | None = None,
@@ -80,10 +80,10 @@ class BlockSampler:
             )
 
         self._grbm: GRBM = grbm
-        self._crayon: Callable[[Hashable], Hashable] = crayon
-        if not self._valid_crayon():
+        self._colouring: Callable[[Hashable], Hashable] = colouring
+        if not self._valid_colouring():
             raise ValueError(
-                "crayon is not a valid colouring of grbm. "
+                "`colouring` is not a valid colouring of grbm. "
                 + "At least one edge has vertices of the same colour."
             )
 
@@ -165,14 +165,14 @@ class BlockSampler:
 
         return initial_states
 
-    def _valid_crayon(self) -> bool:
-        """Determines whether ``crayon`` is a valid colouring of the graph-restricted Boltzmann machine.
+    def _valid_colouring(self) -> bool:
+        """Determines whether ``colouring`` is a valid colouring of the graph-restricted Boltzmann machine.
 
         Returns:
             bool: True if the colouring is valid and False otherwise.
         """
         for u, v in self._grbm.edges:
-            if self._crayon(u) == self._crayon(v):
+            if self._colouring(u) == self._colouring(v):
                 return False
         return True
 
@@ -185,7 +185,7 @@ class BlockSampler:
         partition = defaultdict(list)
         for node in self._grbm.nodes:
             idx = self._grbm.node_to_idx[node]
-            c = self._crayon(node)
+            c = self._colouring(node)
             partition[c].append(idx)
         partition = nn.ParameterList([
             nn.Parameter(torch.tensor(partition[k], requires_grad=False), requires_grad=False)
