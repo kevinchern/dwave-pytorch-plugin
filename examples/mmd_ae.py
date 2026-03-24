@@ -298,6 +298,14 @@ def get_qpu_model_grbm(solver, device):
     model = Autoencoder((1, 28, 28), grbm.n_nodes).to(device)
     return qpu, model, grbm
 
+def compute_pkl(grbm: GRBM, logits_data: torch.Tensor, spins_data: torch.Tensor,
+                spins_model: torch.Tensor):
+    probabilities = torch.sigmoid(logits_data)
+    entropy = torch.nn.functional.binary_cross_entropy_with_logits(logits_data, probabilities)
+    # bce = p(log(q)) + (1-p) log(1-q)
+    cross_entropy = grbm.quasi_objective(spins_data, spins_model)
+    pkl = cross_entropy - entropy
+    return pkl
 
 def run(*, title, loss_fn, solver, stop_grbm, num_reads,
         annealing_time, alpha, num_steps, args):
@@ -327,14 +335,7 @@ def run(*, title, loss_fn, solver, stop_grbm, num_reads,
 
     compute_mmd = MMDLoss(RadialBasisFunction()).to(device)
 
-    def compute_pkl(grbm: GRBM, logits_data: torch.Tensor, spins_data: torch.Tensor,
-                    spins_model: torch.Tensor):
-        probabilities = torch.sigmoid(logits_data)
-        entropy = torch.nn.functional.binary_cross_entropy_with_logits(logits_data, probabilities)
-        # bce = p(log(q)) + (1-p) log(1-q)
-        cross_entropy = grbm.quasi_objective(spins_data, spins_model)
-        pkl = cross_entropy - entropy
-        return pkl
+
 
     for step, (x, _) in enumerate(cycle(train_loader), 1):
         torch.cuda.empty_cache()
@@ -380,18 +381,17 @@ def run(*, title, loss_fn, solver, stop_grbm, num_reads,
             torch.save(grbm.state_dict(), "grbm.pt")
             torch.save(model.state_dict(), "model.pt")
 
-
 if __name__ == "__main__":
     from argparse import ArgumentParser
     parser = ArgumentParser()
     parser.add_argument("--title", type=str, default="NoExperimentName")
     parser.add_argument("--annealing_time", type=float, default=0.5)
     parser.add_argument("--alpha", type=float, default=1.0)
-    parser.add_argument("--num_steps", type=int, default=1_000)
+    parser.add_argument("--num_steps", type=int, default=1000)
     parser.add_argument("--num_reads", type=int, default=1000)
     parser.add_argument("--stop_grbm", type=int, default=500)
     parser.add_argument("--loss_fn", type=str, default="mmd")
-    parser.add_argument("--solver", type=str, default="Advantage2_system1.11")
+    parser.add_argument("--solver", type=str, default="Advantage2_system1.13")
     args_ = parser.parse_args()
 
     args_dict = vars(args_)
