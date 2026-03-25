@@ -1,10 +1,7 @@
 from itertools import cycle
-from math import prod
-from typing import Any
 from collections.abc import Callable
-
 import dwave_networkx as dnx
-import matplotlib.pyplot as plt
+import networkx as nx
 import numpy as np
 import torch
 from torch import nn
@@ -27,12 +24,12 @@ class RadialBasisFunction(nn.Module):
             mul_factor: float = 2.0,
             bandwidth: torch.Tensor | float | None = None,
     ) -> None:
-        """TODO.
+        """Initializes the Radial Basis Function (RBF) kernel module.
 
         Args:
-            n_kernels: TODO.
-            mul_factor: TODO.
-            bandwidth: TODO.
+            n_kernels: The number of RBF kernels to use. Each kernel will have a different bandwidth, determined by the mul_factor.
+            mul_factor: The multiplicative factor that determines the bandwidth of each RBF kernel. The bandwidths will be spaced geometrically, with the middle kernel having a bandwidth of `bandwidth` (if provided) or the average pairwise distance (if `bandwidth` is None).
+            bandwidth: The bandwidth for the RBF kernels. If None, the bandwidth will be set to the average pairwise distance between samples in the input tensor during the forward pass.
         """
         super().__init__()
         bandwidth_multipliers = mul_factor ** (torch.arange(n_kernels) - n_kernels // 2)
@@ -40,13 +37,13 @@ class RadialBasisFunction(nn.Module):
         self.bandwidth = bandwidth
 
     def get_bandwidth(self, l2_dist: torch.Tensor) -> torch.Tensor | float:
-        """TODO.
+        """Computes the bandwidth for the RBF kernels based on the input pairwise L2 distances.
 
         Args:
-            l2_dist: TODO.
+            l2_dist: A tensor of shape (n, n) containing the pairwise L2 distances between samples in the input tensor.
 
         Returns:
-            TODO.
+            A tensor or float representing the bandwidth for the RBF kernels.
         """
         if self.bandwidth is None:
             n = l2_dist.shape[0]
@@ -56,13 +53,15 @@ class RadialBasisFunction(nn.Module):
         return self.bandwidth
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        """TODO.
+        """Forward pass through the RBF kernel module.
+
+        Computes the pairwise RBF kernel values for the input tensor X.
 
         Args:
-            X: TODO.
+            X: A tensor of shape (n, d) representing n samples with d features.
 
         Returns:
-            TODO.
+            A tensor of shape (n, n) containing the pairwise RBF kernel values.
         """
         l2 = torch.cdist(X, X) ** 2
         bandwidth = self.get_bandwidth(l2.detach()) * self.bandwidth_multipliers
@@ -72,23 +71,25 @@ class RadialBasisFunction(nn.Module):
 
 class MMDLoss(nn.Module):
     def __init__(self, kernel: nn.Module) -> None:
-        """TODO.
+        """Initialize the MMD loss module.
 
         Args:
-            kernel: TODO.
+            kernel: A kernel function to compute the MMD.
         """
         super().__init__()
         self.kernel = kernel
 
     def forward(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        """TODO.
+        """Computes the maximum mean discrepancy (MMD) between two sets of
+        samples X and Y using the specified kernel.
 
         Args:
-            X: TODO.
-            Y: TODO.
+            X: A tensor of shape (n, d) representing the first set of samples.
+            Y: A tensor of shape (m, d) representing the second set of samples.
 
         Returns:
-            TODO.
+            A scalar tensor representing the maximum mean discrepancy between
+            X and Y.
         """
         K = self.kernel(torch.vstack([X.flatten(1), Y.flatten(1)]))
         n = X.shape[0]
@@ -102,37 +103,36 @@ class MMDLoss(nn.Module):
 
 class SkipLinear(nn.Module):
     def __init__(self, din: int, dout: int) -> None:
-        """TODO.
+        """Initialize a skip connection for a linear layer.
 
         Args:
-            din: TODO.
-            dout: TODO.
+            din: The input dimension.
+            dout: The output dimension.
         """
         super().__init__()
         self.linear = nn.Linear(din, dout, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """TODO.
+        """Forward pass through the layer.
 
         Args:
-            x: TODO.
+            x: A tensor of shape (batch_size, din) representing the input.
 
         Returns:
-            TODO.
+            A tensor of shape (batch_size, dout) representing the output.
         """
         return self.linear(x)
 
-
 class LinearBlock(nn.Module):
     def __init__(self, din: int, dout: int, sn: bool, p: float, bias: bool) -> None:
-        """TODO.
+        """Initialize a linear block with skip connections.
 
         Args:
-            din: TODO.
-            dout: TODO.
-            sn: TODO.
-            p: TODO.
-            bias: TODO.
+            din: The input dimension.
+            dout: The output dimension.
+            sn: Whether to use spectral normalization.
+            p: The dropout probability.
+            bias: Whether to include a bias term in the linear layers.
         """
         super().__init__()
         self.skip = SkipLinear(din, dout)
@@ -148,24 +148,24 @@ class LinearBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """TODO.
+        """Forward pass through the linear block with skip connections.
 
         Args:
-            x: TODO.
+            x: Input tensor of shape (batch_size, din).
 
         Returns:
-            TODO.
+            Output tensor of shape (batch_size, dout).
         """
         return self.block(x) + self.skip(x)
 
 
 class ConvolutionBlock(nn.Module):
-    def __init__(self, input_shape: tuple[int, int, int], cout: int):
-        """TODO.
+    def __init__(self, input_shape: tuple[int, int, int], cout: int) -> None:
+        """Initialize a convolutional block with skip connections.
 
         Args:
-            input_shape: TODO.
-            cout: TODO.
+            input_shape: Shape of the input tensor (channels, height, width).
+            cout: Number of output channels.
         """
         super().__init__()
         input_shape = tuple(input_shape)
@@ -187,49 +187,47 @@ class ConvolutionBlock(nn.Module):
         self.skip = SkipConv2d(cin, cout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """TODO.
+        """Forward pass through the convolutional block with skip connections.
 
         Args:
-            x: TODO.
+            x: Input tensor of shape (batch_size, cin, height, width).
 
         Returns:
-            TODO.
+            Output tensor of shape (batch_size, cout, height, width).
         """
         return self.block(x) + self.skip(x)
 
 
 class SkipConv2d(nn.Module):
-    def __init__(self, cin: int, cout: int):
-        """TODO.
+    def __init__(self, cin: int, cout: int) -> None:
+        """Initialize a skip connection with a 1x1 convolution.
 
         Args:
-            cin: TODO.
-            cout: TODO.
+            cin: Number of input channels.
+            cout: Number of output channels.
         """
         super().__init__()
         self.skip = nn.Conv2d(cin, cout, 1, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """TODO.
+        """Forward pass through the skip connection.
 
         Args:
-            x: TODO.
+            x: A tensor of shape (batch_size, cin, height, width) representing the input.
 
         Returns:
-            TODO.
+            A tensor of shape (batch_size, cout, height, width) representing the output.
         """
         return self.skip(x)
 
 
 class ConvolutionNetwork(nn.Module):
-    def __init__(
-            self, channels: list[int], input_shape: tuple[int, int, int]
-    ):
-        """TODO.
+    def __init__(self, channels: list[int], input_shape: tuple[int, int, int]) -> None:
+        """Initialize a convolutional network with skip connections.
 
         Args:
-            channels: TODO.
-            input_shape: TODO.
+            channels: List of output channels for each convolutional block.
+            input_shape: Shape of the input tensor (channels, height, width).
         """
         super().__init__()
         channels = channels.copy()
@@ -251,13 +249,13 @@ class ConvolutionNetwork(nn.Module):
         self.skip = SkipConv2d(cx, cout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """TODO.
+        """Forward pass through the convolutional network with skip connections.
 
         Args:
-            x: TODO.
+            x: Input tensor of shape (batch_size, cin, height, width).
 
         Returns:
-            TODO.
+            Output tensor of shape (batch_size, cout, height, width).
         """
         x = self.blocks(x) + self.skip(x)
         return x
@@ -273,24 +271,24 @@ class FullyConnectedNetwork(nn.Module):
             p: float,
             bias: bool = True,
     ) -> None:
-        """TODO.
+        """Fully connected network with skip connections.
 
         Args:
-            din: TODO.
-            dout: TODO.
-            depth: TODO.
-            sn: TODO.
-            p: TODO.
-            bias: TODO.
+            din: Input dimension.
+            dout: Output dimension.
+            depth: Number of layers.
+            sn: Whether to use spectral normalization.
+            p: Dropout probability.
+            bias: Whether to include a bias term.
         """
         super().__init__()
         if depth == 1:
             raise ValueError("Depth must be at least 2.")
         self.skip = SkipLinear(din, dout)
         big_d = max(din, dout)
-        dims = [big_d]*(depth-1) + [dout]
+        dims = [big_d] * (depth - 1) + [dout]
         self.blocks = nn.Sequential()
-        for d_in, d_out in zip([din]+dims[:-1], dims):
+        for d_in, d_out in zip([din] + dims[:-1], dims):
             self.blocks.append(LinearBlock(d_in, d_out, sn, p, bias))
             self.blocks.append(nn.Dropout(p))
             self.blocks.append(nn.ReLU())
@@ -299,28 +297,28 @@ class FullyConnectedNetwork(nn.Module):
         self.blocks.pop(-1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """TODO.
+        """Forward pass through fully connected network with skip connections.
 
         Args:
-            x: TODO.
+            x: Input tensor of shape (batch_size, din).
 
         Returns:
-            TODO.
+            Output tensor of shape (batch_size, dout).
         """
         return self.blocks(x) + self.skip(x)
 
 
 def straight_through_bitrounding(fuzzy_bits: torch.Tensor) -> torch.Tensor:
-    """TODO.
+    """Applies straight-through estimation for bit rounding.
 
     Args:
-        fuzzy_bits: TODO.
+        fuzzy_bits: Tensor with values in [0, 1].
 
     Returns:
-        TODO.
+        Tensor with values rounded to 0 or 1.
 
     Raises:
-        ValueError: TODO.
+        ValueError: If any value in fuzzy_bits is outside the range [0, 1].
     """
     if not ((fuzzy_bits >= 0) & (fuzzy_bits <= 1)).all():
         raise ValueError(f"Inputs should be in [0, 1]: {fuzzy_bits}")
@@ -330,19 +328,22 @@ def straight_through_bitrounding(fuzzy_bits: torch.Tensor) -> torch.Tensor:
 
 class StraightThroughTanh(nn.Module):
     def __init__(self) -> None:
-        """TODO.
+        """Initialize the straight-through tanh binarization module.
+
+        The forward pass applies tanh, maps spins to bits, rounds with a
+        straight-through estimator, and maps the result back to spins.
         """
         super().__init__()
         self.hth = nn.Tanh()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """TODO.
+        """Forward pass through the binarizing layer.
 
         Args:
-            x: TODO.
+            x: Real-valued tensor.
 
         Returns:
-            TODO.
+            Binarized tensor with values in {-1, 1}.
         """
         fuzzy_spins = self.hth(x)
         fuzzy_bits = spin2bit_soft(fuzzy_spins)
@@ -351,16 +352,27 @@ class StraightThroughTanh(nn.Module):
         return spins
 
 
-def zephyr_subgraph(G: Any, zephyr_m: int) -> Any:
-    """TODO.
+def zephyr_subgraph(G: nx.Graph, zephyr_m: int) -> nx.Graph:
+    """Create a Zephyr subgraph of reduced m parameter.
+
+    The first zephyr sublattice is used. The subgraph is
+    subject to the same yield as the source graph.
+    More sophisticated tools that map to increase the yield are in
+    development.
 
     Args:
-        G: TODO.
-        zephyr_m: TODO.
+        G: A Zephyr graph.
+        zephyr_m: The shape parameter of a zephyr graph, 
+           also called number of rows. A subgraph of this 
+           scale is found within G, and returned.
 
     Returns:
-        TODO.
+        The subgraph as a network Graph object.
     """
+    assert zephyr_m <= G.graph['rows'], (
+        "zephyr_m must be less than or equal to the number of rows in G"
+    )
+
     Z_m = dnx.zephyr_graph(zephyr_m)
     zsm = next(dnx.zephyr_sublattice_mappings(Z_m, G))
     S = G.subgraph([zsm(z) for z in Z_m])
@@ -375,70 +387,78 @@ def zephyr_subgraph(G: Any, zephyr_m: int) -> Any:
     return S
 
 
-def subtile(G: Any, num_tiles: int) -> Any:
-    """TODO.
+def zephyr_subgraph_t(G: nx.Graph, zephyr_t: int) -> nx.Graph:
+    """Create a Zephyr subgraph with a reduced tile parameter.
+
+    The subgraph is subject to the same yield as the source graph.
+    More sophisticated tools that map to increase the yield are in
+    development.
 
     Args:
-        G: TODO.
-        num_tiles: TODO.
+        G: A Zephyr graph.
+        zephyr_t: The tile parameter of a zephyr graph.
 
     Returns:
-        TODO.
+        A subgraph of the original Zephyr graph containing the specified number of tiles.
     """
-    zc = dnx.zephyr_coordinates(G.graph['rows'], 4)
-    return G.subgraph([g for g in G if zc.linear_to_zephyr(g)[2] < num_tiles])
+    assert zephyr_t <= G.graph['tile'], (
+        "zephyr_t must be less than or equal to the tile parameter of G"
+    )
+
+    zc = dnx.zephyr_coordinates(m=G.graph['rows'], t=G.graph['tile'])
+    return G.subgraph([g for g in G if zc.linear_to_zephyr(g)[2] < zephyr_t])
 
 
 @torch.compile
 class Autoencoder(nn.Module):
 
     def __init__(self, shape: tuple[int, int, int], n_bits: int) -> None:
-        """TODO.
+        """Initialize the autoencoder model.
 
         Args:
-            shape: TODO.
-            n_bits: TODO.
+            shape: shape of the input images, as (channels, height, width).
+            n_bits: number of bits for the latent representation.
         """
         super().__init__()
-        dim = prod(shape)
-        c, h, w = shape
+        _, h, w = shape
         chidden = 1
         depth_fcnn = 3
         depth_cnn = 3
         dropout = 0.0
         self.encoder = nn.Sequential(
-            ConvolutionNetwork([chidden]*depth_cnn, shape),
+            ConvolutionNetwork([chidden] * depth_cnn, shape),
             nn.Flatten(),
-            FullyConnectedNetwork(chidden*h*w, n_bits, depth_fcnn, False, dropout),
+            FullyConnectedNetwork(chidden * h * w, n_bits, depth_fcnn, False, dropout),
         )
         self.binarizer = StraightThroughTanh()
         self.decoder = nn.Sequential(
-            FullyConnectedNetwork(n_bits, chidden*h*w, depth_fcnn, False, dropout),
+            FullyConnectedNetwork(n_bits, chidden * h * w, depth_fcnn, False, dropout),
             nn.Unflatten(1, (chidden, h, w)),
-            ConvolutionNetwork([chidden]*(depth_cnn-1) + [1], (chidden, h, w)),
+            ConvolutionNetwork([chidden] * (depth_cnn - 1) + [1], (chidden, h, w)),
             # nn.Sigmoid()
         )
 
     def decode(self, q: torch.Tensor) -> torch.Tensor:
-        """TODO.
+        """Decode a latent representation back to the input space.
 
         Args:
-            q: TODO.
+            q: latent representation.
 
         Returns:
-            TODO.
+            Reconstructed input from the latent representation.
         """
         xhat = self.decoder(q)
         return xhat
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """TODO.
+        """Forward pass through the autoencoder.
 
         Args:
-            x: TODO.
+            x: Input tensor.
 
         Returns:
-            TODO.
+            A tuple containing the latent representation, the binarized latent
+            representation, and the reconstructed input.
         """
         z = self.encoder(x)
         spins = self.binarizer(z)
@@ -454,18 +474,18 @@ def collect_stats(
         compute_mmd: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
         compute_pkl: Callable[[GRBM, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
 ) -> dict[str, torch.Tensor]:
-    """TODO.
+    """Collects statistics for the autoencoder and GRBM.
 
     Args:
-        model: TODO.
-        grbm: TODO.
-        x: TODO.
-        q: TODO.
-        compute_mmd: TODO.
-        compute_pkl: TODO.
+        model: The Autoencoder.
+        grbm: A graph restricted Boltzmann machine.
+        x: Input tensor.
+        q: Latent representation tensor.
+        compute_mmd: Function to compute the maximum mean discrepancy between two tensors.
+        compute_pkl: Function to compute the KL divergence between the GRBM and the latent representation.
 
     Returns:
-        TODO.
+        A dictionary containing the computed statistics.
     """
     z, s, xhat = model(x)
     stats = {
@@ -479,14 +499,14 @@ def collect_stats(
 
 
 def get_dataset(bs: int, data_dir: str = "/tmp/") -> tuple[DataLoader, DataLoader]:
-    """TODO.
+    """Loads the MNIST dataset and returns data loaders for training and testing.
 
     Args:
-        bs: TODO.
-        data_dir: TODO.
+        bs: Batch size.
+        data_dir: Directory to download the dataset.
 
     Returns:
-        TODO.
+        A tuple containing the training and testing data loaders.
     """
     transforms = Compose([ToImage(), ToDtype(torch.float32, scale=True)])
     train_kwargs = dict(root=data_dir, download=True)
@@ -499,14 +519,14 @@ def get_dataset(bs: int, data_dir: str = "/tmp/") -> tuple[DataLoader, DataLoade
 
 
 def save_viz(step: int, grbm: GRBM, model: Autoencoder, x: torch.Tensor, q: torch.Tensor) -> None:
-    """TODO.
+    """Saves visualizations of the input, generated, and reconstructed images.
 
     Args:
-        step: TODO.
-        grbm: TODO.
-        model: TODO.
-        x: TODO.
-        q: TODO.
+        step: Current training step.
+        grbm: A graph restricted Boltzmann machine.
+        model: The Autoencoder.
+        x: Input tensor.
+        q: Latent representation tensor.
     """
     bs = min(x.shape[0], 500)
     rows = int(bs**0.5)
@@ -514,7 +534,7 @@ def save_viz(step: int, grbm: GRBM, model: Autoencoder, x: torch.Tensor, q: torc
         # Save images
         xgen = model.decode(q[:bs]).sigmoid()
         xuni = model.decode(bit2spin_soft(torch.randint_like(q[:bs], 2))).sigmoid()
-        z, s, xhat = model(x[:bs])
+        _, _, xhat = model(x[:bs])
         xhat = xhat.sigmoid()
         xgrid = make_grid(x[:bs], rows, pad_value=1)
         xgengrid = make_grid(xgen, rows, pad_value=1)
@@ -526,21 +546,28 @@ def save_viz(step: int, grbm: GRBM, model: Autoencoder, x: torch.Tensor, q: torc
         save_image(xhatgrid, "xhat.png")
 
 
-def get_qpu_model_grbm(solver: str, device: str) -> tuple[DWaveSampler, Autoencoder, GRBM]:
-    """TODO.
+def get_qpu_model_grbm(
+    solver: str,
+    device: str,
+    m: int = 5,
+    t: int = 3,
+) -> tuple[DWaveSampler, Autoencoder, GRBM]:
+    """Sets up the QPU, GRBM, and Autoencoder model.
 
     Args:
-        solver: TODO.
-        device: TODO.
+        solver: The D-Wave solver name.
+        device: The device to run the model on, typically "cuda" or "cpu".
+        m: Shape parameter for the Zephyr subgraph.
+        t: Tile parameter for the Zephyr subgraph.
 
     Returns:
-        TODO.
+        A tuple containing the QPU sampler, Autoencoder model, and GRBM.
     """
     # Set up QPU and QPU parameters
     qpu = DWaveSampler(solver=solver)
     # Instantiate model
     # G = zephyr_subgraph(qpu.to_networkx_graph(), 4)
-    G = subtile(zephyr_subgraph(qpu.to_networkx_graph(), 5), 3)
+    G = zephyr_subgraph_t(zephyr_subgraph(qpu.to_networkx_graph(), m), t)
     nodes = list(G.nodes)
     edges = list(G.edges)
     grbm = GRBM(nodes, edges).to(device)
@@ -549,22 +576,23 @@ def get_qpu_model_grbm(solver: str, device: str) -> tuple[DWaveSampler, Autoenco
     model = Autoencoder((1, 28, 28), grbm.n_nodes).to(device)
     return qpu, model, grbm
 
+
 def compute_pkl(
     grbm: GRBM,
     logits_data: torch.Tensor,
     spins_data: torch.Tensor,
     spins_model: torch.Tensor,
 ) -> torch.Tensor:
-    """TODO.
+    """Computes the pseudo-Kullback-Leibler divergence.
 
     Args:
-        grbm: TODO.
-        logits_data: TODO.
-        spins_data: TODO.
-        spins_model: TODO.
+        grbm: A graph restricted Boltzmann machine.
+        logits_data: The pre-sigmoid outputs of the autoencoder decoder for the input data.
+        spins_data: The binarized latent representation for the input data.
+        spins_model: The binarized latent representation for the model samples.
 
     Returns:
-        TODO.
+        A scalar tensor representing the pseudo-KL divergence between the GRBM and the latent representation.
     """
     probabilities = torch.sigmoid(logits_data)
     entropy = torch.nn.functional.binary_cross_entropy_with_logits(logits_data, probabilities)
@@ -572,6 +600,7 @@ def compute_pkl(
     cross_entropy = grbm.quasi_objective(spins_data, spins_model)
     pkl = cross_entropy - entropy
     return pkl
+
 
 def run(
     *,
@@ -583,24 +612,27 @@ def run(
     annealing_time: float,
     alpha: float,
     num_steps: int,
-    args: Any,
+    device: str = "cuda",
+    args: dict[str, object],
+    seed: int | None = None,
 ) -> None:
-    """TODO.
+    """Runs the training loop for the Autoencoder and GRBM.
 
     Args:
-        title: TODO.
-        loss_fn: TODO.
-        solver: TODO.
-        stop_grbm: TODO.
-        num_reads: TODO.
-        annealing_time: TODO.
-        alpha: TODO.
-        num_steps: TODO.
-        args: TODO.
+        title: The title for the training run.
+        loss_fn: The loss function to use.
+        solver: The D-Wave solver name.
+        stop_grbm: The step at which to stop training the GRBM.
+        num_reads: The number of reads for the QPU sampler.
+        annealing_time: The annealing time for the QPU sampler.
+        alpha: The learning rate for the GRBM.
+        num_steps: The total number of training steps.
+        device: The device used for training and sampling tensors.
+        args: Additional arguments for the training loop.
+        seed: Optional random seed for parameter initialization.
     """
-    device = "cuda"
     qpu, model, grbm = get_qpu_model_grbm(solver, device)
-    nprng = np.random.default_rng(8257213849)
+    nprng = np.random.default_rng(seed)
     grbm.linear.data[:] = 0.1 * bit2spin_soft(torch.tensor(nprng.binomial(1, 0.5, grbm.n_nodes)))
     grbm.quadratic.data[:] = bit2spin_soft(torch.tensor(nprng.binomial(1, 0.5, grbm.n_edges)))
     sampler = qpu
@@ -624,8 +656,6 @@ def run(
 
     compute_mmd = MMDLoss(RadialBasisFunction()).to(device)
 
-
-
     for step, (x, _) in enumerate(cycle(train_loader), 1):
         torch.cuda.empty_cache()
         if step > num_steps:
@@ -639,11 +669,10 @@ def run(
         # Train autoencoder
         stats = collect_stats(model, grbm, x, q, compute_mmd, compute_pkl)
         opt_model.zero_grad()
-        (stats["bce"] + alpha*stats[loss_fn]).backward()
+        (stats["bce"] + alpha * stats[loss_fn]).backward()
         # alpha ~ 1e-6
         opt_model.step()
 
-        # Train GRBM
         if step < stop_grbm:
             # NOTE: collecting stats again because the autoencoder has been updated.
             stats = collect_stats(model, grbm, x, q, compute_mmd, compute_pkl)
@@ -663,8 +692,7 @@ def run(
             q = grbm.sample(sampler, prefactor=1,
                             linear_range=h_range, quadratic_range=j_range,
                             device=device, sample_params=sample_params)
-            stats = collect_stats(model, grbm, xtest, q, compute_mmd, compute_pkl)
-            save_viz(step, grbm, model, x, q)
+            save_viz(step, grbm, model, xtest, q)
 
             model.train()
             torch.save(grbm.state_dict(), "grbm.pt")
