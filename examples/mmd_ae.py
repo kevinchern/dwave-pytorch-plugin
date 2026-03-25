@@ -19,10 +19,10 @@ from dwave.system import DWaveSampler
 class RadialBasisFunction(nn.Module):
 
     def __init__(
-            self,
-            n_kernels: int = 5,
-            mul_factor: float = 2.0,
-            bandwidth: torch.Tensor | float | None = None,
+    self,
+    n_kernels: int = 5,
+    mul_factor: float = 2.0,
+    bandwidth: torch.Tensor | float | None = None,
     ) -> None:
         """Initializes the Radial Basis Function (RBF) kernel module.
 
@@ -94,8 +94,8 @@ class MMDLoss(nn.Module):
         K = self.kernel(torch.vstack([X.flatten(1), Y.flatten(1)]))
         n = X.shape[0]
         m = Y.shape[0]
-        XX = (K[:n, :n].sum() - K[:n, :n].trace()) / (n*(n-1))
-        YY = (K[n:, n:].sum() - K[n:, n:].trace()) / (m*(m-1))
+        XX = (K[:n, :n].sum() - K[:n, :n].trace()) / (n * (n - 1))
+        YY = (K[n:, n:].sum() - K[n:, n:].trace()) / (m * (m - 1))
         XY = K[:n, n:].mean()
         mmd = XX - 2 * XY + YY
         return mmd
@@ -122,6 +122,7 @@ class SkipLinear(nn.Module):
             A tensor of shape (batch_size, dout) representing the output.
         """
         return self.linear(x)
+
 
 class LinearBlock(nn.Module):
     def __init__(self, din: int, dout: int, sn: bool, p: float, bias: bool) -> None:
@@ -263,13 +264,13 @@ class ConvolutionNetwork(nn.Module):
 
 class FullyConnectedNetwork(nn.Module):
     def __init__(
-            self,
-            din: int,
-            dout: int,
-            depth: int,
-            sn: bool,
-            p: float,
-            bias: bool = True,
+        self,
+        din: int,
+        dout: int,
+        depth: int,
+        sn: bool,
+        p: float,
+        bias: bool = True,
     ) -> None:
         """Fully connected network with skip connections.
 
@@ -362,28 +363,30 @@ def zephyr_subgraph(G: nx.Graph, zephyr_m: int) -> nx.Graph:
 
     Args:
         G: A Zephyr graph.
-        zephyr_m: The shape parameter of a zephyr graph, 
-           also called number of rows. A subgraph of this 
-           scale is found within G, and returned.
+        zephyr_m: The shape parameter of a zephyr graph, also called number
+            of rows. A subgraph of this scale is found within G, and
+            returned.
 
     Returns:
         The subgraph as a network Graph object.
     """
-    assert zephyr_m <= G.graph['rows'], (
+    assert zephyr_m <= G.graph["rows"], (
         "zephyr_m must be less than or equal to the number of rows in G"
     )
 
     Z_m = dnx.zephyr_graph(zephyr_m)
     zsm = next(dnx.zephyr_sublattice_mappings(Z_m, G))
     S = G.subgraph([zsm(z) for z in Z_m])
-    original_m = S.graph['rows']
+    original_m = S.graph["rows"]
     if original_m == zephyr_m:
         return G.copy()
     S.graph = G.graph.copy()
-    S.graph['rows'] = zephyr_m
-    S.graph['columns'] = zephyr_m
-    S.graph['name'] = S.graph['name'].replace(f"({original_m},", "("+str(zephyr_m)+",")
-    S.graph['name'] = S.graph['name'] + "-subgraph of " + G.graph['name']
+    S.graph["rows"] = zephyr_m
+    S.graph["columns"] = zephyr_m
+    S.graph["name"] = S.graph["name"].replace(
+        f"({original_m},", f"({zephyr_m},"
+    )
+    S.graph["name"] = f'{S.graph["name"]}-subgraph of {G.graph["name"]}'
     return S
 
 
@@ -401,11 +404,11 @@ def zephyr_subgraph_t(G: nx.Graph, zephyr_t: int) -> nx.Graph:
     Returns:
         A subgraph of the original Zephyr graph containing the specified number of tiles.
     """
-    assert zephyr_t <= G.graph['tile'], (
+    assert zephyr_t <= G.graph["tile"], (
         "zephyr_t must be less than or equal to the tile parameter of G"
     )
 
-    zc = dnx.zephyr_coordinates(m=G.graph['rows'], t=G.graph['tile'])
+    zc = dnx.zephyr_coordinates(m=G.graph["rows"], t=G.graph["tile"])
     return G.subgraph([g for g in G if zc.linear_to_zephyr(g)[2] < zephyr_t])
 
 
@@ -467,12 +470,12 @@ class Autoencoder(nn.Module):
 
 
 def collect_stats(
-        model: Autoencoder,
-        grbm: GRBM,
-        x: torch.Tensor,
-        q: torch.Tensor,
-        compute_mmd: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        compute_pkl: Callable[[GRBM, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+    model: Autoencoder,
+    grbm: GRBM,
+    x: torch.Tensor,
+    q: torch.Tensor,
+    compute_mmd: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    compute_pkl: Callable[[GRBM, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
 ) -> dict[str, torch.Tensor]:
     """Collects statistics for the autoencoder and GRBM.
 
@@ -518,15 +521,19 @@ def get_dataset(bs: int, data_dir: str = "/tmp/") -> tuple[DataLoader, DataLoade
     return train_loader, test_loader
 
 
-def save_viz(step: int, grbm: GRBM, model: Autoencoder, x: torch.Tensor, q: torch.Tensor) -> None:
+def save_viz(
+    model: Autoencoder,
+    x: torch.Tensor,
+    q: torch.Tensor,
+    title: str = "",
+) -> None:
     """Saves visualizations of the input, generated, and reconstructed images.
 
     Args:
-        step: Current training step.
-        grbm: A graph restricted Boltzmann machine.
         model: The Autoencoder.
         x: Input tensor.
         q: Latent representation tensor.
+        title: Prefix used for generated image files.
     """
     bs = min(x.shape[0], 500)
     rows = int(bs**0.5)
@@ -540,10 +547,10 @@ def save_viz(step: int, grbm: GRBM, model: Autoencoder, x: torch.Tensor, q: torc
         xgengrid = make_grid(xgen, rows, pad_value=1)
         xunigrid = make_grid(xuni, rows, pad_value=1)
         xhatgrid = make_grid(xhat, rows, pad_value=1)
-        save_image(xgrid, "x.png")
-        save_image(xgengrid, "xgen.png")
-        save_image(xunigrid, "xuni.png")
-        save_image(xhatgrid, "xhat.png")
+        save_image(xgrid, f"{title}x.png")
+        save_image(xgengrid, f"{title}xgen.png")
+        save_image(xunigrid, f"{title}xuni.png")
+        save_image(xhatgrid, f"{title}xhat.png")
 
 
 def get_qpu_model_grbm(
@@ -595,7 +602,9 @@ def compute_pkl(
         A scalar tensor representing the pseudo-KL divergence between the GRBM and the latent representation.
     """
     probabilities = torch.sigmoid(logits_data)
-    entropy = torch.nn.functional.binary_cross_entropy_with_logits(logits_data, probabilities)
+    entropy = torch.nn.functional.binary_cross_entropy_with_logits(
+        logits_data, probabilities
+    )
     # bce = p(log(q)) + (1-p) log(1-q)
     cross_entropy = grbm.quasi_objective(spins_data, spins_model)
     pkl = cross_entropy - entropy
@@ -613,7 +622,6 @@ def run(
     alpha: float,
     num_steps: int,
     device: str = "cuda",
-    args: dict[str, object],
     seed: int | None = None,
 ) -> None:
     """Runs the training loop for the Autoencoder and GRBM.
@@ -628,7 +636,6 @@ def run(
         alpha: The learning rate for the GRBM.
         num_steps: The total number of training steps.
         device: The device used for training and sampling tensors.
-        args: Additional arguments for the training loop.
         seed: Optional random seed for parameter initialization.
     """
     qpu, model, grbm = get_qpu_model_grbm(solver, device)
@@ -647,8 +654,12 @@ def run(
     opt_grbm = SGD(grbm.parameters(), lr=1e-3)
     opt_model = AdamW(model.parameters(), lr=1e-3)
 
-    sample_params = dict(num_reads=num_reads, annealing_time=annealing_time,
-                         answer_mode="raw", auto_scale=False)
+    sample_params = dict(
+        num_reads=num_reads,
+        annealing_time=annealing_time,
+        answer_mode="raw",
+        auto_scale=False,
+    )
     h_range, j_range = qpu.properties["h_range"], qpu.properties["j_range"]
 
     # Set up data
@@ -662,9 +673,14 @@ def run(
             break
         # Send data to device
         x = x.to(device).float()
-        q = grbm.sample(sampler, prefactor=1,
-                        linear_range=h_range, quadratic_range=j_range,
-                        device=device, sample_params=sample_params)
+        q = grbm.sample(
+            sampler,
+            prefactor=1,
+            linear_range=h_range,
+            quadratic_range=j_range,
+            device=device,
+            sample_params=sample_params,
+        )
 
         # Train autoencoder
         stats = collect_stats(model, grbm, x, q, compute_mmd, compute_pkl)
@@ -677,40 +693,89 @@ def run(
             # NOTE: collecting stats again because the autoencoder has been updated.
             stats = collect_stats(model, grbm, x, q, compute_mmd, compute_pkl)
             opt_grbm.zero_grad()
-            stats['quasi'].backward()
+            stats["quasi"].backward()
             opt_grbm.step()
 
-        print(title, step, {k: f"{v.item():.4f}"
-                            if isinstance(v, torch.Tensor)
-                            else f"{v:.4f}"
-                            for k, v in stats.items()})
+        print(
+            title,
+            step,
+            {
+                k: f"{v.item():.4f}" if isinstance(v, torch.Tensor) else f"{v:.4f}"
+                for k, v in stats.items()
+            },
+        )
 
         if step % 10 == 0:
             model.eval()
 
             xtest = next(iter(test_loader))[0].to(device)
-            q = grbm.sample(sampler, prefactor=1,
-                            linear_range=h_range, quadratic_range=j_range,
-                            device=device, sample_params=sample_params)
-            save_viz(step, grbm, model, xtest, q)
+            q = grbm.sample(
+                sampler,
+                prefactor=1,
+                linear_range=h_range,
+                quadratic_range=j_range,
+                device=device,
+                sample_params=sample_params,
+            )
+            save_viz(model, xtest, q, title=title)
 
             model.train()
-            torch.save(grbm.state_dict(), "grbm.pt")
-            torch.save(model.state_dict(), "model.pt")
+            torch.save(grbm.state_dict(), f"{title}grbm.pt")
+            torch.save(model.state_dict(), f"{title}model.pt")
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
+
     parser = ArgumentParser()
-    parser.add_argument("--title", type=str, default="NoExperimentName")
-    parser.add_argument("--annealing_time", type=float, default=0.5)
-    parser.add_argument("--alpha", type=float, default=1.0)
-    parser.add_argument("--num_steps", type=int, default=1000)
-    parser.add_argument("--num_reads", type=int, default=1000)
-    parser.add_argument("--stop_grbm", type=int, default=500)
-    parser.add_argument("--loss_fn", type=str, default="mmd")
-    parser.add_argument("--solver", type=str, default="Advantage2_system1.13")
+    parser.add_argument(
+        "--title",
+        type=str,
+        default="Default_",
+        help="String used to prepend output files and print statements",
+    )
+    parser.add_argument(
+        "--annealing_time",
+        type=float,
+        default=0.5,
+        help="Annealing time in microseconds",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=1.0,
+        help="Learning rate for the GRBM",
+    )
+    parser.add_argument(
+        "--num_steps",
+        type=int,
+        default=1000,
+        help="Total number of training steps",
+    )
+    parser.add_argument(
+        "--num_reads",
+        type=int,
+        default=1000,
+        help="Number of reads for the QPU sampler at each step",
+    )
+    parser.add_argument(
+        "--stop_grbm",
+        type=int,
+        default=500,
+        help="Step at which to stop training the GRBM",
+    )
+    parser.add_argument(
+        "--loss_fn",
+        type=str,
+        default="mmd",
+        help="Loss function to use",
+    )
+    parser.add_argument(
+        "--solver",
+        type=str,
+        default="Advantage2_system1.13",
+        help="Leap QPU solver name",
+    )
     args_ = parser.parse_args()
 
     args_dict = vars(args_)
-    run(**args_dict, args=args_)
-    # postprocess(**args_dict, args=args_)
+    run(**args_dict)
