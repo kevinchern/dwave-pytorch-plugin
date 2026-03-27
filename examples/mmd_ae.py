@@ -14,16 +14,12 @@ from torchvision.utils import make_grid, save_image
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.nn.functional import bit2spin_soft, spin2bit_soft
 from dwave.system import DWaveSampler
-
+from minorminer.subgraph import find_subgraph
 
 class RadialBasisFunction(nn.Module):
 
-    def __init__(
-    self,
-    n_kernels: int = 5,
-    mul_factor: float = 2.0,
-    bandwidth: torch.Tensor | float | None = None,
-    ) -> None:
+    def __init__(self, n_kernels: int = 5, mul_factor: float = 2.0,
+                 bandwidth: torch.Tensor | float | None = None) -> None:
         """Initializes the Radial Basis Function (RBF) kernel module.
 
         Args:
@@ -557,16 +553,18 @@ def get_qpu_model_grbm(
     solver: str,
     device: str,
     m: int = 5,
-    t: int = 3,
+    t: int = 2,
+    timeout: int = 60,
+    allow_incomplete_yield: bool =False
 ) -> tuple[DWaveSampler, Autoencoder, GRBM]:
     """Sets up the QPU, GRBM, and Autoencoder model.
 
     Args:
         solver: The D-Wave solver name.
         device: The device to run the model on, typically "cuda" or "cpu".
-        m: Shape parameter for the Zephyr subgraph.
-        t: Tile parameter for the Zephyr subgraph.
-
+        m: Rows and columns of a small Chimera graph
+        t: Tile parameter of a small Chimera graph
+        timeout: timeout for chimera graph search.
     Returns:
         A tuple containing the QPU sampler, Autoencoder model, and GRBM.
     """
@@ -574,7 +572,24 @@ def get_qpu_model_grbm(
     qpu = DWaveSampler(solver=solver)
     # Instantiate model
     # G = zephyr_subgraph(qpu.to_networkx_graph(), 4)
-    G = zephyr_subgraph_t(zephyr_subgraph(qpu.to_networkx_graph(), m), t)
+    # G = zephyr_subgraph_t(zephyr_subgraph(qpu.to_networkx_graph(), m), t)
+    # For any QPU graph, we can anticipate embedding a Chimera [4,2] with high
+    # confidence.
+    T = qpu.to_networkx_graph()
+    
+    emb = None
+    while not emb:
+        S = dnx.chimera_graph(m=m,n=m, chimera_t=t)
+        emb = find_subgraph(S, T, as_embedding=False, timeout=timeout)  # TO DO: add orientation hinting
+        if not allow_incomplete_yield and not emb:
+            raise RuntimeError(
+                f"Failed to find an embedding of the Chimera graph "
+                f"with m={m} and t={t} within the timeout {timeout}s."
+                "Consider a simpler graph (smaller m,t) or larger timeout.")
+        else:
+            m = max(1, m - 1)
+            t = max(1, t - 1)
+    G = S.relabel(emb) # Matched to the QPU
     nodes = list(G.nodes)
     edges = list(G.edges)
     grbm = GRBM(nodes, edges).to(device)
