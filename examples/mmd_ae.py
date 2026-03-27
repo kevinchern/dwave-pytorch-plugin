@@ -607,6 +607,8 @@ def get_qpu_model_grbm(
         sampler = SpinReversalTransformComposite(sampler)
     if use_automorphisms:
         sampler = AutomorphismComposite(sampler, S)
+    for key in ["h_range", "j_range"]:
+        sampler.properties[key] = qpu.properties[key]     # type: ignore
     return sampler, model, grbm
 
 
@@ -689,7 +691,7 @@ def run(
         answer_mode="raw",
         auto_scale=False,
     )
-    h_range, j_range = qpu.properties["h_range"], qpu.properties["j_range"]
+    h_range, j_range = sampler.properties["h_range"], sampler.properties["j_range"]
 
     # Set up data
     train_loader, test_loader = get_dataset(num_reads)
