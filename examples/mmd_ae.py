@@ -601,7 +601,7 @@ def get_qpu_model_grbm(
     # grbm.linear.data[:] = 0
     # grbm.quadratic.data[:] = 0
     model = Autoencoder((1, 28, 28), grbm.n_nodes).to(device)
-g
+
     sampler = FixedEmbeddingComposite(qpu, emb)
     if use_srts:
         sampler = SpinReversalTransformComposite(sampler)
