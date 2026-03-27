@@ -589,7 +589,7 @@ def get_qpu_model_grbm(
         else:
             m = max(1, m - 1)
             t = max(1, t - 1)
-    G = S.relabel(emb) # Matched to the QPU
+    G = S.relabel_nodes(emb) # Matched to the QPU
     nodes = list(G.nodes)
     edges = list(G.edges)
     grbm = GRBM(nodes, edges).to(device)
