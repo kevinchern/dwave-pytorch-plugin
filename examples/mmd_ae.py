@@ -16,6 +16,10 @@ from dwave.plugins.torch.nn.functional import bit2spin_soft, spin2bit_soft
 from dwave.system import DWaveSampler
 from minorminer.subgraph import find_subgraph
 
+from dwave.system import FixedEmbeddingComposite
+from dwave.system.composites import SpinReversalTransformComposite
+from dwave.experimental.automorphism.automorphism_composite import AutomorphismComposite
+
 class RadialBasisFunction(nn.Module):
 
     def __init__(self, n_kernels: int = 5, mul_factor: float = 2.0,
@@ -555,7 +559,9 @@ def get_qpu_model_grbm(
     m: int = 5,
     t: int = 2,
     timeout: int = 60,
-    allow_incomplete_yield: bool =False
+    allow_incomplete_yield: bool =False,
+    use_srts: bool = False,
+    use_automorphisms: bool = False,
 ) -> tuple[DWaveSampler, Autoencoder, GRBM]:
     """Sets up the QPU, GRBM, and Autoencoder model.
 
@@ -589,14 +595,19 @@ def get_qpu_model_grbm(
         else:
             m = max(1, m - 1)
             t = max(1, t - 1)
-    G = nx.relabel_nodes(S, emb) # Matched to the QPU
-    nodes = list(G.nodes)
-    edges = list(G.edges)
+    nodes = list(S.nodes)
+    edges = list(S.edges)
     grbm = GRBM(nodes, edges).to(device)
     # grbm.linear.data[:] = 0
     # grbm.quadratic.data[:] = 0
     model = Autoencoder((1, 28, 28), grbm.n_nodes).to(device)
-    return qpu, model, grbm
+
+    sampler = FixedEmbeddingComposite(qpu, emb)
+    if use_srts:
+        sampler = SpinReversalTransformComposite(sampler)
+    if use_automorphisms:
+        sampler = AutomorphismComposite(sampler, S)
+    return sampler, model, grbm
 
 
 def compute_pkl(
@@ -638,6 +649,8 @@ def run(
     num_steps: int,
     device: str = "cuda",
     seed: int | None = None,
+    use_srts: bool = False,
+    use_automorphisms: bool = False,
 ) -> None:
     """Runs the training loop for the Autoencoder and GRBM.
 
@@ -652,12 +665,13 @@ def run(
         num_steps: The total number of training steps.
         device: The device used for training and sampling tensors.
         seed: Optional random seed for parameter initialization.
+        use_srts: Whether to use the SRTS composite.
+        use_automorphisms: Whether to use the Automorphism composite.
     """
-    qpu, model, grbm = get_qpu_model_grbm(solver, device)
+    sampler, model, grbm = get_qpu_model_grbm(solver, device, use_srts=use_srts, use_automorphisms=use_automorphisms)
     nprng = np.random.default_rng(seed)
     grbm.linear.data[:] = 0.1 * bit2spin_soft(torch.tensor(nprng.binomial(1, 0.5, grbm.n_nodes)))
     grbm.quadratic.data[:] = bit2spin_soft(torch.tensor(nprng.binomial(1, 0.5, grbm.n_edges)))
-    sampler = qpu
 
     model.train()
     grbm.train()
