@@ -606,7 +606,7 @@ def get_qpu_model_grbm(
     if use_srts:
         sampler = SpinReversalTransformComposite(sampler)
     if use_automorphisms:
-        sampler = AutomorphismComposite(sampler, S)
+        sampler = AutomorphismComposite(sampler, G=S)
     for key in ["h_range", "j_range"]:
         sampler.properties[key] = qpu.properties[key]     # type: ignore
     return sampler, model, grbm
