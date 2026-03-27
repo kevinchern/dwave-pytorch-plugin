@@ -16,8 +16,8 @@ from dwave.plugins.torch.nn.functional import bit2spin_soft, spin2bit_soft
 from dwave.system import DWaveSampler
 from minorminer.subgraph import find_subgraph
 
-from dwave.system import FixedEmbeddingComposite
-from dwave.system.composites import SpinReversalTransformComposite
+from dwave.system.composites import FixedEmbeddingComposite
+from dwave.preprocessing.composites import SpinReversalTransformComposite
 from dwave.experimental.automorphism.automorphism_composite import AutomorphismComposite
 
 class RadialBasisFunction(nn.Module):
@@ -601,7 +601,7 @@ def get_qpu_model_grbm(
     # grbm.linear.data[:] = 0
     # grbm.quadratic.data[:] = 0
     model = Autoencoder((1, 28, 28), grbm.n_nodes).to(device)
-
+g
     sampler = FixedEmbeddingComposite(qpu, emb)
     if use_srts:
         sampler = SpinReversalTransformComposite(sampler)
