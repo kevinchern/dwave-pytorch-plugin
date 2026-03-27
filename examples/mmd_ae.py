@@ -579,7 +579,7 @@ def get_qpu_model_grbm(
     
     emb = None
     while not emb:
-        S = dnx.chimera_graph(m=m,n=m, chimera_t=t)
+        S = dnx.chimera_graph(m=m,n=m, t=t)
         emb = find_subgraph(S, T, as_embedding=False, timeout=timeout)  # TO DO: add orientation hinting
         if not allow_incomplete_yield and not emb:
             raise RuntimeError(
