@@ -806,6 +806,16 @@ if __name__ == "__main__":
         default="Advantage2_system1.13",
         help="Leap QPU solver name",
     )
+    parser.add_argument(
+        "--use_srts",
+        action="store_true",
+        help="Use spin reversal transform (SRT) (default is False).",
+    )
+    parser.add_argument(
+        "--use_automorphisms",
+        action="store_true",
+        help="Use automorphisms (default is False).",
+    )
     args_ = parser.parse_args()
 
     args_dict = vars(args_)
