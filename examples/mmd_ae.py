@@ -586,7 +586,7 @@ def get_qpu_model_grbm(
     emb = None
     while not emb:
         S = dnx.chimera_graph(m=m,n=m, t=t)
-        emb = find_subgraph(S, T, as_embedding=False, timeout=timeout)  # TO DO: add orientation hinting
+        emb = find_subgraph(S, T, as_embedding=False, timeout=timeout, as_embedding=True)  # TO DO: add orientation hinting
         if not allow_incomplete_yield and not emb:
             raise RuntimeError(
                 f"Failed to find an embedding of the Chimera graph "
