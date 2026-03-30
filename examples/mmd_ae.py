@@ -580,9 +580,7 @@ def node_coloring(G: nx.Graph) -> dict[int, int]:
         ).linear_to_zephyr
         co_index = 0
     elif G.graph["family"] == "pegasus":
-        to_coord = dnx.pegasus_coordinates(
-            m=G.graph["rows"], t=G.graph["tile"]
-        ).linear_to_pegasus
+        to_coord = dnx.pegasus_coordinates(m=G.graph["rows"]).linear_to_pegasus
         co_index = 0
     elif G.graph["family"] == "chimera":
         to_coord = dnx.chimera_coordinates(
@@ -623,20 +621,20 @@ def get_qpu_model_grbm(
     # Instantiate model
     T = qpu.to_networkx_graph()
     if dnx_family == "zephyr":
-        S = dnx.zephyr_graph(m)
+        S = dnx.zephyr_graph(m=m, t=t)
     elif dnx_family == "pegasus":
         S = dnx.pegasus_graph(m)
     elif dnx_family == "chimera":
-        S = dnx.chimera_graph(m, m, t)
+        S = dnx.chimera_graph(m=m, m=m, t=t)
     else:
         raise ValueError(f"Unknown dnx_family: {dnx_family}")
     if orientation_hint:
-        node_colors = (node_coloring(S), node_coloring(T))
+        node_labels = (node_coloring(S), node_coloring(T))
     else:
-        node_colors = None
+        node_labels = None
 
     emb = find_subgraph(
-        S, T, timeout=timeout, as_embedding=True, node_labels=node_colors
+        S, T, timeout=timeout, as_embedding=True, node_labels=node_labels
     )  # TO DO: add orientation hinting
     if len(emb) < S.number_of_nodes():
         if not allow_incomplete_yield:
@@ -775,11 +773,11 @@ def run(
 
     if os.path.isfile(f"{title}model.pt"):
         model.load_state_dict(torch.load(f"{title}model.pt"))
-        warnings.warn('Trained model exists: try a different title')
+        warnings.warn("Trained model exists: try a different title")
         return
     if os.path.isfile(f"{title}grbm.pt"):
         grbm.load_state_dict(torch.load(f"{title}grbm.pt"))
-        warnings.warn('Trained grbm exists: try a different title')
+        warnings.warn("Trained grbm exists: try a different title")
         return
     for step, (x, _) in enumerate(cycle(train_loader), 1):
         torch.cuda.empty_cache()
