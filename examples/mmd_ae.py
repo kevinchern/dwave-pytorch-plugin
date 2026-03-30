@@ -591,7 +591,7 @@ def node_coloring(G: nx.Graph) -> dict[int, int]:
         co_index = 2
     else:
         raise ValueError("Unknown case")
-    return {n: to_coord(n)[co_index] for n in G.nodes}
+    return {n: str(to_coord(n)[co_index]) for n in G.nodes}
 
 
 def get_qpu_model_grbm(
@@ -636,7 +636,7 @@ def get_qpu_model_grbm(
         node_colors = None
 
     emb = find_subgraph(
-        S, T, timeout=timeout, as_embedding=True, node_colors=node_colors
+        S, T, timeout=timeout, as_embedding=True, node_labels=node_colors
     )  # TO DO: add orientation hinting
     if len(emb) < S.number_of_nodes():
         if not allow_incomplete_yield:
