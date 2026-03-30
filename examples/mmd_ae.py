@@ -816,6 +816,18 @@ if __name__ == "__main__":
         help="Leap QPU solver name",
     )
     parser.add_argument(
+        "--m",
+        type=int,
+        default=5,
+        help="Parameter m for the Zephyr or dnx graph",
+    )
+    parser.add_argument(
+        "--t",
+        type=int,
+        default=3,
+        help="Parameter t for the Zephyr or dnx graph",
+    )
+    parser.add_argument(
         "--allow_incomplete_yield",
         action="store_true",
         help="Allow incomplete yield (default is False).",
