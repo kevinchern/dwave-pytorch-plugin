@@ -12,7 +12,9 @@ from torchvision.datasets import MNIST
 from torchvision.transforms.v2 import Compose, ToDtype, ToImage
 from torchvision.utils import make_grid, save_image
 
-from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
+from dwave.plugins.torch.models.boltzmann_machine import (
+    GraphRestrictedBoltzmannMachine as GRBM,
+)
 from dwave.plugins.torch.nn.functional import bit2spin_soft, spin2bit_soft
 from dwave.system import DWaveSampler
 from minorminer.subgraph import find_subgraph
@@ -21,10 +23,15 @@ from dwave.system.composites import FixedEmbeddingComposite
 from dwave.preprocessing.composites import SpinReversalTransformComposite
 from dwave.experimental.automorphism.automorphism_composite import AutomorphismComposite
 
+
 class RadialBasisFunction(nn.Module):
 
-    def __init__(self, n_kernels: int = 5, mul_factor: float = 2.0,
-                 bandwidth: torch.Tensor | float | None = None) -> None:
+    def __init__(
+        self,
+        n_kernels: int = 5,
+        mul_factor: float = 2.0,
+        bandwidth: torch.Tensor | float | None = None,
+    ) -> None:
         """Initializes the Radial Basis Function (RBF) kernel module.
 
         Args:
@@ -371,9 +378,9 @@ def zephyr_subgraph(G: nx.Graph, zephyr_m: int) -> nx.Graph:
     Returns:
         The subgraph as a network Graph object.
     """
-    assert zephyr_m <= G.graph["rows"], (
-        "zephyr_m must be less than or equal to the number of rows in G"
-    )
+    assert (
+        zephyr_m <= G.graph["rows"]
+    ), "zephyr_m must be less than or equal to the number of rows in G"
 
     Z_m = dnx.zephyr_graph(zephyr_m)
     zsm = next(dnx.zephyr_sublattice_mappings(Z_m, G))
@@ -384,9 +391,7 @@ def zephyr_subgraph(G: nx.Graph, zephyr_m: int) -> nx.Graph:
     S.graph = G.graph.copy()
     S.graph["rows"] = zephyr_m
     S.graph["columns"] = zephyr_m
-    S.graph["name"] = S.graph["name"].replace(
-        f"({original_m},", f"({zephyr_m},"
-    )
+    S.graph["name"] = S.graph["name"].replace(f"({original_m},", f"({zephyr_m},")
     S.graph["name"] = f'{S.graph["name"]}-subgraph of {G.graph["name"]}'
     return S
 
@@ -405,9 +410,9 @@ def zephyr_subgraph_t(G: nx.Graph, zephyr_t: int) -> nx.Graph:
     Returns:
         A subgraph of the original Zephyr graph containing the specified number of tiles.
     """
-    assert zephyr_t <= G.graph["tile"], (
-        "zephyr_t must be less than or equal to the tile parameter of G"
-    )
+    assert (
+        zephyr_t <= G.graph["tile"]
+    ), "zephyr_t must be less than or equal to the tile parameter of G"
 
     zc = dnx.zephyr_coordinates(m=G.graph["rows"], t=G.graph["tile"])
     return G.subgraph([g for g in G if zc.linear_to_zephyr(g)[2] < zephyr_t])
@@ -454,7 +459,9 @@ class Autoencoder(nn.Module):
         logits = self.decoder(q)
         return logits
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass through the autoencoder.
 
         Args:
@@ -476,7 +483,9 @@ def collect_stats(
     x: torch.Tensor,
     q: torch.Tensor,
     compute_mmd: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-    compute_pkl: Callable[[GRBM, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+    compute_pkl: Callable[
+        [GRBM, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
+    ],
 ) -> dict[str, torch.Tensor]:
     """Collects statistics for the autoencoder and GRBM.
 
@@ -554,6 +563,35 @@ def save_viz(
         save_image(logits_grid, f"{title}xhat.png")
 
 
+def node_coloring(G: nx.Graph) -> dict[int, int]:
+    """Computes a node coloring to accelerate find_subgraph
+
+    Args:
+        G: A networkx graph.
+
+    Returns:
+        A dictionary mapping each node in G to an integer color.
+    """
+    if T.graph["family"] == "zephyr":
+        to_coord = dnx.zephyr_coordinates(
+            m=T.graph["rows"], t=T.graph["tile"]
+        ).linear_to_zephyr
+        co_index = 0
+    elif T.graph["family"] == "pegasus":
+        to_coord = dnx.pegasus_coordinates(
+            m=T.graph["rows"], t=T.graph["tile"]
+        ).linear_to_pegasus
+        co_index = 0
+    elif T.graph["family"] == "chimera":
+        to_coord = dnx.chimera_coordinates(
+            m=T.graph["rows"], t=T.graph["tile"]
+        ).linear_to_chimera
+        co_index = 2
+    else:
+        raise ValueError("Unknown case")
+    return {n: to_coord(n)[co_index] for n in T.nodes}
+
+
 def get_qpu_model_grbm(
     solver: str,
     device: str,
@@ -561,9 +599,10 @@ def get_qpu_model_grbm(
     t: int = 3,
     dnx_family: str = "zephyr",
     timeout: int = 60,
-    allow_incomplete_yield: bool =False,
+    allow_incomplete_yield: bool = False,
     use_srts: bool = False,
     use_automorphisms: bool = False,
+    orientation_hint: bool = True,
 ) -> tuple[DWaveSampler, Autoencoder, GRBM]:
     """Sets up the QPU, GRBM, and Autoencoder model.
 
@@ -580,24 +619,36 @@ def get_qpu_model_grbm(
     # Set up QPU and QPU parameters
     qpu = DWaveSampler(solver=solver)
     # Instantiate model
-    # For any QPU graph, we can anticipate embedding a Chimera [4,2] with high
-    # confidence.
     T = qpu.to_networkx_graph()
-    
-    if dnx_family == 'chimera':
-        S = dnx.chimera_graph(m=m, n=m, t=t)
+    if dnx_family == "zephyr":
+        S = dnx.zephyr_graph(m)
+    elif dnx_family == "pegasus":
+        S = dnx.pegasus_graph(m)
+    elif dnx_family == "chimera":
+        S = dnx.chimera_graph(m, m, t)
     else:
-        S= dnx.zephyr_graph(m=m, t=t)
-    emb = find_subgraph(S, T, timeout=timeout, as_embedding=True)  # TO DO: add orientation hinting
+        raise ValueError(f"Unknown dnx_family: {dnx_family}")
+    if orientation_hint:
+        node_colors = (node_coloring(S), node_coloring(T))
+    else:
+        node_colors = None
+
+    emb = find_subgraph(
+        S, T, timeout=timeout, as_embedding=True
+    )  # TO DO: add orientation hinting
     if len(emb) < S.number_of_nodes():
         if not allow_incomplete_yield:
             raise RuntimeError(
                 f"Failed to find an embedding of the {dnx_family} graph "
                 f"with m={m} and t={t} within the timeout {timeout}s."
-                "Consider a simpler graph, smaller m and/or t, or larger timeout.")
-        warnings.warn('legacy method, requires improvement')
+                "Consider a simpler graph, smaller m and/or t, or larger timeout."
+            )
+
+        warnings.warn("legacy method, requires improvement")
         # G = zephyr_subgraph_t(zephyr_subgraph(qpu.to_networkx_graph(), m), t)  # Old
-        print("S num edges and vars targetted", S.number_of_edges(), S.number_of_nodes())
+        print(
+            "S num edges and vars targetted", S.number_of_edges(), S.number_of_nodes()
+        )
         S = zephyr_subgraph_t(zephyr_subgraph(T, m), t)  # Old
         # S = T.edge_subgraph(S.edges) # Only works for coordinated cases.
         print("S num edges and vars realized", S.number_of_edges(), S.number_of_nodes())
@@ -615,7 +666,7 @@ def get_qpu_model_grbm(
     if use_automorphisms:
         sampler = AutomorphismComposite(sampler, G=S)
     for key in ["h_range", "j_range"]:
-        sampler.properties[key] = qpu.properties[key]     # type: ignore
+        sampler.properties[key] = qpu.properties[key]  # type: ignore
     return sampler, model, grbm
 
 
@@ -681,11 +732,21 @@ def run(
         use_automorphisms: Whether to use the Automorphism composite.
     """
     sampler, model, grbm = get_qpu_model_grbm(
-        solver, device, m=m, t=t, use_srts=use_srts, use_automorphisms=use_automorphisms, 
-        allow_incomplete_yield=allow_incomplete_yield)
+        solver,
+        device,
+        m=m,
+        t=t,
+        use_srts=use_srts,
+        use_automorphisms=use_automorphisms,
+        allow_incomplete_yield=allow_incomplete_yield,
+    )
     nprng = np.random.default_rng(seed)
-    grbm.linear.data[:] = 0.1 * bit2spin_soft(torch.tensor(nprng.binomial(1, 0.5, grbm.n_nodes)))
-    grbm.quadratic.data[:] = bit2spin_soft(torch.tensor(nprng.binomial(1, 0.5, grbm.n_edges)))
+    grbm.linear.data[:] = 0.1 * bit2spin_soft(
+        torch.tensor(nprng.binomial(1, 0.5, grbm.n_nodes))
+    )
+    grbm.quadratic.data[:] = bit2spin_soft(
+        torch.tensor(nprng.binomial(1, 0.5, grbm.n_edges))
+    )
 
     model.train()
     grbm.train()
@@ -765,6 +826,7 @@ def run(
             model.train()
             torch.save(grbm.state_dict(), f"{title}grbm.pt")
             torch.save(model.state_dict(), f"{title}model.pt")
+
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
