@@ -625,7 +625,7 @@ def get_qpu_model_grbm(
     elif dnx_family == "pegasus":
         S = dnx.pegasus_graph(m)
     elif dnx_family == "chimera":
-        S = dnx.chimera_graph(m=m, m=m, t=t)
+        S = dnx.chimera_graph(m=m, n=m, t=t)
     else:
         raise ValueError(f"Unknown dnx_family: {dnx_family}")
     if orientation_hint:
