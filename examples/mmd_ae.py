@@ -574,19 +574,19 @@ def node_coloring(G: nx.Graph) -> dict[int, int]:
     Returns:
         A dictionary mapping each node in G to an integer color.
     """
-    if T.graph["family"] == "zephyr":
+    if G.graph["family"] == "zephyr":
         to_coord = dnx.zephyr_coordinates(
-            m=T.graph["rows"], t=T.graph["tile"]
+            m=G.graph["rows"], t=G.graph["tile"]
         ).linear_to_zephyr
         co_index = 0
-    elif T.graph["family"] == "pegasus":
+    elif G.graph["family"] == "pegasus":
         to_coord = dnx.pegasus_coordinates(
-            m=T.graph["rows"], t=T.graph["tile"]
+            m=G.graph["rows"], t=G.graph["tile"]
         ).linear_to_pegasus
         co_index = 0
-    elif T.graph["family"] == "chimera":
+    elif G.graph["family"] == "chimera":
         to_coord = dnx.chimera_coordinates(
-            m=T.graph["rows"], t=T.graph["tile"]
+            m=G.graph["rows"], t=G.graph["tile"]
         ).linear_to_chimera
         co_index = 2
     else:
