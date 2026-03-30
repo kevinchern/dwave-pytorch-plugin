@@ -557,8 +557,8 @@ def save_viz(
 def get_qpu_model_grbm(
     solver: str,
     device: str,
-    m: int = 4,
-    t: int = 2,
+    m: int = 5,
+    t: int = 3,
     dnx_family: str = "zephyr",
     timeout: int = 60,
     allow_incomplete_yield: bool =False,
@@ -585,23 +585,23 @@ def get_qpu_model_grbm(
     T = qpu.to_networkx_graph()
     
     if dnx_family == 'chimera':
-        S = dnx.chimera_graph(m=m,n=m, t=t)
+        S = dnx.chimera_graph(m=m, n=m, t=t)
     else:
         S= dnx.zephyr_graph(m=m, t=t)
     emb = find_subgraph(S, T, timeout=timeout, as_embedding=True)  # TO DO: add orientation hinting
     if len(emb) < S.number_of_nodes():
         if not allow_incomplete_yield:
             raise RuntimeError(
-                f"Failed to find an embedding of the Chimera graph "
+                f"Failed to find an embedding of the {dnx_family} graph "
                 f"with m={m} and t={t} within the timeout {timeout}s."
-                "Consider a simpler graph (smaller m,t) or larger timeout.")
-        # Old
+                "Consider a simpler graph, smaller m and/or t, or larger timeout.")
         warnings.warn('legacy method, requires improvement')
-        # G = zephyr_subgraph_t(zephyr_subgraph(qpu.to_networkx_graph(), m), t)
+        # G = zephyr_subgraph_t(zephyr_subgraph(qpu.to_networkx_graph(), m), t)  # Old
         print("S num edges and vars targetted", S.number_of_edges(), S.number_of_nodes())
-        S = T.edge_subgraph(S.edges)
+        S = zephyr_subgraph_t(zephyr_subgraph(T, m), t)  # Old
+        # S = T.edge_subgraph(S.edges) # Only works for coordinated cases.
         print("S num edges and vars realized", S.number_of_edges(), S.number_of_nodes())
-
+        emb = {n: (n,) for n in S.nodes}
     nodes = list(S.nodes)
     edges = list(S.edges)
     grbm = GRBM(nodes, edges).to(device)
