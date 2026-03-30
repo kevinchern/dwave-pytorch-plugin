@@ -1,5 +1,7 @@
 from itertools import cycle
 from collections.abc import Callable
+from logging import warning
+import os
 import warnings
 import dwave_networkx as dnx
 import networkx as nx
@@ -771,6 +773,14 @@ def run(
 
     compute_mmd = MMDLoss().to(device)
 
+    if os.path.isfile(f"{title}model.pt"):
+        model.load_state_dict(torch.load(f"{title}model.pt"))
+        warnings.warn('Trained model exists: try a different title')
+        return
+    if os.path.isfile(f"{title}grbm.pt"):
+        grbm.load_state_dict(torch.load(f"{title}grbm.pt"))
+        warnings.warn('Trained grbm exists: try a different title')
+        return
     for step, (x, _) in enumerate(cycle(train_loader), 1):
         torch.cuda.empty_cache()
         if step > num_steps:
