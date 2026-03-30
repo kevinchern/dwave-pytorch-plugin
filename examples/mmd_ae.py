@@ -636,7 +636,7 @@ def get_qpu_model_grbm(
         node_colors = None
 
     emb = find_subgraph(
-        S, T, timeout=timeout, as_embedding=True
+        S, T, timeout=timeout, as_embedding=True, node_colors=node_colors
     )  # TO DO: add orientation hinting
     if len(emb) < S.number_of_nodes():
         if not allow_incomplete_yield:
