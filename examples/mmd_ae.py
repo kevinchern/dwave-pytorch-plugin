@@ -643,7 +643,10 @@ def get_qpu_model_grbm(
                 f"with m={m} and t={t} within the timeout {timeout}s."
                 "Consider a simpler graph, smaller m and/or t, or larger timeout."
             )
-
+        else:
+            assert (
+                dnx_family == "zephyr"
+            ), "allow_incomplete_yield is currently only implemented for zephyr family graphs"
         warnings.warn("legacy method, requires improvement")
         # G = zephyr_subgraph_t(zephyr_subgraph(qpu.to_networkx_graph(), m), t)  # Old
         print(
@@ -714,6 +717,7 @@ def run(
     use_srts: bool = False,
     use_automorphisms: bool = False,
     allow_incomplete_yield: bool = False,
+    dnx_family: str = "zephyr",
 ) -> None:
     """Runs the training loop for the Autoencoder and GRBM.
 
@@ -739,6 +743,7 @@ def run(
         use_srts=use_srts,
         use_automorphisms=use_automorphisms,
         allow_incomplete_yield=allow_incomplete_yield,
+        dnx_family=dnx_family,
     )
     nprng = np.random.default_rng(seed)
     grbm.linear.data[:] = 0.1 * bit2spin_soft(
@@ -899,6 +904,12 @@ if __name__ == "__main__":
         type=int,
         default=3,
         help="Parameter t for the Zephyr or dnx graph",
+    )
+    parser.add_argument(
+        "--dnx_family",
+        type=str,
+        default="zephyr",
+        help="zephyr, pegasus or chimera family (as target model)",
     )
     parser.add_argument(
         "--allow_incomplete_yield",
