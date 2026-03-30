@@ -1,5 +1,6 @@
 from itertools import cycle
 from collections.abc import Callable
+import warnings
 import dwave_networkx as dnx
 import networkx as nx
 import numpy as np
@@ -70,7 +71,7 @@ class RadialBasisFunction(nn.Module):
 
 
 class MMDLoss(nn.Module):
-    def __init__(self, kernel: nn.Module) -> None:
+    def __init__(self, kernel: nn.Module = RadialBasisFunction()) -> None:
         """Initialize the MMD loss module.
 
         Args:
@@ -450,8 +451,8 @@ class Autoencoder(nn.Module):
         Returns:
             Reconstructed input from the latent representation.
         """
-        xhat = self.decoder(q)
-        return xhat
+        logits = self.decoder(q)
+        return logits
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass through the autoencoder.
@@ -463,10 +464,10 @@ class Autoencoder(nn.Module):
             A tuple containing the latent representation, the binarized latent
             representation, and the reconstructed input.
         """
-        z = self.encoder(x)
-        spins = self.binarizer(z)
-        xhat = self.decode(spins)
-        return z, spins, xhat
+        soft_spins = self.encoder(x)
+        spins = self.binarizer(soft_spins)
+        logits = self.decode(spins)
+        return soft_spins, spins, logits
 
 
 def collect_stats(
@@ -483,20 +484,20 @@ def collect_stats(
         model: The Autoencoder.
         grbm: A graph restricted Boltzmann machine.
         x: Input tensor.
-        q: Latent representation tensor.
+        q: Latent representation tensor from the GRBM model.
         compute_mmd: Function to compute the maximum mean discrepancy between two tensors.
         compute_pkl: Function to compute the KL divergence between the GRBM and the latent representation.
 
     Returns:
         A dictionary containing the computed statistics.
     """
-    z, s, xhat = model(x)
+    soft_spins, spins, logits = model(x)
     stats = {
-        "quasi": grbm.quasi_objective(s.detach(), q),
-        "mse": nn.functional.mse_loss(xhat.sigmoid(), x),
-        "bce": nn.functional.binary_cross_entropy_with_logits(xhat, x),
-        "mmd": compute_mmd(s, q),
-        "pkl": compute_pkl(grbm, z, s, q),
+        "quasi": grbm.quasi_objective(spins.detach(), q),
+        "mse": nn.functional.mse_loss(logits.sigmoid(), x),
+        "bce": nn.functional.binary_cross_entropy_with_logits(logits, x),
+        "mmd": compute_mmd(spins, q),
+        "pkl": compute_pkl(grbm, soft_spins, spins, q),
     }
     return stats
 
@@ -541,23 +542,24 @@ def save_viz(
         # Save images
         xgen = model.decode(q[:bs]).sigmoid()
         xuni = model.decode(bit2spin_soft(torch.randint_like(q[:bs], 2))).sigmoid()
-        _, _, xhat = model(x[:bs])
-        xhat = xhat.sigmoid()
+        _, _, logits = model(x[:bs])
+        logits = logits.sigmoid()
         xgrid = make_grid(x[:bs], rows, pad_value=1)
         xgengrid = make_grid(xgen, rows, pad_value=1)
         xunigrid = make_grid(xuni, rows, pad_value=1)
-        xhatgrid = make_grid(xhat, rows, pad_value=1)
+        logits_grid = make_grid(logits, rows, pad_value=1)
         save_image(xgrid, f"{title}x.png")
         save_image(xgengrid, f"{title}xgen.png")
         save_image(xunigrid, f"{title}xuni.png")
-        save_image(xhatgrid, f"{title}xhat.png")
+        save_image(logits_grid, f"{title}xhat.png")
 
 
 def get_qpu_model_grbm(
     solver: str,
     device: str,
-    m: int = 5,
+    m: int = 4,
     t: int = 2,
+    dnx_family: str = "zephyr",
     timeout: int = 60,
     allow_incomplete_yield: bool =False,
     use_srts: bool = False,
@@ -570,6 +572,7 @@ def get_qpu_model_grbm(
         device: The device to run the model on, typically "cuda" or "cpu".
         m: Rows and columns of a small Chimera graph
         t: Tile parameter of a small Chimera graph
+        dnx_family: The family of D-Wave hardware to target for the subgraph embedding. This is used to determine the structure of the Chimera graph to embed, which should be compatible with the target hardware. For example, "zephyr" would indicate that we want to embed a Zephyr subgraph, which is a specific type of Chimera graph with certain connectivity properties.
         timeout: timeout for chimera graph search.
     Returns:
         A tuple containing the QPU sampler, Autoencoder model, and GRBM.
@@ -577,24 +580,25 @@ def get_qpu_model_grbm(
     # Set up QPU and QPU parameters
     qpu = DWaveSampler(solver=solver)
     # Instantiate model
-    # G = zephyr_subgraph(qpu.to_networkx_graph(), 4)
-    # G = zephyr_subgraph_t(zephyr_subgraph(qpu.to_networkx_graph(), m), t)
     # For any QPU graph, we can anticipate embedding a Chimera [4,2] with high
     # confidence.
     T = qpu.to_networkx_graph()
     
-    emb = None
-    while not emb:
+    if dnx_family == 'chimera':
         S = dnx.chimera_graph(m=m,n=m, t=t)
-        emb = find_subgraph(S, T, timeout=timeout, as_embedding=True)  # TO DO: add orientation hinting
-        if not allow_incomplete_yield and not emb:
+    else:
+        S= dnx.zephyr_graph(m=m, t=t)
+    emb = find_subgraph(S, T, timeout=timeout, as_embedding=True)  # TO DO: add orientation hinting
+    if len(emb) < S.number_of_nodes():
+        if not allow_incomplete_yield:
             raise RuntimeError(
                 f"Failed to find an embedding of the Chimera graph "
                 f"with m={m} and t={t} within the timeout {timeout}s."
                 "Consider a simpler graph (smaller m,t) or larger timeout.")
-        else:
-            m = max(1, m - 1)
-            t = max(1, t - 1)
+        # Old
+        warnings.warn('legacy method, requires improvement')
+        # G = zephyr_subgraph_t(zephyr_subgraph(qpu.to_networkx_graph(), m), t)
+        S = T.edge_subgraph(S.edges)
     nodes = list(S.nodes)
     edges = list(S.edges)
     grbm = GRBM(nodes, edges).to(device)
@@ -651,8 +655,11 @@ def run(
     num_steps: int,
     device: str = "cuda",
     seed: int | None = None,
+    m: int,
+    t: int,
     use_srts: bool = False,
     use_automorphisms: bool = False,
+    allow_incomplete_yield: bool = False,
 ) -> None:
     """Runs the training loop for the Autoencoder and GRBM.
 
@@ -670,7 +677,9 @@ def run(
         use_srts: Whether to use the SRTS composite.
         use_automorphisms: Whether to use the Automorphism composite.
     """
-    sampler, model, grbm = get_qpu_model_grbm(solver, device, use_srts=use_srts, use_automorphisms=use_automorphisms)
+    sampler, model, grbm = get_qpu_model_grbm(
+        solver, device, m=m, t=t, use_srts=use_srts, use_automorphisms=use_automorphisms, 
+        allow_incomplete_yield=allow_incomplete_yield)
     nprng = np.random.default_rng(seed)
     grbm.linear.data[:] = 0.1 * bit2spin_soft(torch.tensor(nprng.binomial(1, 0.5, grbm.n_nodes)))
     grbm.quadratic.data[:] = bit2spin_soft(torch.tensor(nprng.binomial(1, 0.5, grbm.n_edges)))
@@ -696,7 +705,7 @@ def run(
     # Set up data
     train_loader, test_loader = get_dataset(num_reads)
 
-    compute_mmd = MMDLoss(RadialBasisFunction()).to(device)
+    compute_mmd = MMDLoss().to(device)
 
     for step, (x, _) in enumerate(cycle(train_loader), 1):
         torch.cuda.empty_cache()
@@ -805,6 +814,11 @@ if __name__ == "__main__":
         type=str,
         default="Advantage2_system1.13",
         help="Leap QPU solver name",
+    )
+    parser.add_argument(
+        "--allow_incomplete_yield",
+        action="store_true",
+        help="Allow incomplete yield (default is False).",
     )
     parser.add_argument(
         "--use_srts",
