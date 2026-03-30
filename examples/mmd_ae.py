@@ -598,7 +598,10 @@ def get_qpu_model_grbm(
         # Old
         warnings.warn('legacy method, requires improvement')
         # G = zephyr_subgraph_t(zephyr_subgraph(qpu.to_networkx_graph(), m), t)
+        print("S num edges and vars targetted", S.number_of_edges(), S.number_of_nodes())
         S = T.edge_subgraph(S.edges)
+        print("S num edges and vars realized", S.number_of_edges(), S.number_of_nodes())
+
     nodes = list(S.nodes)
     edges = list(S.edges)
     grbm = GRBM(nodes, edges).to(device)
