@@ -591,7 +591,7 @@ def node_coloring(G: nx.Graph) -> dict[int, int]:
         co_index = 2
     else:
         raise ValueError("Unknown case")
-    return {n: to_coord(n)[co_index] for n in T.nodes}
+    return {n: to_coord(n)[co_index] for n in G.nodes}
 
 
 def get_qpu_model_grbm(
