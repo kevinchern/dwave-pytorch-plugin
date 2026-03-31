@@ -1,6 +1,6 @@
 from itertools import cycle
 from collections.abc import Callable
-from logging import warning
+from typing import Any
 import os
 import warnings
 import dwave_networkx as dnx
@@ -700,6 +700,123 @@ def compute_pkl(
     return pkl
 
 
+def print_stage(title: str, step: int | None, stats: dict[str, Any]) -> None:
+    """Print stats for the current stage of training.
+    Args:
+        title: The title for the training run.
+        step: The current training step.
+        stats: A dictionary containing the statistics to be printed.
+    """
+    print(
+        title, 
+        step,
+        {
+            k: f"{v.item():.4f}" if isinstance(v, torch.Tensor) else f"{v:.4f}"
+            for k, v in stats.items()
+        },
+    )
+
+def eval_stage(
+    model: nn.Module,
+    grbm: GRBM,
+    test_loader: DataLoader,
+    sampler: Any,
+    sample_params: dict[str, Any],
+    device: str | torch.device,
+    compute_mmd: nn.Module,
+    compute_pkl: Callable[[GRBM, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+    title: str,
+) -> None:
+    """Evaluates the model and GRBM on the test set and saves result visualization.
+
+    Args:
+        model: The autoencoder model.
+        grbm: The graph restricted Boltzmann machine.
+        test_loader: DataLoader for the test set.
+        sampler: The sampler used for the GRBM.
+        sample_params: Parameters for sampling from the GRBM.
+        device: The device to run the computations on.
+        compute_mmd: Function to compute the maximum mean discrepancy.
+        compute_pkl: Function to compute the pseudo-Kullback-Leibler divergence.
+        title: The title for the evaluation stage.
+    """
+    model.eval()
+    xtest = next(iter(test_loader))[0].to(device)
+    q = grbm.sample(
+        sampler,
+        prefactor=1,
+        linear_range=sampler.properties["h_range"],
+        quadratic_range=sampler.properties["j_range"],
+        device=device,
+        sample_params=sample_params,
+    )
+    save_viz(model, xtest, q, title=title)
+    model.train()
+
+
+def train(
+    model: nn.Module,
+    grbm: GRBM,
+    train_loader: DataLoader,
+    num_steps: int,
+    stop_grbm: int,
+    sampler: Any,
+    sample_params: dict[str, Any],
+    device: str | torch.device,
+    compute_mmd: nn.Module,
+    reg_coefficient: float,
+    loss_fn: str,
+    title: str,
+    opt_model: torch.optim.Optimizer,
+    opt_grbm: torch.optim.Optimizer,
+    test_loader: DataLoader,
+    print_every: int | None,
+    eval_every: int | None,
+    save_every: int | None,
+) -> dict[str, torch.Tensor] | None:
+    """TODO: Add detailed documentation for the training loop and arguments."""
+    stats = None
+
+    for step, (x, _) in enumerate(cycle(train_loader), 1):
+        torch.cuda.empty_cache()
+        if step > num_steps:
+            break
+        # Send data to device
+        x = x.to(device).float()
+        q = grbm.sample(
+            sampler,
+            prefactor=1,
+            linear_range=sampler.properties["h_range"],
+            quadratic_range=sampler.properties["j_range"],
+            device=device,
+            sample_params=sample_params,
+        )
+
+        # Train autoencoder
+        stats = collect_stats(model, grbm, x, q, compute_mmd, compute_pkl)
+        opt_model.zero_grad()
+        (stats["bce"] + reg_coefficient * stats[loss_fn]).backward()
+        # reg_coefficient ~ 1e-6
+        opt_model.step()
+
+        if step < stop_grbm:
+            # NOTE: collecting stats again because the autoencoder has been updated.
+            stats = collect_stats(model, grbm, x, q, compute_mmd, compute_pkl)
+            opt_grbm.zero_grad()
+            stats["quasi"].backward()
+            opt_grbm.step()
+        if print_every and step % print_every == 0:
+            print_stage(title, step, stats)
+
+        if eval_every and step % eval_every == 0:
+            eval_stage(model, grbm, test_loader, sampler, sample_params, device, compute_mmd, compute_pkl, title)
+            
+        if save_every and step % save_every == 0:
+            torch.save(grbm.state_dict(), f"{title}grbm.pt")
+            torch.save(model.state_dict(), f"{title}model.pt")
+    return stats
+
+
 def run(
     *,
     title: str,
@@ -708,7 +825,7 @@ def run(
     stop_grbm: int,
     num_reads: int,
     annealing_time: float,
-    alpha: float,
+    reg_coefficient: float,
     num_steps: int,
     device: str = "cuda",
     seed: int | None = None,
@@ -718,22 +835,32 @@ def run(
     use_automorphisms: bool = False,
     allow_incomplete_yield: bool = False,
     dnx_family: str = "zephyr",
+    print_every: int | None = 10,
+    eval_every: int | None = 50,
+    save_every: int | None = 100,
 ) -> None:
     """Runs the training loop for the Autoencoder and GRBM.
 
     Args:
         title: The title for the training run.
-        loss_fn: The loss function to use.
+        loss_fn: The loss function used to regularize bce.
         solver: The D-Wave solver name.
         stop_grbm: The step at which to stop training the GRBM.
         num_reads: The number of reads for the QPU sampler.
         annealing_time: The annealing time for the QPU sampler.
-        alpha: The learning rate for the GRBM.
+        reg_coefficient: MMD regularization strength.
         num_steps: The total number of training steps.
         device: The device used for training and sampling tensors.
         seed: Optional random seed for parameter initialization.
+        m: Rows and columns of the target hardware subgraph.
+        t: Tile parameter of the target hardware subgraph.
+        allow_incomplete_yield: Whether to fall back to a yield-tolerant embedding.
+        dnx_family: Hardware family to target ("zephyr", "pegasus", or "chimera").
         use_srts: Whether to use the SRTS composite.
         use_automorphisms: Whether to use the Automorphism composite.
+        print_every: Log training stats every this many steps. None disables logging.
+        eval_every: Run evaluation every this many steps. None disables evaluation.
+        save_every: Save checkpoints every this many steps. None disables saving.
     """
     sampler, model, grbm = get_qpu_model_grbm(
         solver,
@@ -769,78 +896,29 @@ def run(
         answer_mode="raw",
         auto_scale=False,
     )
-    h_range, j_range = sampler.properties["h_range"], sampler.properties["j_range"]
-
+    
     # Set up data
     train_loader, test_loader = get_dataset(num_reads)
 
     compute_mmd = MMDLoss().to(device)
-
+    stats = None
+    train_model = True
     if os.path.isfile(f"{title}model.pt"):
         model.load_state_dict(torch.load(f"{title}model.pt"))
         warnings.warn("Trained model exists: try a different title")
-        return
+        train_model = False
     if os.path.isfile(f"{title}grbm.pt"):
         grbm.load_state_dict(torch.load(f"{title}grbm.pt"))
         warnings.warn("Trained grbm exists: try a different title")
-        return
-    for step, (x, _) in enumerate(cycle(train_loader), 1):
-        torch.cuda.empty_cache()
-        if step > num_steps:
-            break
-        # Send data to device
-        x = x.to(device).float()
-        q = grbm.sample(
-            sampler,
-            prefactor=1,
-            linear_range=h_range,
-            quadratic_range=j_range,
-            device=device,
-            sample_params=sample_params,
-        )
-
-        # Train autoencoder
-        stats = collect_stats(model, grbm, x, q, compute_mmd, compute_pkl)
-        opt_model.zero_grad()
-        (stats["bce"] + alpha * stats[loss_fn]).backward()
-        # alpha ~ 1e-6
-        opt_model.step()
-
-        if step < stop_grbm:
-            # NOTE: collecting stats again because the autoencoder has been updated.
-            stats = collect_stats(model, grbm, x, q, compute_mmd, compute_pkl)
-            opt_grbm.zero_grad()
-            stats["quasi"].backward()
-            opt_grbm.step()
-
-        print(
-            title,
-            step,
-            {
-                k: f"{v.item():.4f}" if isinstance(v, torch.Tensor) else f"{v:.4f}"
-                for k, v in stats.items()
-            },
-        )
-
-        if step % 10 == 0:
-            model.eval()
-
-            xtest = next(iter(test_loader))[0].to(device)
-            q = grbm.sample(
-                sampler,
-                prefactor=1,
-                linear_range=h_range,
-                quadratic_range=j_range,
-                device=device,
-                sample_params=sample_params,
-            )
-            save_viz(model, xtest, q, title=title)
-
-            model.train()
-            torch.save(grbm.state_dict(), f"{title}grbm.pt")
-            torch.save(model.state_dict(), f"{title}model.pt")
-
-
+        train_model = False
+    if train_model:
+        stats = train(model, grbm, train_loader, num_steps, stop_grbm, sampler, sample_params, device, compute_mmd, reg_coefficient, loss_fn, title, opt_model, opt_grbm, test_loader, print_every, eval_every, save_every)
+    if stats is not None:
+        print_stage(title, None, stats)
+    eval_stage(model, grbm, test_loader, sampler, sample_params, device, compute_mmd, compute_pkl, title)
+    torch.save(grbm.state_dict(), f"{title}grbm.pt")
+    torch.save(model.state_dict(), f"{title}model.pt")
+    
 if __name__ == "__main__":
     from argparse import ArgumentParser
 
@@ -858,10 +936,10 @@ if __name__ == "__main__":
         help="Annealing time in microseconds",
     )
     parser.add_argument(
-        "--alpha",
+        "--reg_coefficient",
         type=float,
         default=1.0,
-        help="Learning rate for the GRBM",
+        help="MMD regularization strength",
     )
     parser.add_argument(
         "--num_steps",
@@ -885,7 +963,7 @@ if __name__ == "__main__":
         "--loss_fn",
         type=str,
         default="mmd",
-        help="Loss function to use",
+        help="Loss function to use for training the autoencoder, either 'mmd' or 'pkl'",
     )
     parser.add_argument(
         "--solver",
