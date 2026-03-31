@@ -566,6 +566,7 @@ def save_gen_multiple_methods(
     sample_params: dict[str, Any] | None = None,
     seed: int | np.random.Generator | None = None,
     title: str = "",
+    num_programming_transformations: int = 5,
 ) -> None:
     """Generate and save samples using multiple sampler configurations.
 
@@ -581,6 +582,7 @@ def save_gen_multiple_methods(
         sample_params: Parameters for GRBM sampling. Defaults to None.
         seed: Random seed for reproducibility. Defaults to None.
         title: Prefix for output filenames. Defaults to empty string.
+        num_programming_transformations: Number of programmings per SRT or automorphism. Defaults to 5.
     """
     if sample_params is None:
         sample_params = dict(
@@ -590,14 +592,24 @@ def save_gen_multiple_methods(
     for use_srts in [False, True]:
         sample_params0 = sample_params.copy()
         if use_srts:
-            sample_params0["num_spin_reversal_transforms"] = 5
+            sample_params0["num_spin_reversal_transforms"] = (
+                num_programming_transformations
+            )
+            sample_params0[
+                "num_reads"
+            ] /= num_programming_transformations  # Safe by loop ordering
 
         for use_automorphisms in [False, True]:
             if use_automorphisms:
-                sample_params0["use_automorphisms"] = 5
+                sample_params0["use_automorphisms"] = num_programming_transformations
+                sample_params0[
+                    "num_reads"
+                ] /= num_programming_transformations  # Safe by loop ordering
+
             sampler = get_sampler(
                 qpu, emb, use_srts, use_automorphisms, grbm.edges, seed
             )
+
             q = grbm.sample(
                 sampler,
                 linear_range=qpu.properties["h_range"],
@@ -606,7 +618,14 @@ def save_gen_multiple_methods(
                 device=device,
                 sample_params=sample_params0,
             ).record.sample
-            save_gen(model, f"xgen_{title}_S{use_srts}A{use_automorphisms}", q)
+            assert (
+                len(q) == sample_params["num_reads"]
+            ), f"Expected num_reads to be 400 after adjusting for SRTs and automorphisms q.shape={q.shape} sample_params0={sample_params0}"
+            save_gen(
+                model,
+                f"xgen_{title}_S{use_srts}A{use_automorphisms}NPT{num_programming_transformations}",
+                q,
+            )
 
 
 def save_viz(
@@ -817,11 +836,11 @@ def eval_stage(
     sampler: Any,
     sample_params: dict[str, Any],
     device: str | torch.device,
-    compute_mmd: nn.Module,
-    compute_pkl: Callable[
-        [GRBM, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
-    ],
     title: str,
+    post_training: bool = False,
+    qpu: DWaveSampler | None = None,
+    emb: dict | None = None,
+    seed: int | np.random.Generator | None = None,
 ) -> None:
     """Evaluates the model and GRBM on the test set and saves result visualization.
 
@@ -832,21 +851,32 @@ def eval_stage(
         sampler: The sampler used for the GRBM.
         sample_params: Parameters for sampling from the GRBM.
         device: The device to run the computations on.
-        compute_mmd: Function to compute the maximum mean discrepancy.
-        compute_pkl: Function to compute the pseudo-Kullback-Leibler divergence.
-        title: The title for the evaluation stage.
+        title: String appended to filenames for saved visualizations.
+        post_training: Whether this evaluation is occurring after training has completed. If True, uses multiple sampler configurations for visualization.
     """
     model.eval()
-    xtest = next(iter(test_loader))[0].to(device)
-    q = grbm.sample(
-        sampler,
-        prefactor=1,
-        linear_range=sampler.properties["h_range"],
-        quadratic_range=sampler.properties["j_range"],
-        device=device,
-        sample_params=sample_params,
-    )
-    save_viz(model, xtest, q, title=title)
+    if post_training:
+        save_gen_multiple_methods(
+            grbm=grbm,
+            qpu=qpu,
+            emb=emb,
+            model=model,
+            device=device,
+            sample_params=sample_params,
+            seed=seed,
+            title=title,
+        )
+    else:
+        xtest = next(iter(test_loader))[0].to(device)
+        q = grbm.sample(
+            sampler,
+            prefactor=1,
+            linear_range=sampler.properties["h_range"],
+            quadratic_range=sampler.properties["j_range"],
+            device=device,
+            sample_params=sample_params,
+        )
+        save_viz(model, xtest, q, title=title)
     model.train()
 
 
@@ -912,8 +942,6 @@ def train(
                 sampler,
                 sample_params,
                 device,
-                compute_mmd,
-                compute_pkl,
                 title,
             )
 
@@ -1014,7 +1042,6 @@ def run(
     train_loader, test_loader = get_dataset(num_reads)
 
     compute_mmd = MMDLoss().to(device)
-    stats = None
     train_model = True
     if os.path.isfile(f"{title}model.pt"):
         model.load_state_dict(torch.load(f"{title}model.pt"))
@@ -1025,7 +1052,7 @@ def run(
         warnings.warn("Trained grbm exists: try a different title")
         train_model = False
     if train_model:
-        stats = train(
+        train(
             model,
             grbm,
             train_loader,
@@ -1045,19 +1072,17 @@ def run(
             eval_every,
             save_every,
         )
-    if stats is not None:
-        print_stage(title, None, stats)
-    eval_stage(
-        model,
-        grbm,
-        test_loader,
-        sampler,
-        sample_params,
-        device,
-        compute_mmd,
-        compute_pkl,
-        title,
-    )
+    if not train_model or eval_every is None:
+        eval_stage(
+            model,
+            grbm,
+            test_loader,
+            sampler,
+            sample_params,
+            device,
+            title,
+            post_training=True,
+        )
     torch.save(grbm.state_dict(), f"{title}grbm.pt")
     torch.save(model.state_dict(), f"{title}model.pt")
 
