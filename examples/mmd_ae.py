@@ -597,15 +597,15 @@ def save_gen_multiple_methods(
             )
             sample_params0[
                 "num_reads"
-            ] /= num_programming_transformations  # Safe by loop ordering
+            ] //= num_programming_transformations  # Safe by loop ordering
 
         for use_automorphisms in [False, True]:
             if use_automorphisms:
                 sample_params0["num_automorphisms"] = num_programming_transformations
                 sample_params0[
                     "num_reads"
-                ] /= num_programming_transformations  # Safe by loop ordering
-
+                ] //= num_programming_transformations  # Safe by loop ordering
+            print('DEBUG statement', sample_params0)
             sampler = get_sampler(
                 qpu, emb, use_srts, use_automorphisms, grbm.edges, seed
             )
