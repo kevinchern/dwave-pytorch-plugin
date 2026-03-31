@@ -679,6 +679,7 @@ def get_model_grbm_qpu_emb(
     allow_incomplete_yield: bool = False,
     orientation_hint: bool = True,
     input_shape: tuple[int, int, int] = (1, 28, 28),
+    seed: int | None = None,
 ) -> tuple[Autoencoder, GRBM, DWaveSampler, dict[Any, tuple[Any, ...]]]:
     """Sets up the QPU, GRBM, and Autoencoder model.
 
@@ -690,6 +691,7 @@ def get_model_grbm_qpu_emb(
         dnx_family: The family of D-Wave hardware to target for the subgraph embedding. This is used to determine the structure of the Chimera graph to embed, which should be compatible with the target hardware. For example, "zephyr" would indicate that we want to embed a Zephyr subgraph, which is a specific type of Chimera graph with certain connectivity properties.
         timeout: timeout for chimera graph search.
         input_shape: The shape of the input images for the Autoencoder.
+        seed: Seed for pseudo-random components (find_subgraph).
     Returns:
         A tuple containing the QPU sampler, Autoencoder model, and GRBM.
     """
@@ -711,7 +713,7 @@ def get_model_grbm_qpu_emb(
         node_labels = None
 
     emb = find_subgraph(
-        S, T, timeout=timeout, as_embedding=True, node_labels=node_labels
+        S, T, timeout=timeout, as_embedding=True, node_labels=node_labels, seed=seed
     )  # TO DO: add orientation hinting
     if len(emb) < S.number_of_nodes():
         if not allow_incomplete_yield:
@@ -750,7 +752,6 @@ def get_sampler(
     edges: list[tuple[Any, Any]],
     seed: int | np.random.Generator | None = None,
 ) -> dimod.Sampler:
-    prng = np.random.default_rng(seed)
     if use_automorphisms:
         S = nx.Graph()
         S.add_nodes_from(emb.keys())
@@ -973,8 +974,16 @@ def run(
         t=t,
         allow_incomplete_yield=allow_incomplete_yield,
         dnx_family=dnx_family,
+        seed=seed,
     )
-    sampler = get_sampler(qpu, emb, use_srts=use_srts, use_automorphisms=use_automorphisms, edges=grbm.edges)  # type: ignore
+    sampler = get_sampler(
+        qpu,
+        emb,
+        use_srts=use_srts,
+        use_automorphisms=use_automorphisms,
+        edges=grbm.edges,
+        seed=seed + 1,
+    )
     nprng = np.random.default_rng(seed)
     grbm.linear.data[:] = 0.1 * bit2spin_soft(
         torch.tensor(nprng.binomial(1, 0.5, grbm.n_nodes))
