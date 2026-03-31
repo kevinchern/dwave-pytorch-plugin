@@ -617,7 +617,7 @@ def save_gen_multiple_methods(
                 prefactor=1,
                 device=device,
                 sample_params=sample_params0,
-            ).record.sample
+            )
             assert (
                 len(q) == sample_params["num_reads"]
             ), f"Expected num_reads to be 400 after adjusting for SRTs and automorphisms q.shape={q.shape} sample_params0={sample_params0}"
