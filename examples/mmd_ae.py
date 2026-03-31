@@ -752,6 +752,7 @@ def get_sampler(
     edges: list[tuple[Any, Any]],
     seed: int | np.random.Generator | None = None,
 ) -> dimod.Sampler:
+    sampler = FixedEmbeddingComposite(qpu, emb)
     if use_automorphisms:
         S = nx.Graph()
         S.add_nodes_from(emb.keys())
