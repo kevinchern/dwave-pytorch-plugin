@@ -982,7 +982,7 @@ def run(
         use_srts=use_srts,
         use_automorphisms=use_automorphisms,
         edges=grbm.edges,
-        seed=seed + 1,
+        seed=seed,  # Reuse of seed with find_subgraph is not a practical concern.
     )
     nprng = np.random.default_rng(seed)
     grbm.linear.data[:] = 0.1 * bit2spin_soft(
