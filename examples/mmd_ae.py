@@ -567,7 +567,7 @@ def save_gen_multiple_methods(
     seed: int | np.random.Generator | None = None,
     title: str = "",
     num_programming_transformations: int = 5,
-    num_reads: int = 400,
+    num_reads: int = 625,
 ) -> None:
     """Generate and save samples using multiple sampler configurations.
 
@@ -604,7 +604,7 @@ def save_gen_multiple_methods(
                 sample_params["num_automorphisms"] = num_programming_transformations
                 sample_params["num_reads"] = (
                     num_reads_per_srt // num_programming_transformations
-                )  # Safe by loop ordering
+                )
             else:
                 sample_params["num_reads"] = num_reads_per_srt
             print("DEBUG statement", sample_params)
@@ -622,7 +622,7 @@ def save_gen_multiple_methods(
             )
             assert (
                 len(q) == sample_params["num_reads"]
-            ), f"Expected num_reads to be 400 after adjusting for SRTs and automorphisms q.shape={q.shape} sample_params0={sample_params0}"
+            ), f"Expected num_reads to be {sample_params['num_reads']} after adjusting for SRTs and automorphisms q.shape={q.shape} sample_params0={sample_params0}"
             save_gen(
                 model,
                 f"{title}_S{use_srts}A{use_automorphisms}NPT{num_programming_transformations}",
