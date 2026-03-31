@@ -599,6 +599,7 @@ def save_gen_multiple_methods(
             )
             num_reads_per_srt = num_reads // num_programming_transformations
         else:
+            sample_params.pop("num_spin_reversal_transforms", None)
             num_reads_per_srt = num_reads
 
         for use_automorphisms in [False, True]:
@@ -608,6 +609,7 @@ def save_gen_multiple_methods(
                     num_reads_per_srt // num_programming_transformations
                 )
             else:
+                sample_params.pop("num_automorphisms")
                 sample_params["num_reads"] = num_reads_per_srt
             print("DEBUG statement", sample_params)
             sampler = get_sampler(
