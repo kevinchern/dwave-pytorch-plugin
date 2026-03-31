@@ -567,6 +567,7 @@ def save_gen_multiple_methods(
     seed: int | np.random.Generator | None = None,
     title: str = "",
     num_programming_transformations: int = 5,
+    num_reads: int = 400,
 ) -> None:
     """Generate and save samples using multiple sampler configurations.
 
@@ -585,27 +586,27 @@ def save_gen_multiple_methods(
         num_programming_transformations: Number of programmings per SRT or automorphism. Defaults to 5.
     """
     if sample_params is None:
-        sample_params = dict(
-            num_reads=400, annealing_time=0.5, answer_mode="raw", auto_scale=False
-        )
-    sample_params["num_reads"] = 400
+        sample_params = dict(annealing_time=0.5, answer_mode="raw", auto_scale=False)
+    else:
+        sample_params = sample_params.copy()
+
     for use_srts in [False, True]:
-        sample_params0 = sample_params.copy()
         if use_srts:
-            sample_params0["num_spin_reversal_transforms"] = (
+            sample_params["num_spin_reversal_transforms"] = (
                 num_programming_transformations
             )
-            sample_params0[
-                "num_reads"
-            ] //= num_programming_transformations  # Safe by loop ordering
+            num_reads_per_srt = num_reads // num_programming_transformations
+        else:
+            num_reads_per_srt = 1
+        sample_params["num_reads"] = num_reads_per_srt
 
         for use_automorphisms in [False, True]:
             if use_automorphisms:
-                sample_params0["num_automorphisms"] = num_programming_transformations
-                sample_params0[
-                    "num_reads"
-                ] //= num_programming_transformations  # Safe by loop ordering
-            print('DEBUG statement', sample_params0)
+                sample_params["num_automorphisms"] = num_programming_transformations
+                sample_params["num_reads"] = (
+                    num_reads_per_srt // num_programming_transformations
+                )  # Safe by loop ordering
+            print("DEBUG statement", sample_params)
             sampler = get_sampler(
                 qpu, emb, use_srts, use_automorphisms, grbm.edges, seed
             )
@@ -616,14 +617,13 @@ def save_gen_multiple_methods(
                 quadratic_range=qpu.properties["j_range"],
                 prefactor=1,
                 device=device,
-                sample_params=sample_params0,
+                sample_params=sample_params,
             )
             assert (
                 len(q) == sample_params["num_reads"]
             ), f"Expected num_reads to be 400 after adjusting for SRTs and automorphisms q.shape={q.shape} sample_params0={sample_params0}"
             save_gen(
                 model,
-                f"xgen_{title}_S{use_srts}A{use_automorphisms}NPT{num_programming_transformations}",
                 q,
             )
 
