@@ -601,7 +601,7 @@ def save_gen_multiple_methods(
 
         for use_automorphisms in [False, True]:
             if use_automorphisms:
-                sample_params0["use_automorphisms"] = num_programming_transformations
+                sample_params0["num_automorphisms"] = num_programming_transformations
                 sample_params0[
                     "num_reads"
                 ] /= num_programming_transformations  # Safe by loop ordering
