@@ -1045,11 +1045,11 @@ def run(
     train_model = True
     if os.path.isfile(f"{title}model.pt"):
         model.load_state_dict(torch.load(f"{title}model.pt"))
-        warnings.warn("Trained model exists: try a different title")
+        print("Trained model exists: try a different title")
         train_model = False
     if os.path.isfile(f"{title}grbm.pt"):
         grbm.load_state_dict(torch.load(f"{title}grbm.pt"))
-        warnings.warn("Trained grbm exists: try a different title")
+        print("Trained grbm exists: try a different title")
         train_model = False
     if train_model:
         train(
@@ -1072,6 +1072,8 @@ def run(
             eval_every,
             save_every,
         )
+    else:
+        print("Training skipped, files exist")
     if not train_model or eval_every is None:
         eval_stage(
             model,
@@ -1082,6 +1084,9 @@ def run(
             device,
             title,
             post_training=True,
+            qpu=qpu,
+            emb=emb,
+            seed=seed,
         )
     torch.save(grbm.state_dict(), f"{title}grbm.pt")
     torch.save(model.state_dict(), f"{title}model.pt")
