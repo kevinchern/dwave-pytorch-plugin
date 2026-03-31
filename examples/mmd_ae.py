@@ -1138,6 +1138,7 @@ if __name__ == "__main__":
         help="Random seed for reproducibility, None by default",
     )
     parser.add_argument(
+        "--allow_incomplete_yield",
         action="store_true",
         help="Allow incomplete yield (default is False).",
     )
