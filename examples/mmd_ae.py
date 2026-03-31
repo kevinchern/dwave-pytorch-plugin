@@ -625,7 +625,7 @@ def save_gen_multiple_methods(
             )
             assert (
                 len(q) == num_reads
-            ), f"Expected num_reads to be {num_reads} after adjusting for SRTs and automorphisms q.shape={q.shape} sample_params={sample_params0}"
+            ), f"Expected num_reads to be {num_reads} after adjusting for SRTs and automorphisms q.shape={q.shape} sample_params={sample_params}"
             save_gen(
                 model,
                 f"{title}_S{use_srts}A{use_automorphisms}NPT{num_programming_transformations}",
