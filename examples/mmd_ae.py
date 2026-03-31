@@ -537,11 +537,84 @@ def get_dataset(bs: int, data_dir: str = "/tmp/") -> tuple[DataLoader, DataLoade
     return train_loader, test_loader
 
 
+def save_gen(
+    model: Autoencoder,
+    title: str,
+    q: torch.Tensor,
+):
+    """Saves generated images from the model.
+
+    Args:
+        model: The Autoencoder model used for decoding the samples.
+        title: Prefix used for generated image files.
+        q: Latent representation tensor (QPU samples).
+    """
+    rows = int(q.shape[0] ** 0.5)
+    with torch.no_grad():
+        # Save images
+        xgen = model.decode(q).sigmoid()
+        xgengrid = make_grid(xgen, rows, pad_value=1)
+        save_image(xgengrid, f"{title}xgen.png")
+
+
+def save_gen_multiple_methods(
+    grbm: GRBM,
+    qpu: DWaveSampler,
+    emb: dict[Any, tuple[Any, ...]],
+    model: Autoencoder,
+    device: str | torch.device,
+    sample_params: dict[str, Any] | None = None,
+    seed: int | np.random.Generator | None = None,
+    title: str = "",
+) -> None:
+    """Generate and save samples using multiple sampler configurations.
+
+    Iterates over combinations of SRTS and automorphism composites,
+    sampling from the GRBM with each configuration and saving visualizations.
+
+    Args:
+        grbm: The graph restricted Boltzmann machine.
+        qpu: The D-Wave sampler (QPU).
+        emb: The embedding mapping from GRBM nodes to QPU qubits.
+        model: The Autoencoder for decoding sampled latent representations.
+        device: The device to run computations on.
+        sample_params: Parameters for GRBM sampling. Defaults to None.
+        seed: Random seed for reproducibility. Defaults to None.
+        title: Prefix for output filenames. Defaults to empty string.
+    """
+    if sample_params is None:
+        sample_params = dict(
+            num_reads=400, annealing_time=0.5, answer_mode="raw", auto_scale=False
+        )
+    sample_params["num_reads"] = 400
+    for use_srts in [False, True]:
+        sample_params0 = sample_params.copy()
+        if use_srts:
+            sample_params0["num_spin_reversal_transforms"] = 5
+
+        for use_automorphisms in [False, True]:
+            if use_automorphisms:
+                sample_params0["use_automorphisms"] = 5
+            sampler = get_sampler(
+                qpu, emb, use_srts, use_automorphisms, grbm.edges, seed
+            )
+            q = grbm.sample(
+                sampler,
+                linear_range=qpu.properties["h_range"],
+                quadratic_range=qpu.properties["j_range"],
+                prefactor=1,
+                device=device,
+                sample_params=sample_params0,
+            ).record.sample
+            save_gen(model, f"xgen_{title}_S{use_srts}A{use_automorphisms}", q)
+
+
 def save_viz(
     model: Autoencoder,
     x: torch.Tensor,
     q: torch.Tensor,
     title: str = "",
+    max_samples: int = 400,
 ) -> None:
     """Saves visualizations of the input, generated, and reconstructed images.
 
@@ -551,7 +624,7 @@ def save_viz(
         q: Latent representation tensor.
         title: Prefix used for generated image files.
     """
-    bs = min(x.shape[0], 500)
+    bs = min(x.shape[0], max_samples)
     rows = int(bs**0.5)
     with torch.no_grad():
         # Save images
@@ -605,6 +678,7 @@ def get_model_grbm_qpu_emb(
     timeout: int = 60,
     allow_incomplete_yield: bool = False,
     orientation_hint: bool = True,
+    input_shape: tuple[int, int, int] = (1, 28, 28),
 ) -> tuple[Autoencoder, GRBM, DWaveSampler, dict[Any, tuple[Any, ...]]]:
     """Sets up the QPU, GRBM, and Autoencoder model.
 
@@ -615,6 +689,7 @@ def get_model_grbm_qpu_emb(
         t: Tile parameter of a small Chimera graph
         dnx_family: The family of D-Wave hardware to target for the subgraph embedding. This is used to determine the structure of the Chimera graph to embed, which should be compatible with the target hardware. For example, "zephyr" would indicate that we want to embed a Zephyr subgraph, which is a specific type of Chimera graph with certain connectivity properties.
         timeout: timeout for chimera graph search.
+        input_shape: The shape of the input images for the Autoencoder.
     Returns:
         A tuple containing the QPU sampler, Autoencoder model, and GRBM.
     """
@@ -663,7 +738,7 @@ def get_model_grbm_qpu_emb(
     grbm = GRBM(nodes, edges).to(device)
     # grbm.linear.data[:] = 0
     # grbm.quadratic.data[:] = 0
-    model = Autoencoder((1, 28, 28), grbm.n_nodes).to(device)
+    model = Autoencoder(input_shape=input_shape, n_bits=grbm.n_nodes).to(device)
     return model, grbm, qpu, emb
 
 
@@ -673,15 +748,17 @@ def get_sampler(
     use_srts: bool,
     use_automorphisms: bool,
     edges: list[tuple[Any, Any]],
+    seed: int | np.random.Generator | None = None,
 ) -> dimod.Sampler:
-    sampler = FixedEmbeddingComposite(qpu, emb)
-    if use_srts:
-        sampler = SpinReversalTransformComposite(sampler)
+    prng = np.random.default_rng(seed)
     if use_automorphisms:
         S = nx.Graph()
         S.add_nodes_from(emb.keys())
         S.add_edges_from(edges)
-        sampler = AutomorphismComposite(sampler, G=S)
+        sampler = AutomorphismComposite(sampler, G=S, seed=seed)
+    if use_srts:
+        sampler = SpinReversalTransformComposite(sampler, seed=seed)
+
     for key in ["h_range", "j_range"]:
         sampler.properties[key] = qpu.properties[key]  # type: ignore
     return sampler
@@ -722,13 +799,14 @@ def print_stage(title: str, step: int | None, stats: dict[str, torch.Tensor]) ->
         stats: A dictionary containing the statistics to be printed.
     """
     print(
-        title, 
+        title,
         step,
         {
             k: f"{v.item():.4f}" if isinstance(v, torch.Tensor) else f"{v:.4f}"
             for k, v in stats.items()
         },
     )
+
 
 def eval_stage(
     model: nn.Module,
@@ -738,7 +816,9 @@ def eval_stage(
     sample_params: dict[str, Any],
     device: str | torch.device,
     compute_mmd: nn.Module,
-    compute_pkl: Callable[[GRBM, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+    compute_pkl: Callable[
+        [GRBM, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
+    ],
     title: str,
 ) -> None:
     """Evaluates the model and GRBM on the test set and saves result visualization.
@@ -823,8 +903,18 @@ def train(
             print_stage(title, step, stats)
 
         if eval_every and step % eval_every == 0:
-            eval_stage(model, grbm, test_loader, sampler, sample_params, device, compute_mmd, compute_pkl, title)
-            
+            eval_stage(
+                model,
+                grbm,
+                test_loader,
+                sampler,
+                sample_params,
+                device,
+                compute_mmd,
+                compute_pkl,
+                title,
+            )
+
         if save_every and step % save_every == 0:
             torch.save(grbm.state_dict(), f"{title}grbm.pt")
             torch.save(model.state_dict(), f"{title}model.pt")
@@ -909,7 +999,7 @@ def run(
         answer_mode="raw",
         auto_scale=False,
     )
-    
+
     # Set up data
     train_loader, test_loader = get_dataset(num_reads)
 
@@ -925,13 +1015,43 @@ def run(
         warnings.warn("Trained grbm exists: try a different title")
         train_model = False
     if train_model:
-        stats = train(model, grbm, train_loader, num_steps, stop_grbm, sampler, sample_params, device, compute_mmd, reg_coefficient, loss_fn, title, opt_model, opt_grbm, test_loader, print_every, eval_every, save_every)
+        stats = train(
+            model,
+            grbm,
+            train_loader,
+            num_steps,
+            stop_grbm,
+            sampler,
+            sample_params,
+            device,
+            compute_mmd,
+            reg_coefficient,
+            loss_fn,
+            title,
+            opt_model,
+            opt_grbm,
+            test_loader,
+            print_every,
+            eval_every,
+            save_every,
+        )
     if stats is not None:
         print_stage(title, None, stats)
-    eval_stage(model, grbm, test_loader, sampler, sample_params, device, compute_mmd, compute_pkl, title)
+    eval_stage(
+        model,
+        grbm,
+        test_loader,
+        sampler,
+        sample_params,
+        device,
+        compute_mmd,
+        compute_pkl,
+        title,
+    )
     torch.save(grbm.state_dict(), f"{title}grbm.pt")
     torch.save(model.state_dict(), f"{title}model.pt")
-    
+
+
 if __name__ == "__main__":
     from argparse import ArgumentParser
 
