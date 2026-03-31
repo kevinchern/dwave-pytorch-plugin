@@ -1,6 +1,6 @@
 from itertools import cycle
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import os
 import warnings
 import dwave_networkx as dnx
@@ -14,6 +14,7 @@ from torchvision.datasets import MNIST
 from torchvision.transforms.v2 import Compose, ToDtype, ToImage
 from torchvision.utils import make_grid, save_image
 
+import dimod
 from dwave.plugins.torch.models.boltzmann_machine import (
     GraphRestrictedBoltzmannMachine as GRBM,
 )
@@ -24,6 +25,9 @@ from minorminer.subgraph import find_subgraph
 from dwave.system.composites import FixedEmbeddingComposite
 from dwave.preprocessing.composites import SpinReversalTransformComposite
 from dwave.experimental.automorphism.automorphism_composite import AutomorphismComposite
+
+if TYPE_CHECKING:
+    import dimod
 
 
 class RadialBasisFunction(nn.Module):
@@ -592,7 +596,7 @@ def node_coloring(G: nx.Graph) -> dict[int, int]:
     return {n: str(to_coord(n)[co_index]) for n in G.nodes}
 
 
-def get_qpu_model_grbm(
+def get_model_grbm_qpu_emb(
     solver: str,
     device: str,
     m: int = 5,
@@ -600,10 +604,8 @@ def get_qpu_model_grbm(
     dnx_family: str = "zephyr",
     timeout: int = 60,
     allow_incomplete_yield: bool = False,
-    use_srts: bool = False,
-    use_automorphisms: bool = False,
     orientation_hint: bool = True,
-) -> tuple[DWaveSampler, Autoencoder, GRBM]:
+) -> tuple[Autoencoder, GRBM, DWaveSampler, dict[Any, tuple[Any, ...]]]:
     """Sets up the QPU, GRBM, and Autoencoder model.
 
     Args:
@@ -662,15 +664,27 @@ def get_qpu_model_grbm(
     # grbm.linear.data[:] = 0
     # grbm.quadratic.data[:] = 0
     model = Autoencoder((1, 28, 28), grbm.n_nodes).to(device)
+    return model, grbm, qpu, emb
 
+
+def get_sampler(
+    qpu: DWaveSampler,
+    emb: dict[Any, tuple[Any, ...]],
+    use_srts: bool,
+    use_automorphisms: bool,
+    edges: list[tuple[Any, Any]],
+) -> dimod.Sampler:
     sampler = FixedEmbeddingComposite(qpu, emb)
     if use_srts:
         sampler = SpinReversalTransformComposite(sampler)
     if use_automorphisms:
+        S = nx.Graph()
+        S.add_nodes_from(emb.keys())
+        S.add_edges_from(edges)
         sampler = AutomorphismComposite(sampler, G=S)
     for key in ["h_range", "j_range"]:
         sampler.properties[key] = qpu.properties[key]  # type: ignore
-    return sampler, model, grbm
+    return sampler
 
 
 def compute_pkl(
@@ -700,7 +714,7 @@ def compute_pkl(
     return pkl
 
 
-def print_stage(title: str, step: int | None, stats: dict[str, Any]) -> None:
+def print_stage(title: str, step: int | None, stats: dict[str, torch.Tensor]) -> None:
     """Print stats for the current stage of training.
     Args:
         title: The title for the training run.
@@ -862,16 +876,15 @@ def run(
         eval_every: Run evaluation every this many steps. None disables evaluation.
         save_every: Save checkpoints every this many steps. None disables saving.
     """
-    sampler, model, grbm = get_qpu_model_grbm(
+    model, grbm, qpu, emb = get_model_grbm_qpu_emb(
         solver,
         device,
         m=m,
         t=t,
-        use_srts=use_srts,
-        use_automorphisms=use_automorphisms,
         allow_incomplete_yield=allow_incomplete_yield,
         dnx_family=dnx_family,
     )
+    sampler = get_sampler(qpu, emb, use_srts=use_srts, use_automorphisms=use_automorphisms, edges=grbm.edges)  # type: ignore
     nprng = np.random.default_rng(seed)
     grbm.linear.data[:] = 0.1 * bit2spin_soft(
         torch.tensor(nprng.binomial(1, 0.5, grbm.n_nodes))
