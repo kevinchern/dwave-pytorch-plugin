@@ -1132,7 +1132,12 @@ if __name__ == "__main__":
         help="zephyr, pegasus or chimera family (as target model)",
     )
     parser.add_argument(
-        "--allow_incomplete_yield",
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducibility, None by default",
+    )
+    parser.add_argument(
         action="store_true",
         help="Allow incomplete yield (default is False).",
     )
