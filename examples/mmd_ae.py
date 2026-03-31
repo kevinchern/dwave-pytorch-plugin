@@ -427,7 +427,7 @@ def zephyr_subgraph_t(G: nx.Graph, zephyr_t: int) -> nx.Graph:
 @torch.compile
 class Autoencoder(nn.Module):
 
-    def __init__(self, shape: tuple[int, int, int], n_bits: int) -> None:
+    def __init__(self, input_shape: tuple[int, int, int], n_bits: int) -> None:
         """Initialize the autoencoder model.
 
         Args:
@@ -435,13 +435,13 @@ class Autoencoder(nn.Module):
             n_bits: number of bits for the latent representation.
         """
         super().__init__()
-        _, h, w = shape
+        _, h, w = input_shape
         chidden = 1
         depth_fcnn = 3
         depth_cnn = 3
         dropout = 0.0
         self.encoder = nn.Sequential(
-            ConvolutionNetwork([chidden] * depth_cnn, shape),
+            ConvolutionNetwork([chidden] * depth_cnn, input_shape),
             nn.Flatten(),
             FullyConnectedNetwork(chidden * h * w, n_bits, depth_fcnn, False, dropout),
         )
