@@ -846,17 +846,17 @@ def print_stage(title: str, step: int | None, stats: dict[str, torch.Tensor]) ->
     )
 
 
-def plot_ham(linear: dict, quadratic: dict, title: str) -> None:
+def plot_ham(h: dict, J: dict, title: str) -> None:
     """Plots the linear and quadratic coefficients of the GRBM Hamiltonian.
 
     Args:
-        linear: The linear coefficients of the GRBM.
-        quadratic: The quadratic coefficients of the GRBM.
+        h: The linear coefficients of the GRBM.
+        J: The quadratic coefficients of the GRBM.
         title: The title for the plots, used as a prefix for saved filenames.
     """
-    gauge = {n: 1 - 2 * int(v > 0) for n, v in grbm.h.items()}
+    gauge = {n: 1 - 2 * int(v > 0) for n, v in h.items()}
 
-    y = np.sort(np.abs(grbm.linear.values()))
+    y = np.sort(np.abs(h.values()))
     x = np.arange(len(y)) / len(y)
     plt.figure("h")
     plt.plot(x, y, label={np.mean(y)})
@@ -865,7 +865,7 @@ def plot_ham(linear: dict, quadratic: dict, title: str) -> None:
     plt.savefig(f"{title}_learnt_h.png")
     plt.close()
 
-    y = np.sort([gauge[i1] * gauge[i2] * v for (i1, i2), v in grbm.quadratic.items()])
+    y = np.sort([gauge[i1] * gauge[i2] * v for (i1, i2), v in J.items()])
     x = np.arange(len(y)) / len(y)
     plt.figure("J")
     plt.plot(x, y, label={np.mean(y)})
