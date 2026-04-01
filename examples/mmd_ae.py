@@ -846,7 +846,7 @@ def print_stage(title: str, step: int | None, stats: dict[str, torch.Tensor]) ->
     )
 
 
-def plot_ham(h: dict, J: dict, title: str) -> None:
+def plot_ham(grbm: GRBM, title: str) -> None:
     """Plots the linear and quadratic coefficients of the GRBM Hamiltonian.
 
     Args:
@@ -854,12 +854,14 @@ def plot_ham(h: dict, J: dict, title: str) -> None:
         J: The quadratic coefficients of the GRBM.
         title: The title for the plots, used as a prefix for saved filenames.
     """
+    bqm = grbm.to_ising()
+    h, J = bqm.linear, bqm.quadratic
     gauge = {n: 1 - 2 * int(v > 0) for n, v in h.items()}
 
-    y = np.sort(np.abs(h.values()))
+    y = np.sort(np.abs(list(h.values())))
     x = np.arange(len(y)) / len(y)
-    plt.figure("h")
-    plt.plot(x, y, label={np.mean(y)})
+    plt.figure("hJ")
+    plt.plot(x, y, label=f"{np.mean(y)} +/- {np.std(y)}")
     plt.xlabel("Field, |h|")
     plt.ylabel("Cumulative distribution function")
     plt.savefig(f"{title}_learnt_h.png")
@@ -868,7 +870,7 @@ def plot_ham(h: dict, J: dict, title: str) -> None:
     y = np.sort([gauge[i1] * gauge[i2] * v for (i1, i2), v in J.items()])
     x = np.arange(len(y)) / len(y)
     plt.figure("J")
-    plt.plot(x, y, label={np.mean(y)})
+    plt.plot(x, y, label=f"{np.mean(y)} +/- {np.std(y)}")
     plt.xlabel("Coupling strength, J")
     plt.ylabel("Cumulative distribution function")
     plt.savefig(f"{title}_learnt_J.png")
@@ -902,7 +904,7 @@ def eval_stage(
     """
     model.eval()
     if post_training:
-        plot_ham(grbm.linear, grbm.quadratic, title)
+        plot_ham(grbm, title)
 
         save_gen_multiple_methods(
             grbm=grbm,
