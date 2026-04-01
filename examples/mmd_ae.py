@@ -854,7 +854,7 @@ def plot_ham(grbm: GRBM, title: str) -> None:
         J: The quadratic coefficients of the GRBM.
         title: The title for the plots, used as a prefix for saved filenames.
     """
-    bqm = grbm.to_ising()
+    bqm = grbm.to_ising(prefactor=1)
     h, J = bqm.linear, bqm.quadratic
     gauge = {n: 1 - 2 * int(v > 0) for n, v in h.items()}
 
