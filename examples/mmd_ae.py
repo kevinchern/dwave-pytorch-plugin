@@ -2,6 +2,7 @@ from itertools import cycle
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 import os
+import pickle
 import warnings
 import dwave_networkx as dnx
 import networkx as nx
@@ -694,7 +695,7 @@ def node_coloring(G: nx.Graph) -> dict[int, int]:
     return {n: str(to_coord(n)[co_index]) for n in G.nodes}
 
 
-def get_model_grbm_qpu_emb(
+def get_grbm_qpu_emb(
     solver: str,
     device: str,
     m: int = 5,
@@ -703,9 +704,9 @@ def get_model_grbm_qpu_emb(
     timeout: int = 60,
     allow_incomplete_yield: bool = False,
     orientation_hint: bool = True,
-    input_shape: tuple[int, int, int] = (1, 28, 28),
     seed: int | None = None,
-) -> tuple[Autoencoder, GRBM, DWaveSampler, dict[Any, tuple[Any, ...]]]:
+    title: str = "",
+) -> tuple[GRBM, DWaveSampler, dict[Any, tuple[Any, ...]]]:
     """Sets up the QPU, GRBM, and Autoencoder model.
 
     Args:
@@ -736,10 +737,19 @@ def get_model_grbm_qpu_emb(
         node_labels = (node_coloring(S), node_coloring(T))
     else:
         node_labels = None
-
-    emb = find_subgraph(
-        S, T, timeout=timeout, as_embedding=True, node_labels=node_labels, seed=seed
-    )  # TO DO: add orientation hinting
+    seed_file = f"{title}_seed{seed}_embedding.pkl"
+    if os.path.isfile(seed_file):
+        with open(seed_file, "rb") as f:
+            emb = pickle.load(f)
+        print(f"Loaded from file {seed_file}")
+    else:
+        emb = find_subgraph(
+            S, T, timeout=timeout, as_embedding=True, node_labels=node_labels, seed=seed
+        )
+        if len(emb) == S.number_of_nodes():
+            with open(seed_file, "wb") as f:
+                pickle.dump(emb, f)
+            print(f"Saved embedding to file {seed_file}")
     if len(emb) < S.number_of_nodes():
         if not allow_incomplete_yield:
             raise RuntimeError(
@@ -765,8 +775,7 @@ def get_model_grbm_qpu_emb(
     grbm = GRBM(nodes, edges).to(device)
     # grbm.linear.data[:] = 0
     # grbm.quadratic.data[:] = 0
-    model = Autoencoder(input_shape=input_shape, n_bits=grbm.n_nodes).to(device)
-    return model, grbm, qpu, emb
+    return grbm, qpu, emb
 
 
 def get_sampler(
@@ -978,6 +987,8 @@ def run(
     print_every: int | None = 10,
     eval_every: int | None = 50,
     save_every: int | None = 100,
+    input_shape: tuple[int, int, int] = (1, 28, 28),
+    alt_solver: str | None = None,
 ) -> None:
     """Runs the training loop for the Autoencoder and GRBM.
 
@@ -1002,7 +1013,7 @@ def run(
         eval_every: Run evaluation every this many steps. None disables evaluation.
         save_every: Save checkpoints every this many steps. None disables saving.
     """
-    model, grbm, qpu, emb = get_model_grbm_qpu_emb(
+    grbm, qpu, emb = get_grbm_qpu_emb(
         solver,
         device,
         m=m,
@@ -1010,7 +1021,9 @@ def run(
         allow_incomplete_yield=allow_incomplete_yield,
         dnx_family=dnx_family,
         seed=seed,
+        title=title,
     )
+    model = Autoencoder(input_shape=input_shape, n_bits=grbm.n_nodes).to(device)
     sampler = get_sampler(
         qpu,
         emb,
@@ -1019,6 +1032,7 @@ def run(
         edges=grbm.edges,
         seed=seed,  # Reuse of seed with find_subgraph is not a practical concern.
     )
+
     nprng = np.random.default_rng(seed)
     grbm.linear.data[:] = 0.1 * bit2spin_soft(
         torch.tensor(nprng.binomial(1, 0.5, grbm.n_nodes))
@@ -1057,7 +1071,9 @@ def run(
         grbm.load_state_dict(torch.load(f"{title}grbm.pt"))
         print("Trained grbm exists: try a different title")
         train_model = False
+
     if train_model:
+
         train(
             model,
             grbm,
@@ -1081,19 +1097,36 @@ def run(
     else:
         print("Training skipped, files exist")
     if not train_model or eval_every is None:
-        eval_stage(
-            model,
-            grbm,
-            test_loader,
-            sampler,
-            sample_params,
-            device,
-            title,
-            post_training=True,
-            qpu=qpu,
-            emb=emb,
-            seed=seed,
-        )
+        trips = [(qpu, emb, title)]
+        if alt_solver is not None:
+            assert not allow_incomplete_yield
+            _, alt_qpu, alt_emb = get_grbm_qpu_emb(
+                alt_solver,
+                device,
+                m=m,
+                t=t,
+                allow_incomplete_yield=allow_incomplete_yield,
+                dnx_family=dnx_family,
+                seed=seed,
+                title=f"{title}_alt",
+            )
+            trips += [(alt_qpu, alt_emb, f"{title}_alt")]
+
+        for qpu_test, emb_test, title_test in trips:
+            eval_stage(
+                model,
+                grbm,
+                test_loader,
+                sampler,
+                sample_params=sample_params,
+                device=device,
+                title=title_test,
+                post_training=True,
+                qpu=qpu_test,
+                emb=emb_test,
+                seed=seed,
+            )
+
     torch.save(grbm.state_dict(), f"{title}grbm.pt")
     torch.save(model.state_dict(), f"{title}model.pt")
 
@@ -1173,6 +1206,12 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Random seed for reproducibility, None by default",
+    )
+    parser.add_argument(
+        "--alt_solver",
+        type=str,
+        default=None,
+        help="Alternative solver name, None by default",
     )
     parser.add_argument(
         "--allow_incomplete_yield",
