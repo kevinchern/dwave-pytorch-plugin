@@ -717,7 +717,7 @@ def get_grbm_qpu_emb(
         m: Rows and columns of a small Chimera graph
         t: Tile parameter of a small Chimera graph
         dnx_family: The family of D-Wave hardware to target for the subgraph embedding. This is used to determine the structure of the Chimera graph to embed, which should be compatible with the target hardware. For example, "zephyr" would indicate that we want to embed a Zephyr subgraph, which is a specific type of Chimera graph with certain connectivity properties.
-        timeout: timeout for chimera graph search.
+        timeout: Timeout for find_subgraph in seconds (default is 60s).
         input_shape: The shape of the input images for the Autoencoder.
         seed: Seed for pseudo-random components (find_subgraph).
     Returns:
@@ -1023,6 +1023,7 @@ def run(
     save_every: int | None = 100,
     input_shape: tuple[int, int, int] = (1, 28, 28),
     alt_solver: str | None = None,
+    timeout: int = 60,
 ) -> None:
     """Runs the training loop for the Autoencoder and GRBM.
 
@@ -1046,6 +1047,7 @@ def run(
         print_every: Log training stats every this many steps. None disables logging.
         eval_every: Run evaluation every this many steps. None disables evaluation.
         save_every: Save checkpoints every this many steps. None disables saving.
+        timeout: Timeout for find_subgraph in seconds (default is 60s).
     """
     grbm, qpu, emb = get_grbm_qpu_emb(
         solver,
@@ -1056,6 +1058,7 @@ def run(
         dnx_family=dnx_family,
         seed=seed,
         title=title,
+        timeout=timeout
     )
     model = Autoencoder(input_shape=input_shape, n_bits=grbm.n_nodes).to(device)
     sampler = get_sampler(
@@ -1246,6 +1249,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Alternative solver name, None by default",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=60,
+        help="Timeout for find_subgraph in seconds (default is 60s).",
     )
     parser.add_argument(
         "--allow_incomplete_yield",
