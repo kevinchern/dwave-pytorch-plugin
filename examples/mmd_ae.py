@@ -2,11 +2,12 @@ from itertools import cycle
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 import os
-import pickle
 import warnings
-import dwave_networkx as dnx
+
+import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+import pickle
 import torch
 from torch import nn
 from torch.optim import SGD, AdamW
@@ -16,6 +17,7 @@ from torchvision.transforms.v2 import Compose, ToDtype, ToImage
 from torchvision.utils import make_grid, save_image
 
 import dimod
+import dwave_networkx as dnx
 from dwave.plugins.torch.models.boltzmann_machine import (
     GraphRestrictedBoltzmannMachine as GRBM,
 )
@@ -737,7 +739,7 @@ def get_grbm_qpu_emb(
         node_labels = (node_coloring(S), node_coloring(T))
     else:
         node_labels = None
-    seed_file = f"{title}_seed{seed}_embedding.pkl"
+    seed_file = f"{title}_embedding.pkl"
     if os.path.isfile(seed_file):
         with open(seed_file, "rb") as f:
             emb = pickle.load(f)
@@ -844,6 +846,35 @@ def print_stage(title: str, step: int | None, stats: dict[str, torch.Tensor]) ->
     )
 
 
+def plot_ham(linear: dict, quadratic: dict, title: str) -> None:
+    """Plots the linear and quadratic coefficients of the GRBM Hamiltonian.
+
+    Args:
+        linear: The linear coefficients of the GRBM.
+        quadratic: The quadratic coefficients of the GRBM.
+        title: The title for the plots, used as a prefix for saved filenames.
+    """
+    gauge = {n: 1 - 2 * int(v > 0) for n, v in grbm.h.items()}
+
+    y = np.sort(np.abs(grbm.linear.values()))
+    x = np.arange(len(y)) / len(y)
+    plt.figure("h")
+    plt.plot(x, y, label={np.mean(y)})
+    plt.xlabel("Field, |h|")
+    plt.ylabel("Cumulative distribution function")
+    plt.savefig(f"{title}_learnt_h.png")
+    plt.close()
+
+    y = np.sort([gauge[i1] * gauge[i2] * v for (i1, i2), v in grbm.quadratic.items()])
+    x = np.arange(len(y)) / len(y)
+    plt.figure("J")
+    plt.plot(x, y, label={np.mean(y)})
+    plt.xlabel("Coupling strength, J")
+    plt.ylabel("Cumulative distribution function")
+    plt.savefig(f"{title}_learnt_J.png")
+    plt.close()
+
+
 def eval_stage(
     model: nn.Module,
     grbm: GRBM,
@@ -871,6 +902,8 @@ def eval_stage(
     """
     model.eval()
     if post_training:
+        plot_ham(grbm.linear, grbm.quadratic, title)
+
         save_gen_multiple_methods(
             grbm=grbm,
             qpu=qpu,
