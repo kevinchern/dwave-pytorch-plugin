@@ -1140,8 +1140,6 @@ def run(
                 m=m,
                 t=t,
                 allow_incomplete_yield=allow_incomplete_yield,
-                dnx_family=dnx_family,
-                seed=seed,
                 title=f"{title}_alt",
             )
             trips += [(alt_qpu, alt_emb, f"{title}_alt")]
