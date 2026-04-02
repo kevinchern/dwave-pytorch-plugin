@@ -1,6 +1,6 @@
 from itertools import cycle
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 import os
 import warnings
 
@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
 from torchvision.transforms.v2 import Compose, ToDtype, ToImage
 from torchvision.utils import make_grid, save_image
+from torchmetrics.image.fid import FrechetInceptionDistance
 
 import dimod
 import dwave_networkx as dnx
@@ -32,6 +33,122 @@ from dwave.experimental.automorphism.automorphism_composite import AutomorphismC
 if TYPE_CHECKING:
     import dimod
 
+
+def initialize_fid_by_data_batch(
+    xtest: torch.Tensor = None,
+    test_loader: DataLoader = None,
+    device: str = "cuda",
+    input_shape: tuple[int, int, int] = (1, 28, 28),
+    bootstrap: bool = False,
+    normalize: bool = True,
+) -> FrechetInceptionDistance:
+    """Initializes the Frechet Inception Distance (FID) metric.
+
+    Known insufficiencies: The black and white (1 channel) is naively expanded
+    onto 3 channels. The library expands 28x28 images onto 299x299.
+    TO DO: Make part of autoencoder class?
+    TO DO: Add seed for bootstrapping?
+
+    Args:
+        xtest: Test data. When provided the test_loader is ignored.
+        test_loader: A DataLoader for the test dataset, used to compute the real features for FID.
+        device: The device to run the FID model on, typically "cuda" or "cpu".
+        input_shape: The shape of the input images for the FID model.
+        normalize: True, since data is [0,1] range.
+        bootstrap: Whether to use bootstrap sampling for the test data.
+    Returns:
+        An instance of the FID metric ready for use.
+    """
+    assert xtest is not None or test_loader is not None, (
+        "Either xtest or test_loader must be provided"
+    )
+    channel_mismatch = 3 // input_shape[0]
+    fid_model = FrechetInceptionDistance(
+        normalize=normalize,
+        input_img_size=(3, input_shape[1], input_shape[2]),
+        reset_real_features=False,  # Train once!
+        reset_fake_features=True,  # Reset leaves the real data.
+    ).to(device)
+    fid_model.compile()
+    if xtest is not None:
+        xtest = xtest.to(device)
+        if bootstrap:
+            xtest = xtest[torch.randint(len(xtest), (len(xtest),))]
+        fid_model.update(
+            xtest.repeat(1, channel_mismatch, 1, 1),
+            real=True,
+        )
+    else:
+        for (xtest, _) in test_loader:
+            xtest = xtest.to(device)
+            if bootstrap:
+                xtest = xtest[torch.randint(len(xtest), (len(xtest),))]
+
+            fid_model.update(
+                xtest.repeat(1, channel_mismatch, 1, 1),
+                real=True,
+            )
+    return fid_model
+
+
+def update_fid_by_sampler_batch(
+    model: "Autoencoder",
+    fid_model: FrechetInceptionDistance,
+    xgen: torch.Tensor = None,
+    grbm: GRBM = None,
+    grbm_kwargs: dict[str, Any] | None = None,
+    sampler: dimod.Sampler = None,
+    sampler_kwargs: dict[str, Any] | None = None,
+    device: str | torch.device = "cuda",
+    num_programmings: int = 1,
+    channel_mismatch: int = 3,
+    bootstrap: bool = False,
+    reset: bool = True,
+):
+    """Update FID class using generated data.
+
+    TO DO: Make part of autoencoder class?
+    TO DO: Add seed for bootstrapping?
+    Bootstrapping should be done more carefully, foot in the door method.
+    See fid_model_initialization for known issues.
+    """
+    assert xgen is not None or (sampler is not None and sampler_kwargs is not None), (
+        "Either xgen or sampler and sampler_kwargs must be provided"
+    )
+    if grbm_kwargs is None:
+        grbm_kwargs = dict(
+            linear_range=(-1, 1),
+            quadratic_range=(-1, 1),
+            prefactor=1,
+            device=device,
+        )
+
+    if reset:
+        fid_model.reset()  # Check, partial reset should be possible?
+        torch.cuda.empty_cache()
+    
+    if xgen is not None:
+        xgen = xgen.to(device)
+        if bootstrap:
+            xgen = xgen[torch.randint(len(xgen), (len(xgen),))]
+        fid_model.update(xgen.repeat(1, channel_mismatch, 1, 1), real=False)
+    else:
+        # Bootstrap by programming could make most sense! Revisit.
+        for _ in range(num_programmings):
+            batch_size = sampler_kwargs.get("num_reads")
+            q = grbm.sample(
+                **grbm_kwargs,
+                sampler=sampler,
+                sampler_kwargs=sampler_kwargs,
+            )
+            if bootstrap:
+                # Could sample xgen as alternative.
+                q = q.sample(n=batch_size, replace=True)
+            xgen = model.decode(q).sigmoid()
+            fid_model.update(xgen.repeat(1, channel_mismatch, 1, 1), real=False)
+    fid_val = fid_model.compute()
+    torch.cuda.empty_cache()
+    return fid_val
 
 class RadialBasisFunction(nn.Module):
 
@@ -566,7 +683,7 @@ def save_gen_multiple_methods(
     emb: dict[Any, tuple[Any, ...]],
     model: Autoencoder,
     device: str | torch.device,
-    sample_params: dict[str, Any] | None = None,
+    sampler_kwargs: dict[str, Any] | None = None,
     seed: int | np.random.Generator | None = None,
     title: str = "",
     num_programming_transformations: int = 5,
@@ -583,53 +700,54 @@ def save_gen_multiple_methods(
         emb: The embedding mapping from GRBM nodes to QPU qubits.
         model: The Autoencoder for decoding sampled latent representations.
         device: The device to run computations on.
-        sample_params: Parameters for GRBM sampling. Defaults to None.
+        sampler_kwargs: Parameters for GRBM sampling. Defaults to None.
         seed: Random seed for reproducibility. Defaults to None.
         title: Prefix for output filenames. Defaults to empty string.
         num_programming_transformations: Number of programmings per SRT or automorphism. Defaults to 5.
     """
+
+    grbm_kwargs = dict(
+        linear_range=qpu.properties["h_range"],
+        quadratic_range=qpu.properties["j_range"],
+        prefactor=1,
+        device=device)
     if num_reads is None:
         num_reads = num_programming_transformations**4
-    if sample_params is None:
-        sample_params = dict(annealing_time=0.5, answer_mode="raw", auto_scale=False)
+    if sampler_kwargs is None:
+        sampler_kwargs = dict(annealing_time=0.5, answer_mode="raw", auto_scale=False)
     else:
-        sample_params = sample_params.copy()
+        sampler_kwargs = sampler_kwargs.copy()
 
     for use_srts in [False, True]:
         if use_srts:
-            sample_params["num_spin_reversal_transforms"] = (
+            sampler_kwargs["num_spin_reversal_transforms"] = (
                 num_programming_transformations
             )
             num_reads_per_srt = num_reads // num_programming_transformations
         else:
-            sample_params.pop("num_spin_reversal_transforms", None)
+            sampler_kwargs.pop("num_spin_reversal_transforms", None)
             num_reads_per_srt = num_reads
 
         for use_automorphisms in [False, True]:
             if use_automorphisms:
-                sample_params["num_automorphisms"] = num_programming_transformations
-                sample_params["num_reads"] = (
+                sampler_kwargs["num_automorphisms"] = num_programming_transformations
+                sampler_kwargs["num_reads"] = (
                     num_reads_per_srt // num_programming_transformations
                 )
             else:
-                sample_params.pop("num_automorphisms", None)
-                sample_params["num_reads"] = num_reads_per_srt
-            print("DEBUG statement", sample_params)
+                sampler_kwargs.pop("num_automorphisms", None)
+                sampler_kwargs["num_reads"] = num_reads_per_srt
             sampler = get_sampler(
                 qpu, emb, use_srts, use_automorphisms, grbm.edges, seed
             )
-
             q = grbm.sample(
                 sampler,
-                linear_range=qpu.properties["h_range"],
-                quadratic_range=qpu.properties["j_range"],
-                prefactor=1,
-                device=device,
-                sample_params=sample_params,
+                **grbm_kwargs,
+                sampler_kwargs=sampler_kwargs,
             )
             assert (
                 len(q) == num_reads
-            ), f"Expected num_reads to be {num_reads} after adjusting for SRTs and automorphisms q.shape={q.shape} sample_params={sample_params}"
+            ), f"Expected num_reads to be {num_reads} after adjusting for SRTs and automorphisms q.shape={q.shape} sampler_kwargs={sampler_kwargs}"
             save_gen(
                 model,
                 f"{title}_S{use_srts}A{use_automorphisms}NPT{num_programming_transformations}",
@@ -881,7 +999,7 @@ def eval_stage(
     grbm: GRBM,
     test_loader: DataLoader,
     sampler: Any,
-    sample_params: dict[str, Any],
+    sampler_kwargs: dict[str, Any],
     device: str | torch.device,
     title: str,
     post_training: bool = False,
@@ -896,7 +1014,7 @@ def eval_stage(
         grbm: The graph restricted Boltzmann machine.
         test_loader: DataLoader for the test set.
         sampler: The sampler used for the GRBM.
-        sample_params: Parameters for sampling from the GRBM.
+        sampler_kwargs: Parameters for sampling from the GRBM.
         device: The device to run the computations on.
         title: String appended to filenames for saved visualizations.
         post_training: Whether this evaluation is occurring after training has completed. If True, uses multiple sampler configurations for visualization.
@@ -911,7 +1029,7 @@ def eval_stage(
             emb=emb,
             model=model,
             device=device,
-            sample_params=sample_params,
+            sampler_kwargs=sampler_kwargs,
             seed=seed,
             title=title,
         )
@@ -923,7 +1041,7 @@ def eval_stage(
             linear_range=sampler.properties["h_range"],
             quadratic_range=sampler.properties["j_range"],
             device=device,
-            sample_params=sample_params,
+            sampler_kwargs=sampler_kwargs,
         )
         save_viz(model, xtest, q, title=title)
     model.train()
@@ -936,7 +1054,7 @@ def train(
     num_steps: int,
     stop_grbm: int,
     sampler: Any,
-    sample_params: dict[str, Any],
+    sampler_kwargs: dict[str, Any],
     device: str | torch.device,
     compute_mmd: nn.Module,
     reg_coefficient: float,
@@ -964,7 +1082,7 @@ def train(
             linear_range=sampler.properties["h_range"],
             quadratic_range=sampler.properties["j_range"],
             device=device,
-            sample_params=sample_params,
+            sampler_kwargs=sampler_kwargs,
         )
 
         # Train autoencoder
@@ -989,7 +1107,7 @@ def train(
                 grbm,
                 test_loader,
                 sampler,
-                sample_params,
+                sampler_kwargs,
                 device,
                 title,
             )
@@ -1024,8 +1142,14 @@ def run(
     input_shape: tuple[int, int, int] = (1, 28, 28),
     alt_solver: str | None = None,
     timeout: int = 60,
+    init_max_scale_h: float = 1,
+    init_max_scale_j: float = 0.1,
+    init_distribution: Literal["uniform", "binary"] = "binary",
+    calc_fid: bool = False,
 ) -> None:
     """Runs the training loop for the Autoencoder and GRBM.
+
+    TO DO: Add seed for initialization.
 
     Args:
         title: The title for the training run.
@@ -1071,12 +1195,20 @@ def run(
     )
 
     nprng = np.random.default_rng(seed)
-    grbm.linear.data[:] = 0.1 * bit2spin_soft(
-        torch.tensor(nprng.binomial(1, 0.5, grbm.n_nodes))
-    )
-    grbm.quadratic.data[:] = bit2spin_soft(
-        torch.tensor(nprng.binomial(1, 0.5, grbm.n_edges))
-    )
+    if init_distribution == "binary":
+        grbm.linear.data[:] = init_max_scale_h * bit2spin_soft(
+            torch.tensor(nprng.binomial(1, 0.5, grbm.n_nodes))
+        )
+        grbm.quadratic.data[:] = init_max_scale_j * bit2spin_soft(
+            torch.tensor(nprng.binomial(1, 0.5, grbm.n_edges))
+        )
+    elif init_distribution == "uniform":
+        grbm.linear.data[:] = init_max_scale_h * bit2spin_soft(
+            torch.tensor(nprng.uniform(-1, 1, grbm.n_nodes))
+        )
+        grbm.quadratic.data[:] = init_max_scale_j * bit2spin_soft(
+            torch.tensor(nprng.uniform(-1, 1, grbm.n_edges))
+        )
 
     model.train()
     grbm.train()
@@ -1088,7 +1220,7 @@ def run(
     opt_grbm = SGD(grbm.parameters(), lr=1e-3)
     opt_model = AdamW(model.parameters(), lr=1e-3)
 
-    sample_params = dict(
+    sampler_kwargs = dict(
         num_reads=num_reads,
         annealing_time=annealing_time,
         answer_mode="raw",
@@ -1097,7 +1229,6 @@ def run(
 
     # Set up data
     train_loader, test_loader = get_dataset(num_reads)
-
     compute_mmd = MMDLoss().to(device)
     train_model = True
     if os.path.isfile(f"{title}model.pt"):
@@ -1118,7 +1249,7 @@ def run(
             num_steps,
             stop_grbm,
             sampler,
-            sample_params,
+            sampler_kwargs,
             device,
             compute_mmd,
             reg_coefficient,
@@ -1155,7 +1286,7 @@ def run(
                 grbm,
                 test_loader,
                 sampler,
-                sample_params=sample_params,
+                sampler_kwargs=sampler_kwargs,
                 device=device,
                 title=title_test,
                 post_training=True,
@@ -1163,7 +1294,20 @@ def run(
                 emb=emb_test,
                 seed=seed,
             )
-
+    if calc_fid:
+        fid_model = initialize_fid_by_data_batch(
+            test_loader=test_loader, device=device)
+        for _ in range(5):  # Watch as num samples for intuition.
+            fid_val = update_fid_by_sampler_batch(
+                model=model,
+                fid_model=fid_model,
+                sampler=sampler,
+                sampler_kwargs=sampler_kwargs,
+                device=device,
+                num_programmings=1,
+                reset=False,
+            )
+        print("FID", fid_val)
     torch.save(grbm.state_dict(), f"{title}grbm.pt")
     torch.save(model.state_dict(), f"{title}model.pt")
 
@@ -1270,6 +1414,11 @@ if __name__ == "__main__":
         "--use_automorphisms",
         action="store_true",
         help="Use automorphisms (default is False).",
+    )
+    parser.add_argument(
+        "--calc_fid",
+        action="store_true",
+        help="Calculate FID (default is False).",
     )
     args_ = parser.parse_args()
 
