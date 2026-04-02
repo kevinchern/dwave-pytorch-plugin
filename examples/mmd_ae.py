@@ -34,15 +34,16 @@ if TYPE_CHECKING:
     import dimod
 
 
-def initialize_fid_by_data_batch(
+def update_fid_by_data_batch(
+    fid_model: FrechetInceptionDistance | None = None,
     xtest: torch.Tensor = None,
     test_loader: DataLoader = None,
     device: str = "cuda",
     input_shape: tuple[int, int, int] = (1, 28, 28),
     bootstrap: bool = False,
     normalize: bool = True,
-) -> FrechetInceptionDistance:
-    """Initializes the Frechet Inception Distance (FID) metric.
+) -> tuple[FrechetInceptionDistance, float | None]:
+    """Updates or initializes the Frechet Inception Distance (FID) class.
 
     Known insufficiencies: The black and white (1 channel) is naively expanded
     onto 3 channels. The library expands 28x28 images onto 299x299.
@@ -57,18 +58,22 @@ def initialize_fid_by_data_batch(
         normalize: True, since data is [0,1] range.
         bootstrap: Whether to use bootstrap sampling for the test data.
     Returns:
-        An instance of the FID metric ready for use.
+        A tuple containing an instance of the FID class ready for use and the initial FID value if real features were computed, otherwise None.
     """
     assert xtest is not None or test_loader is not None, (
         "Either xtest or test_loader must be provided"
     )
     channel_mismatch = 3 // input_shape[0]
-    fid_model = FrechetInceptionDistance(
-        normalize=normalize,
-        input_img_size=(3, input_shape[1], input_shape[2]),
-        reset_real_features=False,  # Train once!
-        reset_fake_features=True,  # Reset leaves the real data.
-    ).to(device)
+    if fid_model is None:
+        fid_model = FrechetInceptionDistance(
+            normalize=normalize,
+            input_img_size=(3, input_shape[1], input_shape[2]),
+            reset_real_features=False,  # Train once!
+            reset_fake_features=True,  # Reset leaves the real data.
+        ).to(device)
+        real_features = True
+    else:
+        real_features = False
     fid_model.compile()
     if xtest is not None:
         xtest = xtest.to(device)
@@ -76,7 +81,7 @@ def initialize_fid_by_data_batch(
             xtest = xtest[torch.randint(len(xtest), (len(xtest),))]
         fid_model.update(
             xtest.repeat(1, channel_mismatch, 1, 1),
-            real=True,
+            real=real_features,
         )
     else:
         for (xtest, _) in test_loader:
@@ -86,9 +91,13 @@ def initialize_fid_by_data_batch(
 
             fid_model.update(
                 xtest.repeat(1, channel_mismatch, 1, 1),
-                real=True,
+                real=real_features,
             )
-    return fid_model
+    if real_features:
+        fid_val = fid_model.compute()
+    else:
+        fid_val = None
+    return fid_model, fid_val
 
 
 def update_fid_by_sampler_batch(
@@ -1295,8 +1304,13 @@ def run(
                 seed=seed,
             )
     if calc_fid:
-        fid_model = initialize_fid_by_data_batch(
+        fid_model, _ = update_fid_by_data_batch(
             test_loader=test_loader, device=device)
+        fid_model, fid_val = update_fid_by_data_batch(
+            fid_model=fid_model,
+            test_loader=train_loader, device=device)
+        print('Test versus training FID (baseline)', fid_val)
+        fid_model.reset()
         for _ in range(5):  # Watch as num samples for intuition.
             fid_val = update_fid_by_sampler_batch(
                 model=model,
