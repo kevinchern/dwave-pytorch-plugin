@@ -1,3 +1,5 @@
+# NB - workarounds for nvidia drivers may be required.
+
 from itertools import cycle
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
@@ -69,7 +71,7 @@ def update_fid_by_data_batch(
             normalize=normalize,
             input_img_size=(3, input_shape[1], input_shape[2]),
             reset_real_features=False,  # Train once!
-            reset_fake_features=True,  # Reset leaves the real data.
+            #reset_fake_features=True,  # Reset leaves the real data. Version issue!
         ).to(device)
         real_features = True
     else:
