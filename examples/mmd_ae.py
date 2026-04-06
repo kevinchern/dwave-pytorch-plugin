@@ -95,7 +95,7 @@ def update_fid_by_data_batch(
                 xtest.repeat(1, channel_mismatch, 1, 1),
                 real=real_features,
             )
-    if real_features:
+    if not real_features:
         fid_val = fid_model.compute()
     else:
         fid_val = None
