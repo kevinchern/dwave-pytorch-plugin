@@ -1,0 +1,4 @@
+dwave-experimental
+matplotlib
+torchvision
+torchmetrics[image]

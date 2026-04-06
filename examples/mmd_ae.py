@@ -148,7 +148,7 @@ def update_fid_by_sampler_batch(
             q = grbm.sample(
                 **grbm_kwargs,
                 sampler=sampler,
-                sampler_kwargs=sampler_kwargs,
+                sample_params=sampler_kwargs,
             )
             if bootstrap:
                 # Could sample xgen as alternative.
@@ -752,7 +752,7 @@ def save_gen_multiple_methods(
             q = grbm.sample(
                 sampler,
                 **grbm_kwargs,
-                sampler_kwargs=sampler_kwargs,
+                sample_params=sampler_kwargs,
             )
             assert (
                 len(q) == num_reads
@@ -1050,7 +1050,7 @@ def eval_stage(
             linear_range=sampler.properties["h_range"],
             quadratic_range=sampler.properties["j_range"],
             device=device,
-            sampler_kwargs=sampler_kwargs,
+            sample_params=sampler_kwargs,
         )
         save_viz(model, xtest, q, title=title)
     model.train()
@@ -1091,7 +1091,7 @@ def train(
             linear_range=sampler.properties["h_range"],
             quadratic_range=sampler.properties["j_range"],
             device=device,
-            sampler_kwargs=sampler_kwargs,
+            sample_params=sampler_kwargs,
         )
 
         # Train autoencoder
@@ -1413,6 +1413,12 @@ if __name__ == "__main__":
         type=int,
         default=60,
         help="Timeout for find_subgraph in seconds (default is 60s).",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        help="Can set to cpu for debugging, cuda by default.",
     )
     parser.add_argument(
         "--allow_incomplete_yield",
