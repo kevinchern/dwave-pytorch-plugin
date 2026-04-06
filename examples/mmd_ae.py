@@ -1315,6 +1315,7 @@ def run(
         fid_model.reset()
         for _ in range(5):  # Watch as num samples for intuition.
             fid_val = update_fid_by_sampler_batch(
+                grbm=grbm,
                 model=model,
                 fid_model=fid_model,
                 sampler=sampler,
