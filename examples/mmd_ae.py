@@ -2,7 +2,7 @@
 
 from itertools import cycle
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 import os
 import warnings
 
@@ -31,9 +31,6 @@ from minorminer.subgraph import find_subgraph
 from dwave.system.composites import FixedEmbeddingComposite
 from dwave.preprocessing.composites import SpinReversalTransformComposite
 from dwave.experimental.automorphism.automorphism_composite import AutomorphismComposite
-
-if TYPE_CHECKING:
-    import dimod
 
 
 def update_fid_by_data_batch(
@@ -95,11 +92,28 @@ def update_fid_by_data_batch(
                 xtest.repeat(1, channel_mismatch, 1, 1),
                 real=real_features,
             )
+    fid_val = None
     if not real_features:
         fid_val = fid_model.compute()
-    else:
-        fid_val = None
+
     return fid_model, fid_val
+
+
+def test_data_expectations(model, test_loader):
+    """Calculate marginal probabilites from the test data, for comparison to the GRBM samples.
+    
+    Args:
+        model: The Autoencoder model, used to decode the test data.
+        test_loader: A DataLoader for the test dataset, used to compute the marginal probabilities. 
+    
+    Returns:
+        A tensor containing the marginal probabilities computed from the test data.
+    """
+    data = []
+    for (xtest, _) in test_loader:
+        _, q, _ = model(xtest)
+        data.append(torch.mean(q, 0))
+    return torch.mean(torch.stack(data), 0)
 
 
 def update_fid_by_sampler_batch(
@@ -137,7 +151,7 @@ def update_fid_by_sampler_batch(
     if reset:
         fid_model.reset()  # Check, partial reset should be possible?
         torch.cuda.empty_cache()
-    
+
     if xgen is not None:
         xgen = xgen.to(device)
         if bootstrap:
@@ -160,6 +174,7 @@ def update_fid_by_sampler_batch(
     fid_val = fid_model.compute()
     torch.cuda.empty_cache()
     return fid_val
+
 
 class RadialBasisFunction(nn.Module):
 
@@ -1305,17 +1320,23 @@ def run(
                 emb=emb_test,
                 seed=seed,
             )
-    if calc_fid:
+    fid_npy = f"{title}fids.npy"
+
+    if calc_fid and not os.path.isfile(fid_npy):
+         grbm_kwargs = dict(
+            linear_range=qpu.properties["h_range"],
+            quadratic_range=qpu.properties["j_range"],
+            prefactor=1,
+            device=device,
+        )
         fid_model, _ = update_fid_by_data_batch(
             test_loader=test_loader, device=device)
-        fid_model, fid_val = update_fid_by_data_batch(
-            fid_model=fid_model,
-            test_loader=train_loader, device=device)
-        print('Test versus training FID (baseline)', fid_val)
-        fid_model.reset()
-        for _ in range(5):  # Watch as num samples for intuition.
+        # Can calculate FID relative to test set, yields 1.1638
+        fids = []
+        for _ in range(10):  # Watch as num samples for intuition.
             fid_val = update_fid_by_sampler_batch(
                 grbm=grbm,
+                grbm_kwargs=grbm_kwargs,
                 model=model,
                 fid_model=fid_model,
                 sampler=sampler,
@@ -1324,7 +1345,9 @@ def run(
                 num_programmings=1,
                 reset=False,
             )
-        print("FID", fid_val)
+            fids.append(fid_val)
+            print("FID for GRBM sampler", fid_val)
+            np.save(fid_npy, np.array(fids))
     torch.save(grbm.state_dict(), f"{title}grbm.pt")
     torch.save(model.state_dict(), f"{title}model.pt")
 
