@@ -1323,7 +1323,7 @@ def run(
     fid_npy = f"{title}fids.npy"
 
     if calc_fid and not os.path.isfile(fid_npy):
-         grbm_kwargs = dict(
+        grbm_kwargs = dict(
             linear_range=qpu.properties["h_range"],
             quadratic_range=qpu.properties["j_range"],
             prefactor=1,
