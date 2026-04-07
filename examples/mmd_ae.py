@@ -99,23 +99,6 @@ def update_fid_by_data_batch(
     return fid_model, fid_val
 
 
-def test_data_expectations(model, test_loader):
-    """Calculate marginal probabilites from the test data, for comparison to the GRBM samples.
-    
-    Args:
-        model: The Autoencoder model, used to decode the test data.
-        test_loader: A DataLoader for the test dataset, used to compute the marginal probabilities. 
-    
-    Returns:
-        A tensor containing the marginal probabilities computed from the test data.
-    """
-    data = []
-    for (xtest, _) in test_loader:
-        _, q, _ = model(xtest)
-        data.append(torch.mean(q, 0))
-    return torch.mean(torch.stack(data), 0)
-
-
 def update_fid_by_sampler_batch(
     model: "Autoencoder",
     fid_model: FrechetInceptionDistance,
@@ -1143,6 +1126,29 @@ def train(
             torch.save(model.state_dict(), f"{title}model.pt")
     return stats
 
+def plot_fids(
+    fids: list[float] | np.ndarray,
+    title: str,
+    plot_baseline: bool = True,
+    show: bool = False,
+) -> None:
+    """Plots the FID score.
+
+    Args:
+        fid: The FID score to plot.
+        title: The title for the plot, used as a prefix for the saved filename.
+    """
+    plt.figure("FID")
+    plt.plot(np.arange(len(fids)) + 1, fids)
+    if plot_baseline:
+        plt.plot([0, len(fids)], [1.1638] * 2, linestyle="--", color="gray")
+    plt.ylabel("Frechet Inception Distance (FID)")
+    plt.xlabel("Number of programmings")
+    plt.title(f"{title} FID")
+    plt.savefig(f"{title}_fid.png")
+    if show:
+        plt.show()
+    plt.close()
 
 def run(
     *,
@@ -1322,32 +1328,37 @@ def run(
             )
     fid_npy = f"{title}fids.npy"
 
-    if calc_fid and not os.path.isfile(fid_npy):
-        grbm_kwargs = dict(
-            linear_range=qpu.properties["h_range"],
-            quadratic_range=qpu.properties["j_range"],
-            prefactor=1,
-            device=device,
-        )
-        fid_model, _ = update_fid_by_data_batch(
-            test_loader=test_loader, device=device)
-        # Can calculate FID relative to test set, yields 1.1638
-        fids = []
-        for _ in range(10):  # Watch as num samples for intuition.
-            fid_val = update_fid_by_sampler_batch(
-                grbm=grbm,
-                grbm_kwargs=grbm_kwargs,
-                model=model,
-                fid_model=fid_model,
-                sampler=sampler,
-                sampler_kwargs=sampler_kwargs,
+    if calc_fid:
+        if not os.path.isfile(fid_npy):
+            grbm_kwargs = dict(
+                linear_range=qpu.properties["h_range"],
+                quadratic_range=qpu.properties["j_range"],
+                prefactor=1,
                 device=device,
-                num_programmings=1,
-                reset=False,
             )
-            fids.append(fid_val.cpu())
-            print("FID for GRBM sampler", fid_val)
-            np.save(fid_npy, np.array(fids))
+            fid_model, _ = update_fid_by_data_batch(
+                test_loader=test_loader, device=device
+            )
+            # Can calculate FID relative to test set, yields 1.1638
+            fids = []
+            for _ in range(10):  # Watch as num samples for intuition.
+                fid_val = update_fid_by_sampler_batch(
+                    grbm=grbm,
+                    grbm_kwargs=grbm_kwargs,
+                    model=model,
+                    fid_model=fid_model,
+                    sampler=sampler,
+                    sampler_kwargs=sampler_kwargs,
+                    device=device,
+                    num_programmings=1,
+                    reset=False,
+                )
+                fids.append(fid_val.cpu())
+                print("FID for GRBM sampler", fid_val)
+                np.save(fid_npy, np.array(fids))
+
+        fids = np.load(fid_npy)
+        plot_fids(fids, title)
     torch.save(grbm.state_dict(), f"{title}grbm.pt")
     torch.save(model.state_dict(), f"{title}model.pt")
 
