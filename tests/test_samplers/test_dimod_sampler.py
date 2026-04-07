@@ -22,7 +22,7 @@ from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzman
 from dwave.plugins.torch.samplers.dimod_sampler import DimodSampler
 from dwave.samplers import SteepestDescentSampler
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
-
+from dwave.samplers import SimulatedAnnealingSampler 
 
 class TestDimodSampler(unittest.TestCase):
     def setUp(self) -> None:
@@ -125,6 +125,51 @@ class TestDimodSampler(unittest.TestCase):
                 torch.tensor(list(tracker.input['J'].values())),
                 torch.tensor([0, 0, 0, 0.0])
             )
+        
+        with self.subTest("Conditional sampling preserves clamped variables"):
+            sampler = DimodSampler(
+                self.bm,
+                SimulatedAnnealingSampler(),
+                prefactor=1,
+                sample_kwargs=dict(num_reads=1)
+            )
+
+            x = torch.tensor([
+                [1.0, float("nan"), -1.0, float("nan")],
+                [float("nan"), -1.0, float("nan"), 1.0],
+            ])
+
+            samples = sampler.sample(x)
+
+            # Shape check
+            self.assertTupleEqual(samples.shape, x.shape)
+            
+            # Check clamped values unchanged
+            mask = ~torch.isnan(x)
+            self.assertTrue(torch.all(samples[mask] == x[mask]))
+
+            # Check free variables are ±1
+            free_mask = torch.isnan(x)
+            free_values = samples[free_mask]
+            self.assertTrue(torch.all(torch.isin(free_values, torch.tensor([-1.0, 1.0]))),
+                            "Free variables should be sampled as ±1")
+            
+        with self.subTest("Conditional sampling with all variables clamped returns input unchanged."):
+            sampler = DimodSampler(
+                self.bm,
+                SimulatedAnnealingSampler(),
+                prefactor=1,
+                sample_kwargs=dict(num_reads=1)
+            )
+
+            x = torch.tensor([
+                [+1.0, -1.0, -1.0, +1.0],
+                [-1.0, +1.0, -1.0, -1.0],
+            ])
+
+            samples = sampler.sample(x)
+            # All spins clamped, should return identical tensor
+            torch.testing.assert_close(samples, x)    
 
     def test_sample_set(self):
         grbm = GRBM(list("abcd"), [("a", "b")])

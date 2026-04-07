@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import torch
-from dimod import Sampler
+import dimod
 from hybrid.composers import AggregatedSamples
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
@@ -93,18 +93,84 @@ class DimodSampler(TorchSampler):
                 interpreted as a batch of partially-observed spins. Entries marked with ``torch.nan`` will
                 be sampled; entries with +/-1 values will remain constant.
         """
-        if x is not None:
-            raise NotImplementedError("Support for conditional sampling has not been implemented.")
+        device = self._grbm._linear.device
+        nodes = self._grbm.nodes
+        n_nodes = self._grbm.n_nodes
 
         h, J = self._grbm.to_ising(self._prefactor, self._linear_range, self._quadratic_range)
-        self._sample_set = AggregatedSamples.spread(
-            self._sampler.sample_ising(h, J, **self._sampler_params)
-        )
+        
+        # Unconditional sampling
+        if x is None:
+            self._sample_set = AggregatedSamples.spread(
+                self._sampler.sample_ising(h, J, **self._sampler_params)
+            )
+            return sampleset_to_tensor(nodes, self._sample_set, device)
 
-        # use same device as modules linear
-        device = self._grbm._linear.device
-        return sampleset_to_tensor(self._grbm.nodes, self._sample_set, device)
+        # Conditional sampling
+        if x.shape[1] != n_nodes:
+            raise ValueError(f"x must have shape (batch_size, {n_nodes})")
 
+        mask = ~torch.isnan(x)
+        if not torch.all(torch.isin(x[mask], torch.tensor([-1, 1], device=x.device))):
+            raise ValueError("x must contain only ±1 or NaN")
+
+        results = []
+        for i in range(x.shape[0]):
+            # Fresh BQM
+            bqm = dimod.BinaryQuadraticModel.from_ising(h, J)
+
+            # Build conditioning dict
+            conditioned = {node: int(x[i, j].item())
+                        for j, node in enumerate(nodes) if mask[i, j]}
+
+            # Apply conditioning
+            if conditioned:
+                bqm.fix_variables(conditioned)
+
+            # Clip linear biases for remaining free variables
+            if self._linear_range is not None:
+                lb, ub = self._linear_range
+                for v in bqm.linear:
+                    if bqm.linear[v] > ub:
+                        bqm.set_linear(v, ub)
+                    elif bqm.linear[v] < lb:
+                        bqm.set_linear(v, lb)
+
+            # Clip quadratic biases
+            if self._quadratic_range is not None:
+                lb, ub = self._quadratic_range
+                for u, v, bias in bqm.iter_quadratic():
+                    if bias > ub:
+                        bqm.set_quadratic(u, v, ub)
+                    elif bias < lb:
+                        bqm.set_quadratic(u, v, lb)
+
+            # Handle fully clamped case
+            if bqm.num_variables == 0:
+                full = torch.tensor([conditioned[node] for node in nodes],
+                                    device=device, dtype=torch.float)
+                results.append(full)
+                continue
+
+            # Sample one configuration per input
+            sample_kwargs = dict(self._sampler_params)
+            sample_kwargs["num_reads"] = 1
+            sample_set = AggregatedSamples.spread(
+                self._sampler.sample(bqm, **sample_kwargs)
+            )
+                 
+            # Extract sampled values
+            sample = sample_set.first.sample
+
+            # Reconstruct full sample
+            full = torch.empty(n_nodes, device=device)
+            for j, node in enumerate(nodes):
+                full[j] = conditioned[node] if node in conditioned else float(sample[node])
+            results.append(full)
+        
+        # Stack to get (batch_size, n_nodes)
+        return torch.stack(results, dim=0)
+    
     @property
     def sample_set(self) -> dimod.SampleSet:
         """The sample set returned from the latest sample call."""
