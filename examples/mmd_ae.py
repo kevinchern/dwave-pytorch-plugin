@@ -1345,7 +1345,7 @@ def run(
                 num_programmings=1,
                 reset=False,
             )
-            fids.append(fid_val)
+            fids.append(fid_val.cpu())
             print("FID for GRBM sampler", fid_val)
             np.save(fid_npy, np.array(fids))
     torch.save(grbm.state_dict(), f"{title}grbm.pt")
