@@ -15,14 +15,13 @@
 import unittest
 
 import torch
-from dimod import SPIN, BinaryQuadraticModel, IdentitySampler, SampleSet, TrackingComposite
-from parameterized import parameterized
+from dimod import IdentitySampler, SampleSet, TrackingComposite
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.dimod_sampler import DimodSampler
 from dwave.samplers import SteepestDescentSampler
-from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
 from dwave.samplers import SimulatedAnnealingSampler 
+from dwave.plugins.torch.utils import sampleset_to_tensor
 
 class TestDimodSampler(unittest.TestCase):
     def setUp(self) -> None:
@@ -187,6 +186,31 @@ class TestDimodSampler(unittest.TestCase):
         with self.subTest("The `sample_set` attribute should be of type `dimod.SampleSet`."):
             self.assertTrue(isinstance(sampler.sample_set, SampleSet))
 
+    def test_order_sample(self):
+        
+        nodes = ["b", "a", "c"]
+        edges = [("a", "b"), ("b", "c")]
 
+        grbm = GRBM(nodes, edges)
+
+        sampler = DimodSampler(
+            grbm,
+            SimulatedAnnealingSampler(),
+            prefactor=1.0,
+            sample_kwargs=dict(num_reads=1)
+        )
+
+        x = torch.tensor([
+            [float("nan"), float("nan"), -1.0],
+        ])
+
+        out = sampler.sample(x)
+        ss = sampler.sample_set
+        
+        # Check alignment with sampleset_to_tensor
+        expected_samples = sampleset_to_tensor(nodes, ss, device=out.device)
+        
+        assert torch.allclose(out, expected_samples)
+    
 if __name__ == "__main__":
     unittest.main()
