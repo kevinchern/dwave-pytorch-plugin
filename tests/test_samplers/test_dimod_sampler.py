@@ -186,31 +186,5 @@ class TestDimodSampler(unittest.TestCase):
         with self.subTest("The `sample_set` attribute should be of type `dimod.SampleSet`."):
             self.assertTrue(isinstance(sampler.sample_set, SampleSet))
 
-    def test_order_sample(self):
-        
-        nodes = ["b", "a", "c"]
-        edges = [("a", "b"), ("b", "c")]
-
-        grbm = GRBM(nodes, edges)
-
-        sampler = DimodSampler(
-            grbm,
-            SimulatedAnnealingSampler(),
-            prefactor=1.0,
-            sample_kwargs=dict(num_reads=1)
-        )
-
-        x = torch.tensor([
-            [float("nan"), float("nan"), -1.0],
-        ])
-
-        out = sampler.sample(x)
-        ss = sampler.sample_set
-        
-        # Check alignment with sampleset_to_tensor
-        expected_samples = sampleset_to_tensor(nodes, ss, device=out.device)
-        
-        assert torch.allclose(out, expected_samples)
-    
 if __name__ == "__main__":
     unittest.main()

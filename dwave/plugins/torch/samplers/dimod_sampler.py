@@ -13,7 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import dimod
@@ -26,7 +26,7 @@ from dwave.plugins.torch.utils import sampleset_to_tensor
 
 if TYPE_CHECKING:
     import dimod
-
+    from dimod import SampleSet
     from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
 
 
@@ -87,16 +87,17 @@ class DimodSampler(TorchSampler):
         """Sample from the dimod sampler and return the corresponding tensor.
 
         The sample set returned from the latest sample call is stored in :func:`DimodSampler.sample_set`
-        which is overwritten by subsequent calls. When ``x`` is provided (conditional sampling), exactly
-        one sample is drawn per input row. Any user-specified ``num_reads`` in ``sample_kwargs`` will be
-        ignored and overridden to 1.
+        which is overwritten by subsequent calls. When ``x`` is provided (conditional sampling), the method
+        expects the underlying sampler to return a SampleSet containing exactly one sample per row of ``x``; 
+        otherwise, a ValueError is raised.
 
         Args:
             x (torch.Tensor): A tensor of shape (``batch_size``, ``dim``) or (``batch_size``, ``n_nodes``)
                 interpreted as a batch of partially-observed spins. Entries marked with ``torch.nan`` will
                 be sampled; entries with +/-1 values will remain constant.
         Raises:
-            ValueError: If ``x`` has an invalid shape or contains values other than ±1 or NaN.
+            ValueError: If ``x`` has an invalid shape or contains values other than ±1 or NaN or if the 
+                sampler returns more than one sample per input row.
             
         Returns:
             torch.Tensor: A tensor of shape (``batch_size``, ``n_nodes``) containing
@@ -113,7 +114,7 @@ class DimodSampler(TorchSampler):
             self._sample_set = AggregatedSamples.spread(
                 self._sampler.sample_ising(h, J, **self._sampler_params)
             )
-            return sampleset_to_tensor(nodes, self._sample_set, device)
+            return self._sampleset_to_tensor(self._sample_set, device)
 
         # Conditional sampling
         if x.shape[1] != n_nodes:
@@ -164,36 +165,51 @@ class DimodSampler(TorchSampler):
 
             # Sample one configuration per input
             sample_kwargs = dict(self._sampler_params)
-            if "num_reads" in sample_kwargs and sample_kwargs["num_reads"] != 1:
-                warnings.warn(
-                    "`num_reads` is ignored during conditional sampling and set to 1 "
-                    "(one sample per input row).",
-                    UserWarning,
-                )
-                sample_kwargs["num_reads"] = 1
             
-            sample_set = self._sampler.sample(bqm, **sample_kwargs)
-            
+            # Storing the latest samples                        
+            self._sample_set = self._sampler.sample(bqm, **sample_kwargs)
+                        
+            if len(self._sample_set) > 1:
+                raise ValueError(f"Expected exactly one sample per input row, but got {len(self._sample_set)}")
+
             # Extract sampled values
-            sample = sample_set.first.sample
+            sample = self._sample_set.first.sample
 
             # Reconstruct full sample
             full = torch.empty(n_nodes, device=device)
-            for j, node in enumerate(nodes):
-                full[j] = conditioned[node] if node in conditioned else float(sample[node])
+            for node, idx in self._grbm._node_to_idx.items():
+                full[idx] = conditioned[node] if node in conditioned else float(sample[node])
             results.append(full)
 
         # Stack to get (batch_size, n_nodes)
         samples = torch.stack(results, dim=0)
-        energies = self._grbm(samples).detach().cpu().numpy()
-        
-        self._sample_set = dimod.SampleSet.from_samples(
-            (samples.cpu().numpy(), self._grbm.nodes),
-            vartype=dimod.SPIN,
-            energy=energies,
-        )
         return samples
     
+    def _sampleset_to_tensor(self, sample_set: SampleSet, device: Optional[torch.device] = None
+    ) -> torch.Tensor:
+        """Converts a ``dimod.SampleSet`` to a ``torch.Tensor`` using GRBM node order.
+
+        Args:
+            sample_set (dimod.SampleSet): A sample set.
+            device (torch.device, optional): The device of the constructed tensor.
+                If ``None`` and data is a tensor then the device of data is used.
+                If ``None`` and data is not a tensor then the result tensor is constructed
+                on the current device.
+
+        Returns:
+            torch.Tensor: The sample set as a ``torch.Tensor``.
+        """
+        var_to_sample_i = {v: i for i, v in enumerate(sample_set.variables)}
+
+        # Convert dict -> ordered list by index
+        ordered_vars = [v for v, _ in sorted(self._grbm.node_to_idx.items(), key=lambda x: x[1])]
+
+        permutation = [var_to_sample_i[v] for v in ordered_vars]
+
+        sample = sample_set.record.sample[:, permutation]
+
+        return torch.from_numpy(sample).to(device=device, dtype=torch.float32)
+
     @property
     def sample_set(self) -> dimod.SampleSet:
         """The sample set returned from the latest sample call."""
