@@ -1412,7 +1412,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--solver",
         type=str,
-        default="Advantage2_system1.13",
+        default="Advantage2_system1",
         help="Leap QPU solver name",
     )
     parser.add_argument(
