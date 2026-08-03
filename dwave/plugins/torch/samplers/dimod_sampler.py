@@ -13,7 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 import dimod
@@ -26,7 +26,6 @@ from dwave.plugins.torch.utils import sampleset_to_tensor
 
 if TYPE_CHECKING:
     import dimod
-    from dimod import SampleSet
     from dwave.plugins.torch.models.boltzmann_machine import (
         GraphRestrictedBoltzmannMachine,
     )
@@ -156,15 +155,6 @@ class DimodSampler(TorchSampler):
                     elif bias < lb:
                         bqm.set_linear(v, lb)
 
-            # Clip quadratic biases
-            if self._quadratic_range is not None:
-                lb, ub = self._quadratic_range
-                for u, v, bias in bqm.iter_quadratic():
-                    if bias > ub:
-                        bqm.set_quadratic(u, v, ub)
-                    elif bias < lb:
-                        bqm.set_quadratic(u, v, lb)
-
             # Storing the latest samples
             self._sample_set = AggregatedSamples.spread(
                 self._sampler.sample(bqm, **self._sampler_params)
@@ -192,7 +182,7 @@ class DimodSampler(TorchSampler):
         samples = torch.stack(results, dim=0)
         return samples
 
-    def _sampleset_to_tensor(self, sample_set: SampleSet, device: Optional[torch.device] = None) -> torch.Tensor:
+    def _sampleset_to_tensor(self, sample_set: dimod.SampleSet, device: torch.device | None = None) -> torch.Tensor:
         """Converts a ``dimod.SampleSet`` to a ``torch.Tensor`` using GRBM node order.
 
         Args:
