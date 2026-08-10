@@ -45,7 +45,15 @@ class TestBipartiteGibbsSampler(unittest.TestCase):
 
         # RNG should remain on CPU (meta not supported)
         self.assertEqual("cpu", sampler._rng.device.type)
-    
+
+    def test_visible_visible_connection(self):
+        nodes = ["v1", "v2", "h1"]
+        edges = [["v1", "h1"], ["v1", "v2"]]
+        grbm = GRBM(nodes, edges, hidden_nodes=["h1"])
+
+        with self.assertRaisesRegex(ValueError, "BipartiteGibbsSampler requires no visible-visible connections"):
+            BipartiteGibbsSampler(grbm, num_chains=2, schedule=[1.0])
+
     def test_prepare_initial_states(self):
         nodes = ["v1", "v2", "h1", "h2"]
         edges = [["v1", "h1"], ["v1", "h2"], ["v2", "h1"], ["v2", "h2"]]
@@ -79,7 +87,7 @@ class TestBipartiteGibbsSampler(unittest.TestCase):
         with self.subTest("Testing initial states with incorrect shape."):
             self.assertRaisesRegex(ValueError, "Initial states should be of shape", sampler._prepare_initial_states,
                               num_chains=2, initial_states=torch.tensor([[-1, 1, 1, 1, -1]]))
-                
+
     def test_compute_effective_field_bipartite(self):
         # Define bipartite graph
         nodes = ["v1", "v2", "h1", "h2"]

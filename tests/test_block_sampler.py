@@ -14,7 +14,7 @@
 
 import unittest
 
-import dwave_networkx as dnx
+from dwave.graphs import zephyr_graph, zephyr_four_color
 import networkx as nx
 import torch
 from parameterized import parameterized
@@ -24,9 +24,9 @@ from dwave.plugins.torch.samplers.block_spin_sampler import BlockSampler
 
 
 class TestBlockSampler(unittest.TestCase):
-    ZEPHYR = dnx.zephyr_graph(1, coordinates=True)
+    ZEPHYR = zephyr_graph(1, coordinates=True)
     GRBM_ZEPHYR = GRBM(ZEPHYR.nodes, ZEPHYR.edges)
-    CRAYON_ZEPHYR = dnx.zephyr_four_color
+    CRAYON_ZEPHYR = zephyr_four_color
 
     BIPARTITE = nx.complete_bipartite_graph(5, 3)
     GRBM_BIPARTITE = GRBM(BIPARTITE.nodes, BIPARTITE.edges)

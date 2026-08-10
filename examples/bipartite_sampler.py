@@ -18,6 +18,9 @@ from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzman
 from dwave.plugins.torch.samplers.bipartite_sampler import BipartiteGibbsSampler
 
 def run():
+    """Run an example of fitting a graph-restricted Boltzmann machine with a BipartiteGibbsSampler
+    to synthetic data generated uniformly at random.
+    """
     # RBM
     n_visible, n_hidden = 50, 20
     visible_nodes = [f"v{i}" for i in range(n_visible)]

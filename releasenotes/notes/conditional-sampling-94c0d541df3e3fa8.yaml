@@ -5,7 +5,7 @@ features:
     bipartite graph-restricted Boltzmann Machines.
   - |
     Add conditional sampling functionality for the ``BlockSampler``.
-  upgrade:
+upgrade:
   - |
     Add ``.clone()`` to the return of ``BlockSampler.sample`` to prevent
     unintended in-place modification of the sampler's internal state due to

@@ -72,9 +72,6 @@ class BipartiteGibbsSampler(TorchSampler):
         initial_states: torch.Tensor | None = None,
         seed: int | None = None,
     ):
-        if grbm._connected_hidden:
-            raise ValueError("BipartiteGibbsSampler requires no hidden-hidden connections.")
-        
         visible_nodes = set(grbm.nodes) - set(grbm.hidden_nodes)
         connected_visible = self._connected_hidden = any(
             a in visible_nodes and b in visible_nodes for a, b in grbm.edges
