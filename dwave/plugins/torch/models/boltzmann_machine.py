@@ -50,6 +50,18 @@ __all__ = ["GraphRestrictedBoltzmannMachine"]
 class GraphRestrictedBoltzmannMachine(torch.nn.Module):
     """Creates a graph-restricted Boltzmann machine.
 
+    The initialization strategy is grounded in `Hinton's practical guide for RBM training
+    <https://www.cs.toronto.edu/~hinton/absps/guideTR.pdf>`_, which recommends sampling weights
+    from a Gaussian distribution with mean 0 and small standard deviation. The quadratic weights
+    are initialized with graph-connectivity-dependent standard deviations so the energy remains
+    extensive on sparse graphs as well as dense graphs. In particular, For edge :math:`(u, v)`,
+    we set the standard deviation of its J value as :math:`ß / (\deg(u)\deg(v))^{1/4}`, where
+    :math:`ß=2.5` is half of a representative QPU inverse sampling-temperature scale. This
+    initializes the GRBM in a paramagnetic regime, consistent with the `Sherrington-Kirkpatrick
+    model <https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.35.1792>`_.
+    The linear biases are initialized to zero to avoid introducing any initial preference for spin
+    configurations.
+
     Args:
         nodes (Iterable[Hashable]): List of nodes.
         edges (Iterable[tuple[Hashable, Hashable]]): List of edges.
@@ -60,6 +72,13 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         quadratic (dict[tuple[Hashable, Hashable], float]): A dictionary mapping from edges of the
             model to its corresponding quadratic bias.
     """
+    # QPU beta has been measured to be 5-8 (in inverse units of programmed J)
+    # Considering the higher temperature within this range, to sample from a beta=1
+    # Boltzmann distribution, a prefactor of 5 has to multiply the initial Hamiltonian.
+    # To keep the energy scale of the initial Hamiltonian below the effective thermal
+    # energy, we multiply the Hamiltonian weights by an even smaller prefactor so
+    # that the prepared distribution is that of a paramagnet.
+    _INIT_INVERSE_TEMP = 2.5
 
     def __init__(
         self,
@@ -83,11 +102,24 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         self._idx_to_edge = {i: e for i, e in enumerate(self._edges)}
         self._edge_to_idx = {e: i for i, e in self._idx_to_edge.items()}
 
-        self._linear = torch.nn.Parameter(0.05 * (2 * torch.rand(self._n_nodes) - 1))
-        self._quadratic = torch.nn.Parameter(5.0 * (2 * torch.rand(self._n_edges) - 1))
-
         edge_idx_i = torch.tensor([self._node_to_idx[i] for i, _ in self._edges])
         edge_idx_j = torch.tensor([self._node_to_idx[j] for _, j in self._edges])
+
+        degrees = torch.zeros(self._n_nodes)
+        for i, j in zip(edge_idx_i, edge_idx_j):
+            degrees[i] += 1
+            degrees[j] += 1
+
+        if self._n_edges:
+            quadratic_std = self._INIT_INVERSE_TEMP / (
+                degrees[edge_idx_i] * degrees[edge_idx_j]
+            )**0.25
+            quadratic_init = torch.randn(self._n_edges) * quadratic_std
+        else:
+            quadratic_init = torch.empty(0)
+
+        self._linear = torch.nn.Parameter(torch.zeros(self._n_nodes))
+        self._quadratic = torch.nn.Parameter(quadratic_init)
 
         if (edge_idx_i == edge_idx_j).any():
             loop_indices = edge_idx_i[(edge_idx_i == edge_idx_j).argwhere()].tolist()

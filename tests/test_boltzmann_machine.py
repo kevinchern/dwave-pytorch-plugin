@@ -70,6 +70,38 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         self.assertAlmostEqual(bm.linear[2].item(), w1, 2)
         self.assertAlmostEqual(bm.quadratic[3].item(), w2, 2)
 
+    def test_default_quadratic_initialization_uses_connectivity(self):
+        nodes = list("abcd")
+        edges = [("a", "b"), ("a", "c"), ("a", "d"), ("b", "c")]
+        degrees = torch.tensor([3.0, 2.0, 2.0, 1.0])
+        edge_idx_i = torch.tensor([0, 0, 0, 1])
+        edge_idx_j = torch.tensor([1, 2, 3, 2])
+        expected_std = 2.5 / (degrees[edge_idx_i] * degrees[edge_idx_j])**0.25
+
+        torch.manual_seed(1234)
+        expected_quadratic = torch.randn(len(edges)) * expected_std
+
+        torch.manual_seed(1234)
+        bm = GRBM(nodes, edges)
+
+        torch.testing.assert_close(bm.linear, torch.zeros(len(nodes)))
+        torch.testing.assert_close(bm.quadratic, expected_quadratic)
+
+    def test_default_quadratic_initialization_edgeless(self):
+        bm = GRBM([0, 1, 2], [])
+
+        torch.testing.assert_close(bm.linear, torch.zeros(3))
+        self.assertEqual(0, bm.quadratic.numel())
+
+    def test_custom_quadratic_overrides_default_initialization(self):
+        bm = GRBM(
+                ["a", "b", "c"], [("a", "b"), ("b", "c")], quadratic={("b", "c"): 1.25},
+                linear={"a": 0.2},
+        )
+
+        self.assertAlmostEqual(1.25, bm.quadratic[1].item())
+        self.assertAlmostEqual(0.2, bm.linear[0].item())
+
     def test_selfloop(self):
         # Create a triangle graph with an additional dangling vertex
         #       a-SELF-LOOP
