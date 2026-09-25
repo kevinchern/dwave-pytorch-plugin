@@ -31,7 +31,14 @@ import unittest
 import torch
 import torch.nn.functional as F
 
+from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.models.losses.kl_divergence import pseudo_kl_divergence_loss
+
+
+def encoder_entropy(logits: torch.Tensor) -> torch.Tensor:
+    """Average over the batch of the entropy of the factorized distribution of each data point."""
+    probs = torch.sigmoid(logits)
+    return F.binary_cross_entropy_with_logits(logits, probs, reduction="none").sum(-1).mean()
 
 
 class UnitLinearBiasObjective:
@@ -76,10 +83,8 @@ class TestPseudoKLDivergenceLoss(unittest.TestCase):
             boltzmann_machine=bm
         )
 
-        probs = torch.sigmoid(logits)
-        entropy = F.binary_cross_entropy_with_logits(logits, probs)
         cross_entropy = bm.quasi_objective(spins_data, spins_model)
-        ref = cross_entropy - entropy
+        ref = cross_entropy - encoder_entropy(logits)
 
         torch.testing.assert_close(out, ref)
 
@@ -104,11 +109,43 @@ class TestPseudoKLDivergenceLoss(unittest.TestCase):
             boltzmann_machine=bm
         )
 
-        probs = torch.sigmoid(logits)
-        entropy = F.binary_cross_entropy_with_logits(logits, probs)
         cross_entropy = bm.quasi_objective(spins_data, spins_model)
 
-        torch.testing.assert_close(out, cross_entropy - entropy)
+        torch.testing.assert_close(out, cross_entropy - encoder_entropy(logits))
+
+    def test_gradient_matches_exact_kl_divergence(self):
+        """The gradient with respect to the logits equals the gradient of the exact KL divergence
+        between a factorized encoder distribution and the Boltzmann machine prior.
+
+        With spins replaced by their expectations under the factorized encoder distribution,
+        the energy term of the pseudo-KL divergence is the exact expected energy (the model has
+        no self-couplings), so the pseudo-KL divergence and the exact KL divergence differ only by
+        a term independent of the encoder.
+        """
+        torch.manual_seed(0)
+        bm = GRBM([0, 1, 2], [(0, 1), (1, 2), (0, 2)],
+                  linear={0: 0.3, 1: -0.2, 2: 0.1},
+                  quadratic={(0, 1): 0.5, (1, 2): -0.4, (0, 2): 0.2})
+        logits = torch.randn(4, 3, requires_grad=True)
+
+        # P(s = +1) = sigmoid(logit) so that E[s] = 2 sigmoid(logit) - 1 = tanh(logit / 2)
+        expected_spins = torch.tanh(logits / 2)
+        samples = torch.ones(1, 3)  # the negative phase does not depend on the encoder
+        loss = pseudo_kl_divergence_loss(expected_spins, logits, samples, bm)
+        grad_pseudo, = torch.autograd.grad(loss, logits)
+
+        states = 1.0 - 2.0 * torch.tensor(
+            [[(k >> i) & 1 for i in range(3)] for k in range(8)], dtype=torch.float32
+        )
+        log_partition = torch.logsumexp(-bm(states), 0)
+        log_probs = F.logsigmoid(logits)   # log P(s = +1)
+        log_probs_minus = F.logsigmoid(-logits)  # log P(s = -1)
+        plus = (states == 1).float()
+        log_q = plus @ log_probs.T + (1 - plus) @ log_probs_minus.T  # (8, 4)
+        kl = (log_q.exp() * (log_q + bm(states).unsqueeze(1))).sum(0) + log_partition
+        grad_exact, = torch.autograd.grad(kl.mean(), logits)
+
+        torch.testing.assert_close(grad_pseudo, grad_exact)
 
 
     def test_gradient_from_entropy_only(self):
@@ -147,9 +184,7 @@ class TestPseudoKLDivergenceLoss(unittest.TestCase):
 
         # reference gradient from -entropy only
         logits2 = logits.detach().clone().requires_grad_(True)
-        probs2 = torch.sigmoid(logits2)
-        entropy2 = F.binary_cross_entropy_with_logits(logits2, probs2)
-        (-entropy2).backward()
+        (-encoder_entropy(logits2)).backward()
 
         torch.testing.assert_close(logits.grad, logits2.grad)
 

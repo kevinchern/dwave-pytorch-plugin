@@ -25,7 +25,7 @@ __all__ = ["maximum_mean_discrepancy_loss", "bit2spin_soft", "spin2bit_soft"]
 
 
 def maximum_mean_discrepancy_loss(x: torch.Tensor, y: torch.Tensor, kernel: Kernel) -> torch.Tensor:
-    """Estimates the squared maximum mean discrepancy (MMD) given two samples ``x`` and ``y``.
+    r"""Estimates the squared maximum mean discrepancy (MMD) given two samples ``x`` and ``y``.
 
     The `squared MMD <https://dl.acm.org/doi/abs/10.5555/2188385.2188410>`_ is defined as
 

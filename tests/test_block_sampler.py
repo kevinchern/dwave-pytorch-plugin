@@ -14,13 +14,47 @@
 
 import unittest
 
-from dwave.graphs import zephyr_graph, zephyr_four_color
 import networkx as nx
+import numpy as np
 import torch
+from dimod import ExactSolver
+from dwave.graphs import zephyr_four_color, zephyr_graph
 from parameterized import parameterized
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.block_spin_sampler import BlockSampler
+
+
+def set_weights(bm: GRBM, linear, quadratic) -> None:
+    with torch.no_grad():
+        bm.linear.copy_(torch.as_tensor(linear, dtype=bm.linear.dtype))
+        bm.quadratic[bm.edge_idx_i, bm.edge_idx_j] = torch.as_tensor(
+            quadratic, dtype=bm.quadratic.dtype
+        )
+
+
+def total_variation(model: GRBM, samples: torch.Tensor) -> float:
+    """Total variation distance between the empirical distribution of ``samples`` and the exact
+    Boltzmann distribution of ``model`` at unit inverse temperature."""
+    exact = ExactSolver().sample_ising(*model.to_ising())
+    states = torch.tensor(np.ascontiguousarray(exact.record.sample), dtype=torch.float32)
+    energies = torch.tensor(np.ascontiguousarray(exact.record.energy), dtype=torch.float32)
+    p_exact = torch.softmax(-energies, 0)
+    weights = 2 ** torch.arange(model.n_nodes, dtype=torch.float32)
+    keys = ((samples + 1) / 2 @ weights).long()
+    exact_keys = ((states + 1) / 2 @ weights).long()
+    counts = torch.bincount(keys, minlength=2**model.n_nodes).float() / samples.shape[0]
+    return 0.5 * (counts[exact_keys] - p_exact).abs().sum().item()
+
+
+def five_cycle_with_chord() -> GRBM:
+    nodes = list("abcde")
+    edges = [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e"), ("e", "a"), ("a", "c")]
+    return GRBM(
+        nodes, edges,
+        linear=dict(zip(nodes, [0.3, -0.2, 0.5, 0.1, -0.4])),
+        quadratic=dict(zip(edges, [0.8, -0.6, 0.4, -0.9, 0.5, -0.3])),
+    )
 
 
 class TestBlockSampler(unittest.TestCase):
@@ -33,7 +67,7 @@ class TestBlockSampler(unittest.TestCase):
     def CRAYON_BIPARTITE(b): return b < 5
 
     GRBM_SINGLE = GRBM([0], [])
-    def CRAYON_SINGLE(s): 0
+    def CRAYON_SINGLE(s): return 0
 
     GRBM_CRAYON_TEST_CASES = [(GRBM_ZEPHYR, CRAYON_ZEPHYR),
                               (GRBM_BIPARTITE, CRAYON_BIPARTITE),
@@ -41,205 +75,45 @@ class TestBlockSampler(unittest.TestCase):
 
     def setUp(self) -> None:
         self.crayon_veqa = lambda v: v == "a"
-        return super().setUp()
 
     @parameterized.expand(GRBM_CRAYON_TEST_CASES)
     def test_sample(self, grbm, crayon):
         for pac in "Metropolis", "Gibbs":
             schedule = [0.0, 1.0, 2.0]
             bss1 = BlockSampler(grbm, crayon, 10, schedule, pac, seed=1)
-            bss1.sample()
+            samples = bss1.sample()
+            self.assertEqual((10, grbm.n_nodes), tuple(samples.shape))
+            self.assertTrue(torch.all(samples.abs() == 1))
 
             bss2 = BlockSampler(grbm, crayon, 10, [1.0], pac, seed=1)
             for beta in schedule:
                 bss2._step(beta)
 
-            self.assertListEqual(bss1._x.tolist(), bss2._x.tolist())
-
-    def test_device(self):
-        grbm = GRBM(list("ab"), [["a", "b"]])
-
-        crayon = self.crayon_veqa
-        sample_size = 1_000_000
-        bss = BlockSampler(grbm, crayon, sample_size, [1.0], "Gibbs", seed=2)
-        bss = bss.to('meta')
-        self.assertEqual("cpu", bss._grbm.linear.device.type)
-        self.assertEqual("cpu", bss._grbm.quadratic.device.type)
-        self.assertEqual("meta", bss._x.device.type)
-        self.assertEqual("meta", bss._padded_adjacencies.device.type)
-        self.assertEqual("meta", bss._padded_adjacencies_weight.device.type)
-        self.assertEqual("meta", bss._zeros.device.type)
-        self.assertEqual("meta", bss._schedule.device.type)
-        self.assertEqual("meta", bss._partition[0].device.type)
-        self.assertEqual("meta", bss._partition[1].device.type)
-        # NOTE: "meta" device is not supported for torch.Generator
-        self.assertEqual("cpu", bss._rng.device.type)
-
-    def test_gibbs_update(self):
-        grbm = GRBM(list("ab"), [["a", "b"]])
-
-        crayon = self.crayon_veqa
-        sample_size = 1_000_000
-        bss = BlockSampler(grbm, crayon, sample_size, [1.0], "Gibbs", seed=2)
-        bss._x.data[:] = 1
-        zero = torch.tensor(0.0)
-        ones = torch.ones((sample_size, 1))
-        bss._gibbs_update(0.0, bss._partition[0], ones*zero)
-        torch.testing.assert_close(torch.tensor(0.5), bss._x.mean(), atol=1e-3, rtol=1e-3)
-        bss._gibbs_update(0.0, bss._partition[1], ones*zero)
-        torch.testing.assert_close(torch.tensor(0.0), bss._x.mean(), atol=1e-3, rtol=1e-3)
-
-        effective_field = torch.tensor(1.2)
-        bss._gibbs_update(1.0, bss._partition[0], effective_field*ones)
-        bss._gibbs_update(1.0, bss._partition[1], effective_field*ones)
-        torch.testing.assert_close(
-            torch.tanh(-effective_field),
-            bss._x.mean(),
-            atol=1e-3, rtol=1e-3)
-
-    def test_initial_states_respected(self):
-        grbm = GRBM(list("ab"), [["a", "b"]])
-
-        crayon = self.crayon_veqa
-        initial_states = torch.tensor([[-1, 1], [1, 1], [-1, -1], [1, 1], [-1, 1], [-1, 1], [1, 1]])
-
-        bss = BlockSampler(grbm, crayon, len(initial_states), [1.0], "Metropolis",
-                               initial_states, 2)
-        self.assertListEqual(bss._x.tolist(), initial_states.tolist())
-
-    def test_metropolis_update_average(self):
-        grbm = GRBM(list("ab"), [["a", "b"]])
-
-        crayon = self.crayon_veqa
-        sample_size = 1_000_000
-        bss = BlockSampler(grbm, crayon, sample_size, [1.0], "Metropolis", seed=2)
-        bss._x.data[:] = 1
-        ones = torch.ones((sample_size, 1))
-        effective_field = torch.tensor(1.2)
-        for i in range(10):
-            bss._metropolis_update(1.0, bss._partition[0], effective_field*ones)
-            bss._metropolis_update(1.0, bss._partition[1], effective_field*ones)
-        torch.testing.assert_close(
-            torch.tanh(-effective_field),
-            bss._x.mean(),
-            atol=1e-3, rtol=1e-3)
-
-    def test_metropolis_update_oscillates(self):
-        grbm = GRBM(list("ab"), [["a", "b"]])
-
-        crayon = self.crayon_veqa
-        sample_size = 1_00
-        bss = BlockSampler(grbm, crayon, sample_size, [1.0], "Metropolis", seed=2)
-        bss._x.data[:] = 1
-        zero_effective_field = torch.zeros((sample_size, 1))
-        bss._metropolis_update(0.0, bss._partition[0], zero_effective_field)
-        self.assertTrue((bss._x[:, 1] == -1).all())
-        bss._metropolis_update(0.0, bss._partition[1], zero_effective_field)
-        self.assertTrue((bss._x == -1).all())
-
-    def test_effective_field(self):
-        # Create a triangle graph with an additional dangling vertex
-        #       a
-        #     / | \
-        #    b--c  d
-        self.nodes = list("abcd")
-        self.edges = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"]]
-
-        # Manually set the parameter weights for testing
-        dtype = torch.float32
-        grbm = GRBM(self.nodes, self.edges)
-        grbm._linear.data = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=dtype)
-        grbm._quadratic.data = torch.tensor([1.1, 2.2, 3.3, 6.6], dtype=dtype)
-
-        def crayon(v):
-            if v == "a":
-                return 0
-            if v == "b":
-                return 1
-            if v == "c":
-                return 2
-            if v == "d":
-                return 1
-        bss = BlockSampler(grbm, crayon, 3, [1.0], seed=3)
-        bss._x.data[:] = torch.tensor([[1, 1, -1, -1],
-                                      [-1, -1, 1, -1],
-                                      [1, 1, 1, -1]])
-        # effective field for a
-        effective_field_a = bss._compute_effective_field(bss._partition[0])
-        torch.testing.assert_close(
-            effective_field_a,
-            torch.tensor([[0.0 + 1.1 - 2.2 - 3.3],
-                          [0.0 - 1.1 + 2.2 - 3.3],
-                          [0.0 + 1.1 + 2.2 - 3.3]])
-        )
-        # effective field for b, d
-        effective_field_bd = bss._compute_effective_field(bss._partition[1])
-        torch.testing.assert_close(effective_field_bd,
-                                   torch.tensor([[1.0 + 1.1 - 6.6, 3.0 + 3.3],
-                                                 [1.0 - 1.1 + 6.6, 3.0 - 3.3],
-                                                 [1.0 + 1.1 + 6.6, 3.0 + 3.3]]))
-        # effective field for c
-        effective_field_c = bss._compute_effective_field(bss._partition[2])
-        torch.testing.assert_close(effective_field_c,
-                                   torch.tensor([[2.0 + 2.2 + 6.6],
-                                                 [2.0 - 2.2 - 6.6],
-                                                 [2.0 + 2.2 + 6.6]]))
-
-    def test_get_adjacencies(self):
-        # Create a triangle graph with an additional dangling vertex
-        #       a
-        #     / | \
-        #    b--c  d
-        self.nodes = list("abcd")
-        self.edges = [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"]]
-
-        # Manually set the parameter weights for testing
-        dtype = torch.float32
-        grbm = GRBM(self.nodes, self.edges)
-        grbm._linear.data = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=dtype)
-        grbm._quadratic.data = torch.tensor([1.1, 2.2, 3.3, 6.6], dtype=dtype)
-
-        def crayon(v):
-            if v == "a":
-                return 0
-            if v == "b":
-                return 1
-            if v == "c":
-                return 2
-            if v == "d":
-                return 1
-        bss = BlockSampler(grbm, crayon, 10, [1.0], seed=4)
-        padded_adj, padded_adj_weights = bss._get_adjacencies()
-
-        # First, check the neighbour indices are correct
-        # a has neighbours b, c, d in that order, so 2, 3, 4
-        self.assertListEqual(padded_adj[0].tolist(), [1, 2, 3])
-        # b has neighbours a, c, in that order, so 0, 2, and padded -1
-        self.assertListEqual(padded_adj[1].tolist(), [0, 2, -1])
-        # c has neighbours a, b, in that order, so 0, 1, and padded -1
-        self.assertListEqual(padded_adj[2].tolist(), [0, 1, -1])
-        # d has neighbour a, so 0, and two padded -1
-        self.assertListEqual(padded_adj[3].tolist(), [0, -1, -1])
-
-        # Next, check weights are correct
-        # a has edges 0, 1, 2
-        self.assertListEqual(padded_adj_weights[0].tolist(), [0, 1, 2])
-        # b has edges 0, 3,
-        self.assertListEqual(padded_adj_weights[1].tolist(), [0, 3, -1])
-        # c has edges 0, 3,
-        self.assertListEqual(padded_adj_weights[2].tolist(), [1, 3, -1])
-        # d has edges 2
-        self.assertListEqual(padded_adj_weights[3].tolist(), [2, -1, -1])
+            self.assertListEqual(bss1.state.tolist(), bss2.state.tolist())
+            self.assertListEqual(samples.tolist(), bss1.state.tolist())
 
     @parameterized.expand(GRBM_CRAYON_TEST_CASES)
-    def test_get_partition(self, grbm: GRBM, crayon):
+    def test_partition(self, grbm: GRBM, crayon):
         bss = BlockSampler(grbm, crayon, 10, [1.0], seed=5)
         # Check every block is indeed coloured correctly
-        for block in bss._partition:
+        for block in bss.partition:
             self.assertEqual(1, len({crayon(grbm.idx_to_node[bidx]) for bidx in block.tolist()}))
-        # Check every node has been included
-        self.assertSetEqual({idx for block in bss._partition for idx in block.tolist()},
-                            {bss._grbm.node_to_idx[node] for node in bss._grbm.nodes})
+        # Check every node has been included exactly once
+        indices = [idx for block in bss.partition for idx in block.tolist()]
+        self.assertEqual(len(indices), len(set(indices)))
+        self.assertSetEqual(set(indices), set(range(grbm.n_nodes)))
+        # Blocks are ordered by colour
+        colours = [crayon(grbm.idx_to_node[block[0].item()]) for block in bss.partition]
+        self.assertListEqual(colours, sorted(colours))
+
+    @parameterized.expand(GRBM_CRAYON_TEST_CASES)
+    def test_automatic_colouring(self, grbm: GRBM, crayon):
+        bss = BlockSampler(grbm, None, 3, [1.0])
+        colour = torch.empty(grbm.n_nodes, dtype=torch.long)
+        for k, block in enumerate(bss.partition):
+            colour[block] = k
+        self.assertTrue(torch.all(colour[grbm.edge_idx_i] != colour[grbm.edge_idx_j]))
+        self.assertEqual((3, grbm.n_nodes), tuple(bss.sample().shape))
 
     def test_invalid_crayon(self):
         grbm = GRBM([0, 1], [(0, 1)])
@@ -248,9 +122,20 @@ class TestBlockSampler(unittest.TestCase):
 
     def test_invalid_proposal(self):
         grbm = GRBM([0, 1], [(0, 1)])
-        def crayon(n): return 1
-        self.assertRaisesRegex(ValueError, "Proposal acceptance criterion should be one of", BlockSampler,
-                          grbm, crayon, 10, [1.0], "abc")
+        def crayon(n): return n
+        self.assertRaisesRegex(ValueError, "Proposal acceptance criterion should be one of",
+                               BlockSampler, grbm, crayon, 10, [1.0], "abc")
+
+    @parameterized.expand(GRBM_CRAYON_TEST_CASES)
+    def test_invalid_num_chains(self, grbm, crayon):
+        self.assertRaisesRegex(ValueError, "should be a positive integer", BlockSampler, grbm, crayon, 0, [1.0])
+
+    def test_invalid_schedule(self):
+        grbm = GRBM([0, 1], [(0, 1)])
+        self.assertRaisesRegex(ValueError, "at least one inverse temperature", BlockSampler, grbm, None, 1, [])
+
+    def test_requires_model(self):
+        self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine", BlockSampler, torch.nn.Linear(2, 2))
 
     def test_prepare_initial_states(self):
         grbm = GRBM([0, 1, 2], [(0, 1)])
@@ -259,111 +144,237 @@ class TestBlockSampler(unittest.TestCase):
 
         with self.subTest("Nonspin initial states."):
             self.assertRaisesRegex(ValueError, "contain nonspin values", bss._prepare_initial_states,
-                              initial_states=torch.tensor([[0, 1, -1]]), num_chains=1)
+                                   initial_states=torch.tensor([[0, 1, -1]]), num_chains=1)
 
         with self.subTest("Testing initial states with incorrect shape."):
             self.assertRaisesRegex(ValueError, "Initial states should be of shape", bss._prepare_initial_states,
-                              num_chains=10, initial_states=torch.tensor([[-1, 1, 1, 1, -1]]))
+                                   num_chains=10, initial_states=torch.tensor([[-1, 1, 1, 1, -1]]))
 
-    @parameterized.expand(GRBM_CRAYON_TEST_CASES)
-    def test_invalid_num_reads(self, grbm, crayon):
-        self.assertRaisesRegex(ValueError, "should be a positive integer", BlockSampler, grbm, crayon, 0, [1.0])
+    def test_initial_states_respected(self):
+        grbm = GRBM(list("ab"), [["a", "b"]])
+        initial_states = torch.tensor([[-1, 1], [1, 1], [-1, -1], [1, 1], [-1, 1], [-1, 1], [1, 1]])
+        bss = BlockSampler(grbm, self.crayon_veqa, len(initial_states), [1.0], "Metropolis",
+                           initial_states, 2)
+        self.assertListEqual(bss.state.tolist(), initial_states.tolist())
+        self.assertEqual(torch.float32, bss.state.dtype)
+        self.assertEqual(7, bss.num_chains)
 
-    def test_validate_input(self):
-        nodes = ["v1", "v2", "h1", "h2"]
-        edges = [["v1", "h1"], ["v1", "h2"], ["v2", "h1"], ["v2", "h2"]]
-        grbm = GRBM(nodes, edges, hidden_nodes=["h1", "h2"])
+    def test_properties(self):
+        grbm = GRBM(list("ab"), [["a", "b"]])
+        bss = BlockSampler(grbm, self.crayon_veqa, 3, [0.5, 1], "metropolis", seed=7)
+        self.assertEqual((0.5, 1.0), bss.schedule)
+        self.assertEqual("Metropolis", bss.proposal_acceptance_criteria)
+        self.assertEqual(7, bss.seed)
+        self.assertIs(grbm, bss.model)
+        self.assertIs(grbm, next(bss.children()))
 
-        def crayon(n):
-            return n in ["v1", "v2"]
+    def test_gibbs_update(self):
+        grbm = GRBM(list("ab"), [["a", "b"]])
+        sample_size = 1_000_000
+        bss = BlockSampler(grbm, self.crayon_veqa, sample_size, [1.0], "Gibbs", seed=2)
+        bss.state[:] = 1
+        zero = torch.tensor(0.0)
+        ones = torch.ones((sample_size, 1))
+        bss._gibbs_update(0.0, bss.partition[0], ones*zero)
+        torch.testing.assert_close(torch.tensor(0.5), bss.state.mean(), atol=1e-3, rtol=1e-3)
+        bss._gibbs_update(0.0, bss.partition[1], ones*zero)
+        torch.testing.assert_close(torch.tensor(0.0), bss.state.mean(), atol=1e-3, rtol=1e-3)
 
-        # Case 1: Valid single block unclamped
-        with self.subTest("valid: single block unclamped per chain"):
-            sampler = BlockSampler(grbm, crayon, num_chains=2, schedule=[1.0])
+        effective_field = torch.tensor(1.2)
+        bss._gibbs_update(1.0, bss.partition[0], effective_field*ones)
+        bss._gibbs_update(1.0, bss.partition[1], effective_field*ones)
+        torch.testing.assert_close(
+            torch.tanh(-effective_field),
+            bss.state.mean(),
+            atol=1e-3, rtol=1e-3)
 
-            x_valid = torch.tensor([
-                [float('nan'), float('nan'), 1.0, 1.0],
-                [1.0, 1.0, float('nan'), float('nan')]
-            ])
+    def test_metropolis_update_average(self):
+        grbm = GRBM(list("ab"), [["a", "b"]])
+        sample_size = 1_000_000
+        bss = BlockSampler(grbm, self.crayon_veqa, sample_size, [1.0], "Metropolis", seed=2)
+        bss.state[:] = 1
+        ones = torch.ones((sample_size, 1))
+        effective_field = torch.tensor(1.2)
+        for i in range(10):
+            bss._metropolis_update(1.0, bss.partition[0], effective_field*ones)
+            bss._metropolis_update(1.0, bss.partition[1], effective_field*ones)
+        torch.testing.assert_close(
+            torch.tanh(-effective_field),
+            bss.state.mean(),
+            atol=1e-3, rtol=1e-3)
 
-            sampler._validate_input(x_valid)
-            mask = ~torch.isnan(x_valid)
-            expected_mask = torch.tensor([
-                [False, False, True,  True],   # visible unclamped, hidden clamped
-                [True,  True,  False, False]   # hidden unclamped, visible clamped
-            ])
+    def test_metropolis_update_oscillates(self):
+        grbm = GRBM(list("ab"), [["a", "b"]])
+        sample_size = 100
+        bss = BlockSampler(grbm, self.crayon_veqa, sample_size, [1.0], "Metropolis", seed=2)
+        bss.state[:] = 1
+        zero_effective_field = torch.zeros((sample_size, 1))
+        bss._metropolis_update(0.0, bss.partition[0], zero_effective_field)
+        self.assertTrue((bss.state[:, 1] == -1).all())
+        bss._metropolis_update(0.0, bss.partition[1], zero_effective_field)
+        self.assertTrue((bss.state == -1).all())
 
-            self.assertEqual(mask.shape, x_valid.shape)
+    def test_effective_field(self):
+        # Create a triangle graph with an additional dangling vertex
+        #       a
+        #     / | \
+        #    b--c  d
+        grbm = GRBM(list("abcd"), [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"]])
+        set_weights(grbm, [0.0, 1.0, 2.0, 3.0], [1.1, 2.2, 3.3, 6.6])
 
-            torch.testing.assert_close(mask, expected_mask)
+        def crayon(v):
+            return {"a": 0, "b": 1, "c": 2, "d": 1}[v]
+        bss = BlockSampler(grbm, crayon, 3, [1.0], seed=3)
+        bss.state[:] = torch.tensor([[1, 1, -1, -1],
+                                     [-1, -1, 1, -1],
+                                     [1, 1, 1, -1]])
+        # effective field for a
+        torch.testing.assert_close(
+            bss._compute_effective_field(bss.partition[0]),
+            torch.tensor([[0.0 + 1.1 - 2.2 - 3.3],
+                          [0.0 - 1.1 + 2.2 - 3.3],
+                          [0.0 + 1.1 + 2.2 - 3.3]])
+        )
+        # effective field for b, d
+        torch.testing.assert_close(bss._compute_effective_field(bss.partition[1]),
+                                   torch.tensor([[1.0 + 1.1 - 6.6, 3.0 + 3.3],
+                                                 [1.0 - 1.1 + 6.6, 3.0 - 3.3],
+                                                 [1.0 + 1.1 + 6.6, 3.0 + 3.3]]))
+        # effective field for c
+        torch.testing.assert_close(bss._compute_effective_field(bss.partition[2]),
+                                   torch.tensor([[2.0 + 2.2 + 6.6],
+                                                 [2.0 - 2.2 - 6.6],
+                                                 [2.0 + 2.2 + 6.6]]))
+        # explicit state and coupling arguments
+        x = torch.tensor([[-1.0, -1.0, -1.0, -1.0]])
+        torch.testing.assert_close(
+            bss._compute_effective_field(bss.partition[0], x, grbm.symmetric_coupling()),
+            torch.tensor([[0.0 - 1.1 - 2.2 - 3.3]]),
+        )
 
-        # Case 2: All spins clamped 
-        with self.subTest("valid: all spins clamped"):
-            sampler = BlockSampler(grbm, crayon, num_chains=2, schedule=[1.0])
-            x_all_clamped = torch.tensor([
-                [1.0, -1.0, 1.0, -1.0],
-                [1.0, 1.0, -1.0, -1.0]
-            ])
-            sampler._validate_input(x_all_clamped)
-            mask = ~torch.isnan(x_all_clamped)
-            self.assertTrue(mask.all())
+    @parameterized.expand(["Gibbs", "Metropolis"])
+    def test_stationary_distribution(self, pac):
+        model = five_cycle_with_chord()
+        sampler = BlockSampler(model, None, 100_000, [1.0] * 6, pac, seed=1)
+        self.assertEqual(3, len(sampler.partition))
+        self.assertLess(total_variation(model, sampler.sample()), 0.02)
 
-        # Case 3: Invalid multiple blocks unclamped 
-        with self.subTest("invalid: multiple blocks unclamped"):
-            sampler = BlockSampler(grbm, crayon, num_chains=3, schedule=[1.0])
-            x_invalid = torch.tensor([
-                [float('nan'), 1.0, float('nan'), 1.0],  # unclamped in both visible & hidden
-                [1.0, float('nan'), float('nan'), 1.0],   # unclamped in both visible & hidden
-                [1.0, 1.0, -1.0, 1.0]   # unclamped in both visible & hidden
-            ])
-            with self.assertRaisesRegex(ValueError, "Conditional sampling can only have unclamped spins in a single block per chain."):
-                sampler._validate_input(x_invalid)
+    def test_seeds(self):
+        model = five_cycle_with_chord()
+        with self.subTest("Same seed, same samples"):
+            s1 = BlockSampler(model, None, 50, [1.0], seed=3).sample()
+            s2 = BlockSampler(model, None, 50, [1.0], seed=3).sample()
+            self.assertTrue(torch.equal(s1, s2))
+        with self.subTest("Different seeds, different samples"):
+            s3 = BlockSampler(model, None, 50, [1.0], seed=4).sample()
+            self.assertFalse(torch.equal(s1, s3))
+        with self.subTest("No seed uses the global generator"):
+            torch.manual_seed(0)
+            s4 = BlockSampler(model, None, 50, [1.0]).sample()
+            torch.manual_seed(0)
+            s5 = BlockSampler(model, None, 50, [1.0]).sample()
+            s6 = BlockSampler(model, None, 50, [1.0]).sample()
+            self.assertTrue(torch.equal(s4, s5))
+            self.assertFalse(torch.equal(s5, s6))
 
-        # Case 4: Shape mismatch 
-        with self.subTest("invalid: shape mismatch"):
-            sampler = BlockSampler(grbm, crayon, num_chains=2, schedule=[1.0])
-            x_wrong_shape = torch.tensor([[float('nan'), 1.0]])
-            with self.assertRaisesRegex(ValueError, "x should be of shape"):
-                sampler._validate_input(x_wrong_shape)
-            
-        # Case 5: Invalid spins
-        with self.subTest("invalid: non-spin values in x"):
-            sampler = BlockSampler(grbm, crayon, num_chains=2, schedule=[1.0])
-            x_invalid_spins = torch.tensor([[0.0, 1.0, float('nan'), 1.0], [1.0, 1.0, float('nan'), 1.0]])
-            with self.assertRaisesRegex(ValueError, "contains values other than ±1 or NaN"):
-                sampler._validate_input(x_invalid_spins)
-        
-        
     def test_sample_conditional_three_blocks(self):
         # Triangle graph
-        nodes = ["a", "b", "c"]
-        edges = [["a", "b"], ["b", "c"], ["a", "c"]]
-        grbm = GRBM(nodes, edges)
+        grbm = GRBM(["a", "b", "c"], [["a", "b"], ["b", "c"], ["a", "c"]])
+        set_weights(grbm, [1e10] * 3, [0.0] * 3)
 
-        grbm.linear.data[:] = 1e10
-        grbm.quadratic.data[:] = 0.0
-
-        # 3-coloring
         def crayon(n):
             return {"a": 0, "b": 1, "c": 2}[n]
 
         sampler = BlockSampler(grbm, crayon, 2, [1.0], "Gibbs", seed=123)
+        chains = sampler.state.clone()
 
-        # Chain 0 unclamps block 0
-        # Chain 1 unclamps block 2
+        # Row 0 unclamps block 0, row 1 unclamps block 2
         x = torch.tensor([
-            [float("nan"),  1.0,  1.0],
-            [ 1.0,          1.0, float("nan")]
+            [float("nan"), 1.0, 1.0],
+            [1.0, 1.0, float("nan")]
         ])
-
         result = sampler.sample(x)
-        
+        self.assertEqual((2, 1, 3), tuple(result.shape))
         # Ensure clamped spins remain unchanged and unclamped spins will be -1
-        expected = torch.tensor([
-            [-1.0,  1.0,  1.0],
-            [ 1.0,  1.0, -1.0]
-        ])
+        expected = torch.tensor([[[-1.0, 1.0, 1.0]], [[1.0, 1.0, -1.0]]])
         torch.testing.assert_close(result, expected)
+
+        with self.subTest("Persistent chains are untouched"):
+            self.assertTrue(torch.equal(chains, sampler.state))
+
+        with self.subTest("Several samples per row and several free blocks per row"):
+            x = torch.tensor([[float("nan"), float("nan"), 1.0]])
+            result = sampler.sample(x, num_samples=5)
+            self.assertEqual((1, 5, 3), tuple(result.shape))
+            torch.testing.assert_close(result, torch.tensor([[[-1.0, -1.0, 1.0]] * 5]))
+
+        with self.subTest("Batch dimensions are preserved; batch size need not match chains"):
+            x = torch.full((4, 3, 3), float("nan"))
+            x[..., 1] = 1.0
+            result = sampler.sample(x, num_samples=2)
+            self.assertEqual((4, 3, 2, 3), tuple(result.shape))
+            self.assertTrue(torch.all(result[..., 1] == 1.0))
+            self.assertTrue(torch.all(result[..., [0, 2]] == -1.0))
+
+        with self.subTest("Fully clamped rows are returned unchanged"):
+            x = torch.tensor([[1.0, -1.0, 1.0]])
+            torch.testing.assert_close(sampler.sample(x), x.unsqueeze(1))
+
+        with self.subTest("Invalid inputs"):
+            with self.assertRaisesRegex(ValueError, "x must have shape"):
+                sampler.sample(torch.tensor([[float("nan"), 1.0]]))
+            with self.assertRaisesRegex(ValueError, "only ±1 or NaN"):
+                sampler.sample(torch.tensor([[0.0, 1.0, float("nan")]]))
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                sampler.sample(x, num_samples=0)
+
+    def test_sample_conditional_is_exact_for_single_block(self):
+        model = five_cycle_with_chord()
+        sampler = BlockSampler(model, None, 1, [1.0], seed=9)
+        # Clamp everything but block 0 and compare with the exact conditional means
+        block = sampler.partition[0]
+        x = torch.tensor([[1.0, -1.0, 1.0, 1.0, -1.0]])
+        x[:, block] = torch.nan
+        samples = sampler.sample(x, num_samples=200_000)
+        expected = -torch.tanh(model.effective_field(x, block))
+        torch.testing.assert_close(samples[0, :, block].mean(0, keepdim=True), expected,
+                                   atol=5e-3, rtol=0)
+
+    def test_device(self):
+        grbm = GRBM(list("ab"), [["a", "b"]])
+        bss = BlockSampler(grbm, self.crayon_veqa, 10, [1.0], "Gibbs", seed=2)
+        result = bss.to("meta")
+        self.assertIs(bss, result)
+        self.assertEqual("meta", bss.model.linear.device.type)
+        self.assertEqual("meta", bss.model.quadratic.device.type)
+        self.assertEqual("meta", bss.state.device.type)
+        for block in bss.partition:
+            self.assertEqual("meta", block.device.type)
+
+    def test_state_dict(self):
+        grbm = GRBM(list("ab"), [["a", "b"]])
+        bss = BlockSampler(grbm, self.crayon_veqa, 4, [1.0], seed=2)
+        state_dict = bss.state_dict()
+        self.assertIn("_x", state_dict)
+        self.assertIn("model._linear", state_dict)
+        self.assertIn("model._quadratic", state_dict)
+        self.assertEqual(0, len(list(bss.parameters())) - len(list(grbm.parameters())))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_cuda(self):
+        model = five_cycle_with_chord()
+        sampler = BlockSampler(model, None, 20_000, [1.0] * 6, seed=1).cuda()
+        self.assertTrue(sampler.model.linear.is_cuda and sampler.state.is_cuda)
+        samples = sampler.sample()
+        self.assertTrue(samples.is_cuda)
+        self.assertLess(total_variation(model.cpu(), samples.cpu()), 0.05)
+        sampler = sampler.cuda()
+        x = torch.tensor([[float("nan"), 1.0, -1.0, 1.0, float("nan")]])
+        conditional = sampler.sample(x, num_samples=3)
+        self.assertTrue(conditional.is_cuda)
+        self.assertEqual((1, 3, 5), tuple(conditional.shape))
+        self.assertTrue(torch.all(conditional[..., 1:4].cpu() == x[:, 1:4]))
+
 
 if __name__ == "__main__":
     unittest.main()

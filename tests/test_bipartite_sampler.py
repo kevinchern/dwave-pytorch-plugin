@@ -1,4 +1,4 @@
-# Copyright 2026 D-Wave
+# Copyright 2025 D-Wave
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,311 +13,159 @@
 # limitations under the License.
 
 import unittest
+
 import torch
+
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.bipartite_sampler import BipartiteGibbsSampler
+from dwave.plugins.torch.samplers.block_spin_sampler import BlockSampler
+
+
+def set_weights(bm: GRBM, linear, quadratic) -> None:
+    with torch.no_grad():
+        bm.linear.copy_(torch.as_tensor(linear, dtype=bm.linear.dtype))
+        bm.quadratic[bm.edge_idx_i, bm.edge_idx_j] = torch.as_tensor(
+            quadratic, dtype=bm.quadratic.dtype
+        )
+
+
+def rbm() -> GRBM:
+    nodes = ["v1", "v2", "h1", "h2"]
+    edges = [["v1", "h1"], ["v1", "h2"], ["v2", "h1"], ["v2", "h2"]]
+    return GRBM(nodes, edges, hidden_nodes=["h1", "h2"])
 
 
 class TestBipartiteGibbsSampler(unittest.TestCase):
 
+    def test_is_block_sampler(self):
+        grbm = rbm()
+        sampler = BipartiteGibbsSampler(grbm, num_chains=3, schedule=[1.0])
+        self.assertIsInstance(sampler, BlockSampler)
+        self.assertEqual("Gibbs", sampler.proposal_acceptance_criteria)
+        self.assertEqual(2, len(sampler.partition))
+        self.assertListEqual(sampler.partition[0].tolist(), grbm.visible_idx.tolist())
+        self.assertListEqual(sampler.partition[1].tolist(), grbm.hidden_idx.tolist())
+
     def test_device(self):
-        nodes = ["v1", "h1"]
-        edges = [["v1", "h1"]]
-        grbm = GRBM(nodes, edges, hidden_nodes=["h1"])
-
-        sample_size = 10
-        sampler = BipartiteGibbsSampler(
-            grbm,
-            num_chains=sample_size,
-            schedule=[1.0],
-            seed=2
-        )
-
-        sampler = sampler.to("meta")
-
-        # GRBM parameters should remain on CPU
-        self.assertEqual("cpu", sampler._grbm.linear.device.type)
-        self.assertEqual("cpu", sampler._grbm.quadratic.device.type)
-
-        # Sampler-owned tensors should move to meta
-        self.assertEqual("meta", sampler._x.device.type)
-        self.assertEqual("meta", sampler._schedule.device.type)
-
-        # RNG should remain on CPU (meta not supported)
-        self.assertEqual("cpu", sampler._rng.device.type)
+        grbm = GRBM(["v1", "h1"], [["v1", "h1"]], hidden_nodes=["h1"])
+        sampler = BipartiteGibbsSampler(grbm, num_chains=10, schedule=[1.0], seed=2).to("meta")
+        self.assertEqual("meta", sampler.model.linear.device.type)
+        self.assertEqual("meta", sampler.model.quadratic.device.type)
+        self.assertEqual("meta", sampler.state.device.type)
 
     def test_visible_visible_connection(self):
-        nodes = ["v1", "v2", "h1"]
-        edges = [["v1", "h1"], ["v1", "v2"]]
-        grbm = GRBM(nodes, edges, hidden_nodes=["h1"])
+        grbm = GRBM(["v1", "v2", "h1"], [["v1", "h1"], ["v1", "v2"]], hidden_nodes=["h1"])
+        with self.assertRaisesRegex(ValueError, r"requires a bipartite model.*\('v1', 'v2'\)"):
+            BipartiteGibbsSampler(grbm, num_chains=2, schedule=[1.0])
 
-        with self.assertRaisesRegex(ValueError, "BipartiteGibbsSampler requires no visible-visible connections"):
+    def test_hidden_hidden_connection(self):
+        grbm = GRBM(["v1", "h1", "h2"], [["v1", "h1"], ["h1", "h2"]], hidden_nodes=["h1", "h2"])
+        with self.assertRaisesRegex(ValueError, r"requires a bipartite model.*\('h1', 'h2'\)"):
             BipartiteGibbsSampler(grbm, num_chains=2, schedule=[1.0])
 
     def test_prepare_initial_states(self):
-        nodes = ["v1", "v2", "h1", "h2"]
-        edges = [["v1", "h1"], ["v1", "h2"], ["v2", "h1"], ["v2", "h2"]]
-        grbm = GRBM(nodes, edges, hidden_nodes=["h1", "h2"])
-
-        sampler = BipartiteGibbsSampler(grbm, num_chains=2, schedule=[1.0])
-        
-        initial_states = torch.tensor([
-            [-1,  1,  1, -1],
-            [ 1, -1, -1,  1],
-        ])
-
+        sampler = BipartiteGibbsSampler(rbm(), num_chains=2, schedule=[1.0])
+        initial_states = torch.tensor([[-1, 1, 1, -1], [1, -1, -1, 1]])
         out = sampler._prepare_initial_states(num_chains=2, initial_states=initial_states)
-
         self.assertEqual(out.shape, (2, 4))
-        self.assertTrue(torch.all(torch.isin(out, torch.tensor([-1, 1]))))
-        torch.testing.assert_close(out, initial_states)
+        torch.testing.assert_close(out, initial_states.float())
 
-    def test_prepare_initial_states_exceptions(self):
-        nodes = ["v1", "v2", "h1", "h2"]
-        edges = [["v1", "h1"], ["v1", "h2"], ["v2", "h1"], ["v2", "h2"]]
-        grbm = GRBM(nodes, edges, hidden_nodes=["h1", "h2"])
-
-        sampler = BipartiteGibbsSampler(grbm, num_chains=2, schedule=[1.0],)
-        # Invalid spins
         with self.subTest("Non-spin initial states."):
             self.assertRaisesRegex(ValueError, "contain nonspin values", sampler._prepare_initial_states,
-                            initial_states=torch.tensor([[0, 1, -1, 1]]), num_chains=1)
-
-        # Incorrect shape
+                                   initial_states=torch.tensor([[0, 1, -1, 1]]), num_chains=1)
         with self.subTest("Testing initial states with incorrect shape."):
             self.assertRaisesRegex(ValueError, "Initial states should be of shape", sampler._prepare_initial_states,
-                              num_chains=2, initial_states=torch.tensor([[-1, 1, 1, 1, -1]]))
+                                   num_chains=2, initial_states=torch.tensor([[-1, 1, 1, 1, -1]]))
 
     def test_compute_effective_field_bipartite(self):
-        # Define bipartite graph
-        nodes = ["v1", "v2", "h1", "h2"]
-        edges = [["v1", "h1"],["v1", "h2"],["v2", "h1"],["v2", "h2"]]
-        grbm = GRBM(nodes, edges, hidden_nodes=["h1", "h2"])
-
-        # Set parameters manually
-        grbm._linear.data = torch.tensor([0.1, -0.2, 0.3, -0.4])
-        grbm._quadratic.data = torch.tensor([0.5, 0.2, -0.7, 0.6])
-
+        grbm = rbm()
+        set_weights(grbm, [0.1, -0.2, 0.3, -0.4], [0.5, 0.2, -0.7, 0.6])
         sampler = BipartiteGibbsSampler(grbm, num_chains=1, schedule=[1.0])
+        sampler.state[:] = torch.tensor([[1., -1., 1., -1.]])
 
-        # Force a known spin state
-        spin_state = torch.tensor([[1., -1., 1., -1.]])
-        sampler._x.data[:] = spin_state
-
-        # Block indices
-        visible_block = grbm.visible_idx
-        hidden_block = grbm.hidden_idx
-
-        # Expected fields computed manually
         expected_visible_field = torch.tensor([[0.1 + 0.5*1 + 0.2*(-1),  # v1
                                                 -0.2 + (-0.7)*1 + 0.6*(-1)]])  # v2
         expected_hidden_field = torch.tensor([[0.3 + 0.5*1 + (-0.7)*(-1),  # h1
                                                -0.4 + 0.2*1 + 0.6*(-1)]])   # h2
-
-        # Compute via sampler
-        sampler_visible_field = sampler._compute_effective_field(visible_block)
-        sampler_hidden_field = sampler._compute_effective_field(hidden_block)
-
-        # Compare
-        torch.testing.assert_close(expected_visible_field, sampler_visible_field)
-        torch.testing.assert_close(expected_hidden_field, sampler_hidden_field)
+        torch.testing.assert_close(expected_visible_field,
+                                   sampler._compute_effective_field(grbm.visible_idx))
+        torch.testing.assert_close(expected_hidden_field,
+                                   sampler._compute_effective_field(grbm.hidden_idx))
 
     def test_gibbs_update(self):
-        # Define bipartite graph
-        nodes = ["v1", "v2", "h1", "h2"]
-        edges = [["v1", "h1"], ["v1", "h2"], ["v2", "h1"], ["v2", "h2"]]
-        grbm = GRBM(nodes, edges, hidden_nodes=["h1", "h2"])
-
+        grbm = rbm()
         sample_size = 1_000_000
         sampler = BipartiteGibbsSampler(grbm, num_chains=sample_size, schedule=[1.0], seed=42)
-
-        # Force all spins to +1
-        sampler._x.data[:] = 1.0
-
         ones = torch.ones((sample_size, 1))
-        zero_field = torch.tensor(0.0)
-        
-        visible_block = grbm.visible_idx
-        hidden_block = grbm.hidden_idx
-        
-        # Gibbs update for visible block (block=0)
-        # At beta = 0 and zero effective field, spins are sampled uniformly at random.
-        # updated visible spins have expectation 0 (equal probability of ±1),
-        # while hidden spins remain fixed at +1. Since half the variables are updated
-        # and half remain +1, the overall mean is expected to be 0.5.
+        visible_block, hidden_block = grbm.visible_idx, grbm.hidden_idx
+
+        # At beta = 0 and zero effective field the updated spins are uniform, the others stay +1
         with self.subTest("visible block Gibbs update"):
-            sampler._gibbs_update(0.0, visible_block, ones*zero_field)
-            torch.testing.assert_close(torch.tensor(0.5), sampler._x.mean(), atol=1e-3, rtol=1e-3)
+            sampler.state[:] = 1.0
+            sampler._gibbs_update(0.0, visible_block, ones * 0.0)
+            torch.testing.assert_close(torch.tensor(0.5), sampler.state.mean(), atol=1e-3, rtol=1e-3)
 
-        # Force all spins to +1
-        sampler._x.data[:] = 1.0
-        # Gibbs update for hidden block (block=1)
         with self.subTest("hidden block Gibbs update"):
-            sampler._gibbs_update(0.0, hidden_block, ones*zero_field)
-            torch.testing.assert_close(torch.tensor(0.5), sampler._x.mean(), atol=1e-3, rtol=1e-3)
+            sampler.state[:] = 1.0
+            sampler._gibbs_update(0.0, hidden_block, ones * 0.0)
+            torch.testing.assert_close(torch.tensor(0.5), sampler.state.mean(), atol=1e-3, rtol=1e-3)
 
-        # Gibbs update with a nonzero effective field
         with self.subTest("Gibbs update with nonzero effective field"):
             effective_field = torch.tensor(1.2)
-            sampler._x.data[:] = 1.0
-            sampler._gibbs_update(1.0, visible_block, effective_field*ones)
-            sampler._gibbs_update(1.0, hidden_block, effective_field*ones)
-            torch.testing.assert_close(
-                torch.tanh(-effective_field),
-                sampler._x.mean(),
-                atol=1e-3, rtol=1e-3)
+            sampler.state[:] = 1.0
+            sampler._gibbs_update(1.0, visible_block, effective_field * ones)
+            sampler._gibbs_update(1.0, hidden_block, effective_field * ones)
+            torch.testing.assert_close(torch.tanh(-effective_field), sampler.state.mean(),
+                                       atol=1e-3, rtol=1e-3)
 
     def test_sample(self):
-        # Define bipartite graph
-        nodes = ["v1", "v2", "h1", "h2"]
-        edges = [["v1", "h1"], ["v1", "h2"], ["v2", "h1"], ["v2", "h2"]]
-        grbm = GRBM(nodes, edges, hidden_nodes=["h1", "h2"])
-
-        # Set parameters manually
-        grbm._linear.data = torch.tensor([0.1, -0.2, 0.3, -0.4])
-        grbm._quadratic.data = torch.tensor([0.5, 0.2, -0.7, 0.6])
-
-        # Create two samplers with a fixed random seed
+        grbm = rbm()
+        set_weights(grbm, [0.1, -0.2, 0.3, -0.4], [0.5, 0.2, -0.7, 0.6])
         sampler1 = BipartiteGibbsSampler(grbm, num_chains=5, schedule=[1.0, 2.0], seed=42)
         sampler2 = BipartiteGibbsSampler(grbm, num_chains=5, schedule=[1.0, 2.0], seed=42)
 
-        # Sample spins from both samplers
-        sampler1.sample()
-        
-        # Manually apply Gibbs updates
-        for beta in sampler2._schedule:
+        samples = sampler1.sample()
+        for beta in sampler2.schedule:
             sampler2._step(beta)
-
-        # Ensure the results are the same
-        self.assertListEqual(sampler1._x.tolist(), sampler2._x.tolist())
-    
-    def test_validate_input(self):
-        # Define bipartite graph
-        nodes = ["v1", "v2", "h1", "h2"]
-        edges = [["v1", "h1"], ["v1", "h2"], ["v2", "h1"], ["v2", "h2"]]
-        grbm = GRBM(nodes, edges, hidden_nodes=["h1", "h2"])
-
-        sampler = BipartiteGibbsSampler(grbm, num_chains=2, schedule=[1.0])
-
-        # Unclamped visible only (valid)
-        with self.subTest("Visible unclamped while hidden nodes are clamped"):
-            x = torch.tensor([
-                [float("nan"), float("nan"),  1., -1.],   # chain 0: visible unclamped
-                [float("nan"), float("nan"), -1.,  1.]    # chain 1: visible unclamped
-            ])
-
-            sampler._validate_input(x)
-            mask = ~torch.isnan(x)
-            expected_mask = torch.tensor([
-                [False, False,  True,  True],
-                [False, False,  True,  True]
-            ])
-            self.assertTrue(mask.shape == x.shape)
-            torch.testing.assert_close(mask, expected_mask)
-        
-        # Unclamped hidden only (valid)
-        with self.subTest("Hidden nodes unclamped while visible nodes are clamped"):
-            x = torch.tensor([
-                [ 1., -1., float("nan"), float("nan")],
-                [-1.,  1., float("nan"), float("nan")]
-            ])
-
-            sampler._validate_input(x)
-            mask = ~torch.isnan(x)
-            expected_mask = torch.tensor([
-                [ True,  True, False, False],
-                [ True,  True, False, False]
-            ])
-            self.assertTrue(mask.shape == x.shape)
-            torch.testing.assert_close(mask, expected_mask)
-        
-        # Unclamped in both blocks (invalid)
-        with self.subTest("Both visible and hidden nodes contain unclamped variables"):
-            x_invalid = torch.tensor([
-                [float("nan"), -1., float("nan"), 1.],  # visible + hidden unclamped
-                [1., -1., 1., -1.]
-            ])
-
-            with self.assertRaisesRegex(ValueError, "unclamped for visible or hidden"):
-                sampler._validate_input(x_invalid)
-
-        
-        # Invalid spin values
-        with self.subTest("Input contains values other than ±1 or NaN"):
-            x_invalid_spin = torch.tensor([
-                [0., 1., float("nan"), float("nan")],
-                [1., -1., 1., -1.]
-            ])
-
-            with self.assertRaisesRegex(ValueError, "x contains values other than ±1 or NaN"):
-                sampler._validate_input(x_invalid_spin)
-
-            
-        # Wrong shape
-        with self.subTest("Input has wrong shape"):
-            x_wrong_shape = torch.tensor([[1., -1., 1.]])  # wrong dimension
-
-            with self.assertRaisesRegex(ValueError, "x should be of shape"):
-                sampler._validate_input(x_wrong_shape)
+        self.assertListEqual(samples.tolist(), sampler2.state.tolist())
 
     def test_sample_conditional(self):
-        nodes = ["v1", "v2", "h1", "h2"]
-        edges = [["v1", "h1"], ["v1", "h2"], ["v2", "h1"], ["v2", "h2"]]
-        
         with self.subTest("clamp visible -> hidden becomes deterministic"):
-            grbm = GRBM(nodes, edges, hidden_nodes=["h1", "h2"])
-            visible = grbm.visible_idx
-            hidden  = grbm.hidden_idx
-
+            grbm = rbm()
+            set_weights(grbm, [1e10] * 4, [0.0] * 4)
             sampler = BipartiteGibbsSampler(grbm, num_chains=3, schedule=[1.0, 2.0], seed=123)
-            
-            # Make dynamics deterministic
-            grbm.linear.data[:] = 1e10
-            grbm.quadratic.data[:] = 0.0
-            sampler._x.data[:] = 1.0
+            chains = sampler.state.clone()
 
+            x = grbm.pad_visible(torch.tensor([[1., -1.], [1., 1.], [-1., -1.]]))
+            result = sampler.sample(x)
+            self.assertEqual((3, 1, 4), tuple(result.shape))
+            torch.testing.assert_close(result[:, 0, grbm.visible_idx], x[:, grbm.visible_idx])
+            torch.testing.assert_close(result[:, 0, grbm.hidden_idx], -torch.ones(3, 2))
+            self.assertTrue(torch.equal(chains, sampler.state))
 
-            # Clamp visible, sample hidden
-            x = torch.full((3, 4), float("nan"))
-            x[:, visible] = torch.tensor([[1., -1.],
-                                        [1.,  1.],
-                                        [-1., -1.]])
-
-            result = sampler.sample(x=x)
-            
-            # Visible must remain unchanged
-            torch.testing.assert_close(result[:, visible], x[:, visible])
-
-            # Hidden should deterministically go to -1 
-            expected_hidden = -torch.ones_like(result[:, hidden])    
-            torch.testing.assert_close(result[:, hidden], expected_hidden)
-
-        # Clamp hidden, sample visible
         with self.subTest("clamp hidden -> visible becomes deterministic"):
-            grbm = GRBM(nodes, edges, hidden_nodes=["h1", "h2"])
-            visible = grbm.visible_idx
-            hidden  = grbm.hidden_idx
-
+            grbm = rbm()
+            set_weights(grbm, [1e6] * 4, [0.0] * 4)
             sampler = BipartiteGibbsSampler(grbm, num_chains=3, schedule=[1.0], seed=123)
-            
-            # Make dynamics deterministic
-            grbm.linear.data[:] = 1e6
-            grbm.quadratic.data[:] = 0.0
-            sampler._x.data[:] = 1.0
 
             x = torch.full((3, 4), float("nan"))
-            x[:, hidden] = torch.tensor([[1., -1.],
-                                        [-1.,  1.],
-                                        [1.,  1.]])
+            x[:, grbm.hidden_idx] = torch.tensor([[1., -1.], [-1., 1.], [1., 1.]])
+            result = sampler.sample(x, num_samples=2)
+            self.assertEqual((3, 2, 4), tuple(result.shape))
+            torch.testing.assert_close(result[:, :, grbm.hidden_idx],
+                                       x[:, None, grbm.hidden_idx].expand(3, 2, 2))
+            torch.testing.assert_close(result[:, :, grbm.visible_idx], -torch.ones(3, 2, 2))
 
-            result = sampler.sample(x=x)
+    def test_sample_conditional_matches_exact_conditional(self):
+        grbm = rbm()
+        set_weights(grbm, [0.1, -0.2, 0.3, -0.4], [0.5, 0.2, -0.7, 0.6])
+        sampler = BipartiteGibbsSampler(grbm, num_chains=1, schedule=[1.0], seed=0)
+        x = grbm.pad_visible(torch.tensor([[1.0, -1.0]]))
+        samples = sampler.sample(x, num_samples=200_000)
+        expected = -torch.tanh(grbm.effective_field(x, grbm.hidden_idx))
+        torch.testing.assert_close(samples[0, :, grbm.hidden_idx].mean(0, keepdim=True), expected,
+                                   atol=5e-3, rtol=0)
 
-            # Hidden must remain unchanged
-            torch.testing.assert_close(result[:, hidden], x[:, hidden])
-
-            # Visible deterministically -1
-            expected_visible = -torch.ones_like(result[:, visible])
-            torch.testing.assert_close(result[:, visible], expected_visible)
 
 if __name__ == "__main__":
     unittest.main()

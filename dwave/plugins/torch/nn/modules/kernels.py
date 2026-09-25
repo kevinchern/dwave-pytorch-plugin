@@ -80,7 +80,7 @@ class Kernel(ABC, nn.Module):
 
 
 class GaussianKernel(Kernel):
-    """The Gaussian kernel.
+    r"""The Gaussian kernel.
 
     This kernel between two data points x and y is defined as
     :math:`k(x, y) = exp(-||x-y||^2 / (2 * \sigma))`, where :math:`\sigma` is the bandwidth
@@ -105,7 +105,8 @@ class GaussianKernel(Kernel):
         self, n_kernels: int, factor: int | float = 2.0, bandwidth: float | None = None
     ):
         super().__init__()
-        factors = factor ** (torch.arange(n_kernels) - n_kernels // 2)
+        exponents = torch.arange(n_kernels, dtype=torch.get_default_dtype()) - n_kernels // 2
+        factors = float(factor) ** exponents
         self.register_buffer("factors", factors)
         self.bandwidth = bandwidth
 
@@ -132,7 +133,7 @@ class GaussianKernel(Kernel):
         return self.bandwidth
 
     def _kernel(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Compute the Gaussian kernel between ``x`` and ``y``.
+        r"""Compute the Gaussian kernel between ``x`` and ``y``.
 
         .. math::
             k(x, y) = \sum_{i=1}^{num\_features} exp(-||x-y||^2 / (2 * \sigma_i)),

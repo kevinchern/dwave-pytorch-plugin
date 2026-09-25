@@ -11,25 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any, Optional
 
-import torch
 import dimod
-import warnings
-from hybrid.composers import AggregatedSamples
+import torch
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
 from dwave.plugins.torch.samplers.base import TorchSampler
-from dwave.plugins.torch.utils import sampleset_to_tensor
-
-if TYPE_CHECKING:
-    import dimod
-    from dwave.plugins.torch.models.boltzmann_machine import (
-        GraphRestrictedBoltzmannMachine,
-    )
-
+from dwave.plugins.torch.utils import sampleset_to_tensor, spread
 
 __all__ = ["DimodSampler"]
 
@@ -37,179 +29,156 @@ __all__ = ["DimodSampler"]
 class DimodSampler(TorchSampler):
     """PyTorch plugin wrapper for a dimod sampler.
 
+    Unconditional sampling submits the model, scaled by ``prefactor`` and clipped to the given
+    ranges, to :meth:`dimod.Sampler.sample_ising`. Conditional sampling builds, for every row of
+    partially observed spins, the binary quadratic model of the unobserved variables: their
+    effective fields (linear biases plus couplings to the observed spins, scaled by
+    ``prefactor`` and clipped to ``linear_range``) and the couplings among them.
+
     Args:
-        module (GraphRestrictedBoltzmannMachine): GraphRestrictedBoltzmannMachine module. Requires the
-            methods ``to_ising`` and ``nodes``.
+        model (GraphRestrictedBoltzmannMachine): The model to sample from.
         sampler (dimod.Sampler): Dimod sampler.
-        prefactor (float): The prefactor for which the Hamiltonian is scaled by.
-            This quantity is typically the temperature at which the sampler operates
-            at. Standard CPU-based samplers such as Metropolis- or Gibbs-based
-            samplers will often default to sampling at an unit temperature, thus a
-            unit prefactor should be used. In the case of a quantum annealer, a
-            reasonable choice of a prefactor is 1/beta where beta is the effective
+        prefactor (float): The prefactor for which the Hamiltonian is scaled by. This quantity
+            is typically the temperature at which the sampler operates at. Standard CPU-based
+            samplers such as Metropolis- or Gibbs-based samplers will often default to sampling
+            at an unit temperature, thus a unit prefactor should be used. In the case of a quantum
+            annealer, a reasonable choice of a prefactor is 1/beta where beta is the effective
             inverse temperature and can be estimated using
-            :meth:`GraphRestrictedBoltzmannMachine.estimate_beta`.
-        linear_range (tuple[float, float], optional): Linear weights are clipped to
+            :meth:`GraphRestrictedBoltzmannMachine.estimate_beta`. Defaults to 1.
+        linear_range (tuple[float, float], optional): Linear biases are clipped to
             ``linear_range`` prior to sampling. This clipping occurs after the ``prefactor``
             scaling has been applied. When None, no clipping is applied. Defaults to None.
-        quadratic_range (tuple[float, float], optional): Quadratic weights are clipped to
+        quadratic_range (tuple[float, float], optional): Quadratic biases are clipped to
             ``quadratic_range`` prior to sampling. This clipping occurs after the ``prefactor``
-            scaling has been applied. When None, no clipping is applied.Defaults to None.
-        sample_kwargs (dict[str, Any]): Dictionary containing optional arguments for the dimod sampler.
+            scaling has been applied. When None, no clipping is applied. Defaults to None.
+        sample_kwargs (dict[str, Any], optional): Keyword arguments for the dimod sampler.
     """
 
     def __init__(
         self,
-        grbm: GraphRestrictedBoltzmannMachine,
+        model: GraphRestrictedBoltzmannMachine,
         sampler: dimod.Sampler,
-        prefactor: float,
-        linear_range: tuple[float, float] | None = None,
-        quadratic_range: tuple[float, float] | None = None,
-        sample_kwargs: dict[str, Any] | None = None,
+        prefactor: float = 1.0,
+        linear_range: Optional[tuple[float, float]] = None,
+        quadratic_range: Optional[tuple[float, float]] = None,
+        sample_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
-        self._grbm = grbm
-
-        self._prefactor = prefactor
-
-        self._linear_range = linear_range
-        self._quadratic_range = quadratic_range
-
+        super().__init__(model)
         self._sampler = sampler
-        self._sampler_params = sample_kwargs or {}
+        self._prefactor = float(prefactor)
+        self._linear_range = None if linear_range is None else tuple(linear_range)
+        self._quadratic_range = None if quadratic_range is None else tuple(quadratic_range)
+        self._sample_kwargs = dict(sample_kwargs or {})
+        self._sample_set: Optional[dimod.SampleSet] = None
 
-        # cached sample_set from latest sample
-        self._sample_set = None
+    @property
+    def sampler(self) -> dimod.Sampler:
+        """The wrapped dimod sampler."""
+        return self._sampler
 
-        # adds all torch parameters to 'self._parameters' for automatic device/dtype
-        # update support unless 'refresh_parameters = False'
-        super().__init__()
+    @property
+    def prefactor(self) -> float:
+        """The scaling applied to the Hamiltonian prior to sampling."""
+        return self._prefactor
 
-    def sample(self, x: torch.Tensor | None = None) -> torch.Tensor:
-        """Sample from the dimod sampler and return the corresponding tensor.
+    @property
+    def linear_range(self) -> Optional[tuple[float, float]]:
+        """The range linear biases are clipped to, or ``None``."""
+        return self._linear_range
 
-        The sample set returned from the latest sample call is available via :attr:`DimodSampler.sample_set`
-        which is overwritten by subsequent calls.
+    @property
+    def quadratic_range(self) -> Optional[tuple[float, float]]:
+        """The range quadratic biases are clipped to, or ``None``."""
+        return self._quadratic_range
 
-        Args:
-            x (torch.Tensor): A tensor of shape (``batch_size``, ``dim``) or (``batch_size``, ``n_nodes``)
-                interpreted as a batch of partially-observed spins. Entries marked with ``torch.nan`` will
-                be sampled; entries with +/-1 values will remain constant.
-        Raises:
-            ValueError: If ``x`` has an invalid shape or contains values other than ±1 or NaN or if the
-                sampler returns more than one sample per input row.
-
-        Returns:
-            torch.Tensor: Sampled spin configurations with entries in ``{-1, +1}``.
-            If ``x is None`` the returned tensor has shape ``(num_reads, n_nodes)``.
-            Otherwise, the returned tensor has shape ``(batch_size, num_reads, n_nodes)``.
-        """
-        device = self._grbm.linear.device
-        n_nodes = self._grbm.n_nodes
-
-        h, J = self._grbm.to_ising(self._prefactor, self._linear_range, self._quadratic_range)
-
-        # Unconditional sampling
-        if x is None:
-            self._sample_set = AggregatedSamples.spread(
-                self._sampler.sample_ising(h, J, **self._sampler_params)
-            )
-            return self._sampleset_to_tensor(self._sample_set, device)
-
-        # Conditional sampling
-        if x.shape[1] != n_nodes:
-            raise ValueError(f"x must have shape (batch_size, {n_nodes})")
-
-        mask = ~torch.isnan(x)
-        if not torch.all(torch.isin(x[mask], torch.tensor([-1, 1], device=device))):
-            raise ValueError("x must contain only ±1 or NaN")
-
-        results = []
-        for row, row_mask in zip(x, mask):
-            # Fresh BQM
-            bqm = dimod.BinaryQuadraticModel.from_ising(h, J)
-
-            # Build conditioning dict
-            conditioned = {
-                node: int(val.item()) for node, val, m in zip(self._grbm.nodes, row, row_mask) if m
-            }
-
-            # Apply conditioning
-            if conditioned:
-                bqm.fix_variables(conditioned)
-
-            # Handle fully clamped case
-            if bqm.num_variables == 0:
-                num_reads = self._sampler_params.get("num_reads", 1)
-                full_read = torch.empty((num_reads, n_nodes), device=device)
-                for node, idx in self._grbm.node_to_idx.items():
-                    full_read[:, idx] = conditioned[node]
-                results.append(full_read)
-                continue
-
-            # Clip linear biases for remaining free variables
-            if self._linear_range is not None:
-                lb, ub = self._linear_range
-                for v, bias in bqm.iter_linear():
-                    if bias > ub:
-                        bqm.set_linear(v, ub)
-                    elif bias < lb:
-                        bqm.set_linear(v, lb)
-
-            # Storing the latest samples
-            self._sample_set = AggregatedSamples.spread(
-                self._sampler.sample(bqm, **self._sampler_params)
-            )
-            sample_array = self._sample_set.record.sample
-
-            num_reads = sample_array.shape[0]
-
-            full_read = torch.empty((num_reads, n_nodes), device=device)
-            var_to_idx = {v: i for i, v in enumerate(self._sample_set.variables)}
-
-            for node, idx in self._grbm.node_to_idx.items():
-                if node in conditioned:
-                    full_read[:, idx] = conditioned[node]
-                else:
-                    full_read[:, idx] = torch.from_numpy(sample_array[:, var_to_idx[node]]).to(
-                        device=device, dtype=torch.float
-                    )
-            results.append(full_read)
-
-        reference_shape = results[0].shape
-        if not all(result.shape == reference_shape for result in results):
-            raise ValueError(f"Expected all samples to have shape {reference_shape}")
-        # Stack to get (batch_size, num_reads, n_nodes)
-        samples = torch.stack(results, dim=0)
-        return samples
-
-    def _sampleset_to_tensor(self, sample_set: dimod.SampleSet, device: torch.device | None = None) -> torch.Tensor:
-        """Converts a ``dimod.SampleSet`` to a ``torch.Tensor`` using GRBM node order.
-
-        Args:
-            sample_set (dimod.SampleSet): A sample set.
-            device (torch.device, optional): The device of the constructed tensor.
-                If ``None`` and data is a tensor then the device of data is used.
-                If ``None`` and data is not a tensor then the result tensor is constructed
-                on the current device.
-
-        Returns:
-            torch.Tensor: The sample set as a ``torch.Tensor``.
-        """
-        var_to_sample_i = {v: i for i, v in enumerate(sample_set.variables)}
-
-        # Convert dict -> ordered list by index
-        ordered_vars = [v for v, _ in sorted(self._grbm.node_to_idx.items(), key=lambda x: x[1])]
-
-        permutation = [var_to_sample_i[v] for v in ordered_vars]
-
-        sample = sample_set.record.sample[:, permutation]
-
-        return torch.from_numpy(sample).to(device=device, dtype=torch.float32)
+    @property
+    def sample_kwargs(self) -> dict[str, Any]:
+        """Keyword arguments passed to the dimod sampler."""
+        return dict(self._sample_kwargs)
 
     @property
     def sample_set(self) -> dimod.SampleSet:
-        """The sample set returned from the latest sample call."""
-        if self._sample_set is None:
-            raise AttributeError("no samples found; call 'sample()' first")
+        """The sample set returned by the dimod sampler in the latest :meth:`sample` call (for
+        conditional sampling, the one of the last row).
 
+        Raises:
+            RuntimeError: If :meth:`sample` has not been called yet.
+        """
+        if self._sample_set is None:
+            # NOTE: an AttributeError would be swallowed by ``torch.nn.Module.__getattr__``
+            raise RuntimeError("no samples found; call 'sample()' first")
         return self._sample_set
+
+    def sample(self, x: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Sample from the dimod sampler and return the corresponding tensor.
+
+        Args:
+            x (torch.Tensor, optional): Partially observed spins of shape ``(..., n_nodes)``;
+                entries equal to ``torch.nan`` are sampled, ``±1`` entries are kept fixed. If
+                ``None``, samples are drawn from the joint distribution.
+
+        Raises:
+            ValueError: If ``x`` has an invalid shape, contains values other than ``±1`` or
+                ``torch.nan``, or the sampler returns a different number of samples for
+                different rows.
+
+        Returns:
+            torch.Tensor: Spins with entries in ``{-1, +1}`` of shape ``(num_reads, n_nodes)`` if
+            ``x`` is ``None`` and ``(..., num_reads, n_nodes)`` otherwise.
+        """
+        model = self.model
+        device = model.linear.device
+        h, J = model.to_ising(self._prefactor, self._linear_range, self._quadratic_range)
+
+        if x is None:
+            self._sample_set = spread(self._sampler.sample_ising(h, J, **self._sample_kwargs))
+            return sampleset_to_tensor(model.nodes, self._sample_set, device)
+
+        x, clamp_mask = self._validate_conditional_input(x)
+        batch_shape = x.shape[:-1]
+        n_nodes = model.n_nodes
+        x = x.reshape(-1, n_nodes)
+        clamp_mask = clamp_mask.reshape(-1, n_nodes)
+
+        # Linear biases of the free variables conditioned on the observed spins, for all rows at
+        # once (observed entries only contribute; NaN entries contribute nothing).
+        with torch.no_grad():
+            fields = self._prefactor * model.effective_field(x)
+        if self._linear_range is not None:
+            fields = fields.clip(*self._linear_range)
+
+        x_cpu, fields_cpu, free_cpu = x.cpu(), fields.cpu(), (~clamp_mask).cpu()
+        nodes = model.nodes
+        reduced_models: dict[bytes, tuple[torch.Tensor, list, dict]] = {}
+        results = []
+        for row in range(x_cpu.shape[0]):
+            free = free_cpu[row]
+            key = free.numpy().tobytes()
+            if key not in reduced_models:
+                free_idx = torch.nonzero(free).flatten()
+                free_nodes = [nodes[idx] for idx in free_idx.tolist()]
+                free_set = set(free_nodes)
+                J_free = {e: b for e, b in J.items() if e[0] in free_set and e[1] in free_set}
+                reduced_models[key] = (free_idx, free_nodes, J_free)
+            free_idx, free_nodes, J_free = reduced_models[key]
+
+            if not free_nodes:
+                num_reads = int(self._sample_kwargs.get("num_reads", 1))
+                results.append(x_cpu[row].expand(num_reads, n_nodes).clone())
+                continue
+
+            h_free = dict(zip(free_nodes, fields_cpu[row, free_idx].tolist()))
+            bqm = dimod.BinaryQuadraticModel.from_ising(h_free, J_free)
+            self._sample_set = spread(self._sampler.sample(bqm, **self._sample_kwargs))
+            free_samples = sampleset_to_tensor(free_nodes, self._sample_set)
+            full = x_cpu[row].expand(free_samples.shape[0], n_nodes).clone()
+            full[:, free_idx] = free_samples.to(full.dtype)
+            results.append(full)
+
+        num_reads = {result.shape[0] for result in results}
+        if len(num_reads) != 1:
+            raise ValueError(
+                f"Expected all samples to have shape ({results[0].shape[0]}, {n_nodes}), got "
+                f"sample sizes {sorted(num_reads)}."
+            )
+        return torch.stack(results).reshape(*batch_shape, -1, n_nodes).to(device)

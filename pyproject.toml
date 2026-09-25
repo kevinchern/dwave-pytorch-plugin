@@ -8,7 +8,7 @@ dynamic = ["version"]
 authors = [
     {name = "D-Wave Inc.", email = "tools@dwavesys.com"},
 ]
-description = "PyTorch plugin."
+description = "PyTorch modules and samplers for training Boltzmann machines with D-Wave quantum computers."
 license = {file = "LICENSE"}
 classifiers = [
     "Operating System :: Microsoft :: Windows",
@@ -31,7 +31,6 @@ dependencies = [
     "networkx",
     "dimod",
     "dwave-system",
-    "dwave-hybrid",
     "dwave-graphs",
 ]
 
@@ -43,8 +42,8 @@ content-type = "text/x-rst"
 Homepage = "https://github.com/dwavesystems/dwave-pytorch-plugin"
 Download = "https://github.com/dwavesystems/dwave-pytorch-plugin/releases"
 
-[tool.setuptools.packages]
-find = {}  # Scanning implicit namespaces is active by default
+[tool.setuptools.packages.find]
+include = ["dwave*"]  # implicit namespace package; exclude tests, examples, build, ...
 
 [tool.setuptools.dynamic]
 version = {attr = "dwave.plugins.torch.__version__"}

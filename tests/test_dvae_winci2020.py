@@ -15,10 +15,10 @@
 import unittest
 
 import torch
-from einops import repeat
 from parameterized import parameterized
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
+from dwave.plugins.torch.samplers import DimodSampler
 from dwave.plugins.torch.models.discrete_variational_autoencoder import \
     DiscreteVariationalAutoencoder as DVAE
 from dwave.plugins.torch.models.losses.kl_divergence import pseudo_kl_divergence_loss
@@ -94,7 +94,7 @@ class TestDiscreteVariationalAutoencoder(unittest.TestCase):
             soft = logits
             result = hard - soft.detach() + soft
             # Now we need to repeat the result n_samples times along a new dimension
-            return repeat(result, "b ... -> b n ...", n=n_samples)
+            return result.unsqueeze(1).repeat(1, n_samples, *([1] * (result.ndim - 1)))
 
         self.dvae_with_trainable_encoder = DVAE(
             encoder=torch.nn.Linear(input_features, latent_features),
@@ -116,7 +116,13 @@ class TestDiscreteVariationalAutoencoder(unittest.TestCase):
             quadratic={(0, 1): -1.2},
         )
 
-        self.sampler_sa = SimulatedAnnealingSampler()
+        sample_kwargs = dict(num_sweeps=10, seed=1234, num_reads=100)
+        self.fixed_prior_sampler = DimodSampler(
+            self.fixed_boltzmann_machine, SimulatedAnnealingSampler(), sample_kwargs=sample_kwargs
+        )
+        self.prior_sampler = DimodSampler(
+            self.boltzmann_machine, SimulatedAnnealingSampler(), sample_kwargs=sample_kwargs
+        )
 
     def test_mappings(self):
         """Test the mapping between data and logits."""
@@ -153,15 +159,7 @@ class TestDiscreteVariationalAutoencoder(unittest.TestCase):
             optimiser.zero_grad()
             _, discretes, _ = dvae(self.data, n_samples=1)
             discretes = discretes.reshape(discretes.shape[0], -1)
-            prior_samples = self.fixed_boltzmann_machine.sample(
-                sampler=self.sampler_sa,
-                as_tensor=True,
-                device=discretes.device,
-                prefactor=1.0,
-                linear_range=None,
-                quadratic_range=None,
-                sample_params=dict(num_sweeps=10, seed=1234, num_reads=100),
-            )
+            prior_samples = self.fixed_prior_sampler.sample()
             if use_mmd_loss_class:
                 if mmd_loss_module is None:
                     mmd_loss_module = MMDLoss(kernel)
@@ -197,12 +195,7 @@ class TestDiscreteVariationalAutoencoder(unittest.TestCase):
 
             discretes = discretes.reshape(discretes.shape[0], -1)
             latents = latents.reshape(latents.shape[0], -1)
-            samples = self.boltzmann_machine.sample(
-                self.sampler_sa,
-                as_tensor=True,
-                prefactor=1.0,
-                sample_params=dict(num_sweeps=10, seed=1234, num_reads=100),
-            )
+            samples = self.prior_sampler.sample()
             kl_loss = pseudo_kl_divergence_loss(
                 discretes,
                 latents,
@@ -222,7 +215,7 @@ class TestDiscreteVariationalAutoencoder(unittest.TestCase):
             self.boltzmann_machine.linear, torch.zeros(2), rtol=1e-2, atol=1e-2
         )
         torch.testing.assert_close(
-            self.boltzmann_machine.quadratic, torch.tensor([0.0]).float(), rtol=1e-2, atol=1e-2
+            self.boltzmann_machine.quadratic, torch.zeros(2, 2), rtol=1e-2, atol=1e-2
         )
 
     @parameterized.expand(

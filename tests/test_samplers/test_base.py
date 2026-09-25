@@ -16,124 +16,84 @@ import unittest
 
 import torch
 
+from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.base import TorchSampler
+
+
+class ConstantSampler(TorchSampler):
+    """Returns the all-ones state."""
+
+    def sample(self, x=None):
+        if x is None:
+            return torch.ones(1, self.model.n_nodes)
+        x, clamp_mask = self._validate_conditional_input(x)
+        return torch.where(clamp_mask, x, torch.ones_like(x)).unsqueeze(-2)
 
 
 class TestTorchSampler(unittest.TestCase):
     """Test TorchSampler base class."""
 
+    def setUp(self) -> None:
+        self.model = GRBM(list("abc"), [("a", "b"), ("b", "c")])
+
     def test_subclass_without_sample(self):
-        """Test creating a new subclass."""
-
         class EmptySubClass(TorchSampler):
-            """Empty subclass without any methods."""
-
             def something_else(self):
                 pass
 
         with self.assertRaises(TypeError):
-            EmptySubClass()  # type: ignore
+            EmptySubClass(self.model)  # type: ignore
+
+    def test_requires_model(self):
+        with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
+            ConstantSampler(torch.nn.Linear(3, 3))
 
     def test_simple_subclass(self):
-        """Test creating a new subclass."""
+        sampler = ConstantSampler(self.model)
+        torch.testing.assert_close(sampler.sample(), torch.ones(1, 3))
+        with self.subTest("Calling the sampler is equivalent to sampling"):
+            torch.testing.assert_close(sampler(), torch.ones(1, 3))
+            x = torch.tensor([[-1.0, float("nan"), -1.0]])
+            torch.testing.assert_close(sampler(x), torch.tensor([[[-1.0, 1.0, -1.0]]]))
 
-        expected_sample = torch.Tensor([1, 2, 3])
+    def test_model_is_submodule(self):
+        sampler = ConstantSampler(self.model)
+        self.assertIsInstance(sampler, torch.nn.Module)
+        self.assertIs(self.model, sampler.model)
+        self.assertListEqual([self.model], list(sampler.children()))
+        self.assertSetEqual({"model._linear", "model._quadratic"},
+                            {k for k in sampler.state_dict() if "idx" not in k and "adjacency" not in k})
+        self.assertEqual(len(list(self.model.parameters())), len(list(sampler.parameters())))
 
-        class SimpleSubClass(TorchSampler):
-            """Simple subclass with a dummy sample method."""
+        with self.subTest("Moving the sampler moves the model"):
+            result = sampler.to(torch.device("meta"))
+            self.assertIs(sampler, result)
+            self.assertEqual(torch.device("meta"), self.model.linear.device)
+            self.assertEqual(torch.device("meta"), self.model.adjacency.device)
 
-            def sample(self, x: torch.Tensor | None = None):
-                return x or expected_sample
+    def test_validate_conditional_input(self):
+        sampler = ConstantSampler(self.model)
 
-        simple_obj = SimpleSubClass()
+        with self.subTest("Valid input"):
+            x = torch.tensor([[1.0, float("nan"), -1.0], [float("nan"), float("nan"), 1.0]])
+            out, clamp_mask = sampler._validate_conditional_input(x)
+            torch.testing.assert_close(out, x, equal_nan=True)
+            self.assertListEqual(clamp_mask.tolist(), [[True, False, True], [False, False, True]])
 
-        torch.testing.assert_close(simple_obj.sample(), expected_sample)
+        with self.subTest("Batch dimensions and integer inputs are accepted"):
+            out, clamp_mask = sampler._validate_conditional_input(torch.ones(2, 5, 3, dtype=torch.int64))
+            self.assertEqual((2, 5, 3), tuple(out.shape))
+            self.assertEqual(self.model.linear.dtype, out.dtype)
+            self.assertTrue(clamp_mask.all())
 
-    def test_parameters(self):
-        """Test that parameters are correctly."""
-        init_device = torch.device("cpu")
+        with self.subTest("Wrong shape"):
+            with self.assertRaisesRegex(ValueError, r"x must have shape \(\.\.\., 3\)"):
+                sampler._validate_conditional_input(torch.ones(2, 2))
 
-        parameters = {
-            "param_0": torch.nn.Parameter(torch.Tensor([2, 4, 8], device=init_device)),
-            "param_1": torch.Tensor([1, 1, 2], device=init_device),
-        }
+        with self.subTest("Non-spin values"):
+            with self.assertRaisesRegex(ValueError, "only ±1 or NaN"):
+                sampler._validate_conditional_input(torch.tensor([[0.5, 1.0, float("nan")]]))
 
-        class SubClassWithParameters(TorchSampler):
-            """Simple subclass with a dummy sample method."""
 
-            def __init__(self) -> None:
-                self.param_0 = parameters["param_0"]
-                self.param_1 = parameters["param_1"]
-
-                # refresh parameters
-                super().__init__(refresh=True)
-
-            def sample(self, x: torch.Tensor | None = None):  # type: ignore
-                pass
-
-        params_obj = SubClassWithParameters()
-
-        self.assertDictEqual(params_obj._parameters, parameters)
-
-        with self.subTest("set device to meta"):
-            params_obj = params_obj.to(torch.device("meta"))
-
-            for p in params_obj.parameters():
-                self.assertEqual(p.device, torch.device("meta"))
-
-            self.assertIs(params_obj.param_0, list(params_obj.parameters())[0])
-            self.assertIs(params_obj.param_1, list(params_obj.parameters())[1])
-
-        with self.subTest("add new parameter on cpu"):
-            cpu_param = torch.Tensor([4, 2, 0], device=torch.device("cpu"))
-            setattr(params_obj, "cpu_param", cpu_param)
-
-            # check that new param is _not_ part of parameters unless refreshed
-            self.assertNotIn(cpu_param, list(params_obj.parameters()))
-
-            # refresh parameters and check again
-            params_obj.refresh_parameters()
-            self.assertIn(cpu_param, list(params_obj.parameters()))
-
-            # check that new param has different device
-            self.assertEqual(params_obj._parameters["cpu_param"].device, torch.device("cpu"))
-            self.assertEqual(params_obj._parameters["param_0"].device, torch.device("meta"))
-            self.assertEqual(params_obj._parameters["param_1"].device, torch.device("meta"))
-
-            # finally, check that setting 'params_obj' to meta device again works
-            params_obj = params_obj.to(torch.device("meta"))
-            for p in params_obj.parameters():
-                self.assertEqual(p.device, torch.device("meta"))
-
-    def test_module_parameters(self):
-        """Test that modules are correctly set."""
-        init_device = torch.device("cpu")
-
-        param = torch.nn.Conv2d(1, 20, 5).to(init_device)
-
-        class SubClassWithModule(TorchSampler):
-            """Simple subclass with a dummy sample method."""
-
-            def __init__(self) -> None:
-                self.param = param
-
-                # refresh parameters
-                super().__init__(refresh=True)
-
-            def sample(self, x: torch.Tensor | None = None):  # type: ignore
-                pass
-
-        module_obj = SubClassWithModule()
-
-        self.assertEqual(type(next(module_obj.modules())), type(param))
-
-        with self.subTest("set device to meta"):
-            res_device = torch.device("meta")
-            res_module = next(module_obj.modules())
-
-            # set all modules to device, recursively setting all the
-            # modules parameters to device
-            module_obj = module_obj.to(res_device)
-
-            # assert that modules parameters have set device (just check one param)
-            self.assertEqual(next(res_module.parameters()).device, res_device)
+if __name__ == "__main__":
+    unittest.main()

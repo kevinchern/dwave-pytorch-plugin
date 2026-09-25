@@ -11,7 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
 
+from dwave.plugins.torch.nn.modules.ising import *
+from dwave.plugins.torch.nn.modules.kernels import *
 from dwave.plugins.torch.nn.modules.linear import *
+from dwave.plugins.torch.nn.modules.loss import *
 from dwave.plugins.torch.nn.modules.utils import *

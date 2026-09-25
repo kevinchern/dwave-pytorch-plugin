@@ -1,0 +1,77 @@
+---
+prelude: >
+    Graph-restricted Boltzmann machines and their samplers now use a dense representation
+    throughout: quadratic biases are stored in a masked ``(n_nodes, n_nodes)`` matrix and all
+    computations---energies, learning statistics, effective fields and block-Gibbs updates---are
+    dense matrix products. This release is not backward compatible; see the upgrade notes.
+features:
+  - |
+    ``GraphRestrictedBoltzmannMachine.quadratic`` is a dense, strictly upper-triangular
+    ``(n_nodes, n_nodes)`` parameter whose off-graph entries are structurally zero (masked by the new
+    ``adjacency`` buffer). New methods ``coupling``, ``symmetric_coupling``, ``effective_field``,
+    ``moments`` and ``pad_visible``; new properties ``adjacency``, ``visible_nodes``, ``n_visible``,
+    ``n_hidden`` and ``connected_hidden``. All methods accept arbitrary leading batch dimensions.
+  - |
+    ``quasi_objective(..., kind="sampling", sampler=...)`` accepts any ``TorchSampler`` (for
+    example ``DimodSampler`` or ``BlockSampler``) to sample hidden units conditioned on the data,
+    and keeps the objective differentiable with respect to the observations.
+  - |
+    Samplers are ``torch.nn.Module`` subclasses holding the model as the submodule ``model``:
+    ``sampler.to(device)``, ``state_dict()`` and friends act on model and sampler state together.
+    ``BlockSampler`` computes effective fields with one matrix product per block, computes a greedy
+    colouring when none is given, and supports conditional sampling of arbitrary partially observed
+    spins (any number of free blocks, ``num_samples`` per row, arbitrary batch dimensions) without
+    modifying its persistent chains. ``BipartiteGibbsSampler`` is a two-block ``BlockSampler``.
+  - |
+    ``DimodSampler`` builds conditional binary quadratic models from the model's dense effective
+    fields (no per-row ``fix_variables``), applies ``prefactor`` and clipping consistently, and
+    expands aggregated sample sets. ``dwave.plugins.torch.utils.spread`` replaces the dependency on
+    ``dwave-hybrid``; ``dwave.plugins.torch.utils.GraphIndex`` provides shared graph indexing.
+  - |
+    The ``Ising`` layer takes dense ``(B, n_nodes, n_nodes)`` quadratic biases and returns dense
+    gradients (nonzero only at edges); ``edge_biases`` and ``dense_quadratic`` convert between
+    per-edge and dense biases.
+  - |
+    ``dwave.plugins.torch.nn`` exports the kernels, losses and Ising modules;
+    ``dwave.plugins.torch.samplers`` exports ``BipartiteGibbsSampler``.
+upgrade:
+  - |
+    ``GraphRestrictedBoltzmannMachine.quadratic`` has shape ``(n_nodes, n_nodes)``; per-edge biases
+    are ``quadratic[edge_idx_i, edge_idx_j]``. ``theta``, ``sufficient_statistics``, ``interactions``
+    and the deprecated ``sample``/``sampleset_to_tensor`` methods are removed. ``edge_idx_i``/
+    ``edge_idx_j`` hold the smaller/larger node index of each edge irrespective of the orientation
+    given at construction. Duplicate nodes or edges, unknown edge endpoints and unknown hidden nodes
+    raise ``ValueError``.
+  - |
+    ``quasi_objective`` takes a ``TorchSampler`` via ``sampler`` for ``kind="sampling"``; the
+    ``prefactor``, ``linear_range``, ``quadratic_range`` and ``sample_kwargs`` arguments moved to
+    ``DimodSampler``. ``to_ising`` defaults to ``prefactor=1``. The objective is a 0-d tensor.
+  - |
+    Samplers take the model as their first argument (``model``), hold it as a submodule and are
+    moved in place by ``to()``. ``BlockSampler`` exposes ``state``, ``partition``, ``schedule`` and
+    ``seed`` instead of parameters; conditional ``sample(x)`` returns ``(..., num_samples, n_nodes)``
+    and requires ``x`` to have shape ``(..., n_nodes)`` (the batch size no longer has to equal the
+    number of chains). ``BipartiteGibbsSampler`` rejects hidden-hidden as well as visible-visible
+    edges. Unseeded samplers draw from the global PyTorch generator.
+  - |
+    ``Ising.forward`` and ``Ising.estimate_betas`` take dense quadratic biases; ``node_idx_of_edges_1``/
+    ``node_idx_of_edges_2`` are renamed ``edge_idx_i``/``edge_idx_j`` and ``beta`` is a buffer.
+  - |
+    ``dwave-hybrid`` and ``einops`` are no longer dependencies. Package discovery is restricted to the
+    ``dwave`` namespace.
+fixes:
+  - |
+    Effective fields of hidden units were wrong whenever a hidden node was the first endpoint of
+    some edges and the second endpoint of others (neighbours were paired with the wrong weights), and
+    were ``NaN`` for models with connected hidden units.
+  - |
+    Conditional sampling of hidden units did not scale the effective fields by ``prefactor`` and
+    ignored ``num_occurrences``; ``quasi_objective(kind="sampling")`` failed with its default
+    arguments.
+  - |
+    ``pseudo_kl_divergence_loss`` averaged the encoder entropy over spins instead of summing it,
+    under-weighting the entropy by the number of spins.
+  - |
+    ``TorchSampler.to()`` no longer leaves the original sampler half-moved; ``GaussianKernel`` no
+    longer produces zero bandwidths for integer ``factor``; ``tests/test_samplers`` is now collected
+    by test discovery.

@@ -32,6 +32,10 @@ def pseudo_kl_divergence_loss(
     This is not the true KL divergence, but the gradient of this function is the same as
     the KL divergence gradient. See https://arxiv.org/abs/1609.02200 for more details.
 
+    The loss is the average, over the batch, of the energy of the encoder's spins under the
+    Boltzmann machine (up to a constant that does not depend on the encoder) minus the entropy of
+    the encoder's factorized distribution over the spins of each data point.
+
     Args:
         spins (torch.Tensor): A tensor of spins of shape (batch_size, n_spins) or shape
             (batch_size, n_samples, n_spins) obtained from a stochastic function that
@@ -47,7 +51,10 @@ def pseudo_kl_divergence_loss(
         torch.Tensor: The computed pseudo KL divergence loss.
     """
     probabilities = torch.sigmoid(logits)
-    entropy = torch.nn.functional.binary_cross_entropy_with_logits(logits, probabilities)
+    # Entropy of the factorized encoder distribution of each data point is the *sum* of the
+    # per-spin binary entropies; like the energy term below it is then averaged over the batch.
+    entropy = torch.nn.functional.binary_cross_entropy_with_logits(
+        logits, probabilities, reduction="none"
+    ).flatten(1).sum(-1).mean()
     cross_entropy = boltzmann_machine.quasi_objective(spins, samples)
-    pseudo_kl_divergence = cross_entropy - entropy
-    return pseudo_kl_divergence
+    return cross_entropy - entropy

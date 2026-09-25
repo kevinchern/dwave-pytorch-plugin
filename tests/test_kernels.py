@@ -51,6 +51,13 @@ class TestGaussianKernel(unittest.TestCase):
         k = rbf(x, y)
         self.assertEqual(tuple(k.shape), (x.shape[0], y.shape[0]))
 
+    def test_integer_factor(self):
+        # An integer factor must not truncate the bandwidth multipliers to zero
+        rbf = GaussianKernel(3, factor=2, bandwidth=1.0)
+        torch.testing.assert_close(rbf.factors, torch.tensor([0.5, 1.0, 2.0]))
+        x = torch.randn(4, 3)
+        self.assertFalse(rbf(x, x).isnan().any())
+
     def test_get_bandwidth_default(self):
         rbf = GaussianKernel(2, 2.1, 0.1)
         d = torch.tensor(123)
