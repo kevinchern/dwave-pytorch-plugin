@@ -20,11 +20,9 @@ from typing import TYPE_CHECKING
 import torch
 
 from dwave.plugins.torch.nn.modules.ising.spin_statistic import IdentityStatistic
-from dwave.plugins.torch.utils import GraphIndex, sampleset_to_tensor, to_bqm
-from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
+from dwave.plugins.torch.utils import GraphIndex, estimate_beta
 
 if TYPE_CHECKING:
-    import dimod
     from dwave.plugins.torch.nn.modules.ising.spin_statistic import SpinStatistic
 
 __all__ = ["Ising", "IsingExpectation"]
@@ -143,40 +141,52 @@ class Ising(GraphIndex):
 
     Model outputs are, in theory, deterministic. In practice, in this implementation, model outputs
     are stochastic due to its computational intractability and thus the need to employ a Monte Carlo
-    approximation.
+    approximation: the layer takes spins sampled from the Ising models of its inputs, averages the
+    statistic over them, and backpropagates with the sample covariance of the statistic and the
+    sufficient statistics (see :class:`IsingExpectation`).
+
+    The layer does not sample. Spins are an input of :meth:`forward` and are drawn with the
+    ``sample_biases`` method of any :class:`~dwave.plugins.torch.samplers.TorchSampler` bound to
+    the layer, for example
+
+    .. code-block:: python
+
+        ising = Ising(nodes, edges)
+        sampler = BlockSampler(ising, schedule=[1.0] * 10)  # or DimodSampler(ising, qpu, ...)
+
+        spins = sampler.sample_biases(linear, quadratic, num_samples=100)  # (B, M, N)
+        y = ising(linear, quadratic, spins)  # (B, D)
 
     Inputs ``linear`` and ``quadratic`` should have shape ``(B, |V|)`` and ``(B, |V|, |V|)``
-    respectively where ``B`` indicates a batch size. Outputs have shape ``(B, D)`` where ``D`` is
+    respectively where ``B`` indicates a batch size, and ``spins`` should have shape
+    ``(B, M, |V|)`` with ``M`` samples per model. Outputs have shape ``(B, D)`` where ``D`` is
     the output dimension of ``statistic``. Gradients with respect to ``quadratic`` are nonzero only
-    at the edges of the model.
+    at the edges of the model; ``spins`` receive no gradient.
 
-    In practice, when sampling using a quantum annealer, samples are not guaranteed to be
-    Boltzmann---which is an assumption this implementation leans on. Furthermore, a quantum annealer
-    samples at an effective inverse temperature (beta) that is not guaranteed to be 1. This poses a
-    problem when the Ising module is used in conjunction with other modules, where---if beta is not
-    accounted for---gradient estimates will be off by a factor equal to beta. In other words, the
-    effective learning rate of this layer will differ from other parameters by a factor of beta.
-    To account for beta, use the method ``set_beta``. To estimate beta, use the method
-    ``estimate_betas``. See
+    The gradient estimator assumes that the spins are Boltzmann distributed at unit inverse
+    temperature under the given biases. In practice, when sampling using a quantum annealer,
+    samples are not guaranteed to be Boltzmann---which is an assumption this implementation leans
+    on. Furthermore, a quantum annealer samples at an effective inverse temperature (beta) that is
+    not guaranteed to be 1. This poses a problem when the Ising module is used in conjunction with
+    other modules, where---if beta is not accounted for---gradient estimates will be off by a
+    factor equal to beta. In other words, the effective learning rate of this layer will differ
+    from other parameters by a factor of beta. To account for beta, the sampler has to be given
+    the biases scaled by ``1/beta``, which is the ``prefactor`` of a
+    :class:`~dwave.plugins.torch.samplers.DimodSampler`. To estimate beta from a set of samples,
+    use the method :meth:`estimate_betas`. See
     `Global Warming: Temperature Estimation in Annealers <https://doi.org/10.3389/fict.2016.00023>`_.
     for more on estimating beta.
 
-    The graph attributes and buffers are those of :class:`~dwave.plugins.torch.utils.GraphIndex`.
+    The graph attributes, buffers and the batched :meth:`energy` and :meth:`effective_field` are
+    those of :class:`~dwave.plugins.torch.utils.GraphIndex`.
 
     Args:
         nodes: Nodes of the model.
         edges: Edges of the model.
-        sampler: The sampler used to sample from the model.
-        sample_params: Keyword arguments used in the ``sampler.sample`` method.
-        beta: Effective inverse temperature of the sampler.
         statistic: Function mapping spins to statistics. If None, the statistic corresponds
             to the input nodes and input edges. Defaults to None.
 
     Attributes:
-        sampler (dimod.Sampler): The sampler used to sample from the model.
-        sample_params (dict): Keyword arguments passed to ``sampler.sample``.
-        beta (torch.Tensor): Buffer holding the effective inverse temperature of the sampler; set
-            it with :meth:`set_beta`.
         statistic (SpinStatistic): The output statistic, a submodule.
         dim_out (int): The output dimension of ``statistic``.
     """
@@ -185,87 +195,51 @@ class Ising(GraphIndex):
         self,
         nodes: Iterable[Hashable],
         edges: Iterable[tuple[Hashable, Hashable]],
-        sampler: dimod.Sampler,
-        sample_params: dict,
-        beta: float,
         statistic: SpinStatistic | None = None,
     ) -> None:
         super().__init__(nodes, edges)
-        if beta <= 0:
-            raise ValueError(f"Effective inverse temperature beta must be positive. Got {beta}.")
-
-        self.sampler = sampler
-        self.sample_params = dict(sample_params)
-        self.register_buffer("beta", torch.tensor(float(beta)))
-
         # Default to identity
         if statistic is None:
             statistic = IdentityStatistic(self.n_nodes)
         self.statistic = statistic
         self.dim_out = statistic.dim_out
 
-    def set_beta(self, beta: float) -> None:
-        """Set the effective inverse temperature of the sampler.
+    def _validate_inputs(
+        self, linear: torch.Tensor, quadratic: torch.Tensor, spins: torch.Tensor
+    ) -> None:
+        """Check the shapes of a batch of biases and their samples.
 
-        Args:
-            beta: The effective inverse temperature of the sampler.
+        Raises:
+            ValueError: If the inputs do not have the expected shapes.
         """
-        if beta <= 0:
-            raise ValueError(f"Effective inverse temperature beta must be positive. Got {beta}.")
-        with torch.no_grad():
-            self.beta.fill_(float(beta))
+        n_nodes = self.n_nodes
+        if linear.ndim != 2 or linear.shape[1] != n_nodes:
+            raise ValueError(
+                f"linear should have shape (B, {n_nodes}), got {tuple(linear.shape)}."
+            )
+        batch_size = linear.shape[0]
+        if quadratic.shape != (batch_size, n_nodes, n_nodes):
+            raise ValueError(
+                f"quadratic should have shape (B, {n_nodes}, {n_nodes}) = "
+                f"{(batch_size, n_nodes, n_nodes)}, got {tuple(quadratic.shape)}."
+            )
+        if spins.ndim != 3 or spins.shape[0] != batch_size or spins.shape[2] != n_nodes:
+            raise ValueError(
+                f"spins should have shape (B, M, {n_nodes}) = ({batch_size}, M, {n_nodes}), got "
+                f"{tuple(spins.shape)}."
+            )
 
-    def _bqms(
-        self, linear: torch.Tensor, quadratic: torch.Tensor, prefactor: float = 1.0
-    ) -> list[dimod.BinaryQuadraticModel]:
-        """One binary quadratic model per batch element, with all biases scaled by ``prefactor``.
-
-        Args:
-            linear: Linear biases of shape (B, N).
-            quadratic: Dense quadratic biases of shape (B, N, N).
-            prefactor: Scaling applied to the biases. Defaults to 1.
-
-        Returns:
-            A list of B binary quadratic models.
-        """
-        linear = linear.detach().cpu()
-        edge_biases = self.edge_biases(quadratic.detach()).cpu()
-        return [
-            to_bqm(self.nodes, self.edges, h, J, prefactor) for h, J in zip(linear, edge_biases)
-        ]
-
-    def _sample(self, bqms: Iterable[dimod.BinaryQuadraticModel]) -> list[dimod.SampleSet]:
-        """Sample every binary quadratic model with :attr:`sampler` and :attr:`sample_params`."""
-        return [self.sampler.sample(bqm, **self.sample_params) for bqm in bqms]
-
-    def _to_tensor(
-        self, sample_sets: Iterable[dimod.SampleSet], device: torch.device | None = None
+    def forward(
+        self, linear: torch.Tensor, quadratic: torch.Tensor, spins: torch.Tensor
     ) -> torch.Tensor:
-        """Converts a list of sample sets to a tensor.
-
-        Args:
-            sample_sets: A list of sample sets.
-            device: The device of the constructed tensor. If None, then the resulting tensor is
-                constructed on the device of :attr:`beta`. Defaults to None.
-
-        Returns:
-            A tensor of shape (B, M, N) where B is the number of sample sets, M is the number of
-            reads per sample set and N is the number of nodes in the model.
-        """
-        if device is None:
-            device = self.beta.device
-        return torch.stack([sampleset_to_tensor(self.nodes, ss, device) for ss in sample_sets])
-
-    def forward(self, linear: torch.Tensor, quadratic: torch.Tensor) -> torch.Tensor:
-        """Approximate the expected output statistics of the Ising model.
-
-        .. note:: Linear and quadratic biases are scaled by ``1/self.beta`` prior to sampling, thus
-            extra caution should be taken when estimating beta.
+        """Approximate the expected output statistics of the Ising models from their samples.
 
         Args:
             linear: Linear biases with shape (B, N) where N is the number of nodes in the model.
             quadratic: Dense quadratic biases with shape (B, N, N); only the entries at
                 :attr:`adjacency` are used.
+            spins: Spins of shape (B, M, N) sampled from the Boltzmann distributions of the B
+                models, M per model, at unit inverse temperature.
 
         Raises:
             ValueError: If the inputs do not have the expected shapes.
@@ -274,39 +248,27 @@ class Ising(GraphIndex):
             Sample-approximation of expected output statistics with shape (B, D) where D is the
             output dimension of the output statistic (the ``statistic`` parameter in the constructor).
         """
-        if linear.ndim != 2 or linear.shape[1] != self.n_nodes:
-            raise ValueError(
-                f"linear should have shape (B, {self.n_nodes}), got {tuple(linear.shape)}."
-            )
-        if quadratic.shape != (linear.shape[0], self.n_nodes, self.n_nodes):
-            raise ValueError(
-                f"quadratic should have shape (B, {self.n_nodes}, {self.n_nodes}) = "
-                f"{(linear.shape[0], self.n_nodes, self.n_nodes)}, got {tuple(quadratic.shape)}."
-            )
-
-        bqms = self._bqms(linear, quadratic, prefactor=1.0 / float(self.beta))
-        spins = self._to_tensor(self._sample(bqms), linear.device)
+        self._validate_inputs(linear, quadratic, spins)
         statistics = self.statistic(spins)
         return IsingExpectation.apply(spins, statistics, self.adjacency, linear, quadratic)
 
-    def estimate_betas(self, linear: torch.Tensor, quadratic: torch.Tensor) -> torch.Tensor:
-        """Estimate the maximum pseudolikelihood temperature using
-        ``dwave.system.temperatures.maximum_pseudolikelihood_temperature``.
-
-        See
-        `Global Warming: Temperature Estimation in Annealers <https://doi.org/10.3389/fict.2016.00023>`_.
-        for more on estimating beta.
+    def estimate_betas(
+        self, linear: torch.Tensor, quadratic: torch.Tensor, spins: torch.Tensor
+    ) -> torch.Tensor:
+        """Estimate the inverse temperatures at which spins were sampled from the models, by
+        maximum pseudolikelihood (see :func:`~dwave.plugins.torch.utils.estimate_beta`).
 
         Args:
             linear: Linear biases of shape (B, N).
             quadratic: Dense quadratic biases of shape (B, N, N).
+            spins: Spins of shape (B, M, N), M samples per model.
 
         Returns:
-            Tensor of length B estimates of inverse temperature of the model where B is batch size.
+            Tensor of length B with the estimated inverse temperature of every model.
         """
-        # NOTE: Notice `self.beta` is not used to scale when sampling, c.f., `forward`.
-        bqms = self._bqms(linear, quadratic)
-        sample_sets = self._sample(bqms)
-        return torch.tensor(
-            [1 / float(mple(bqm, ss)[0]) for bqm, ss in zip(bqms, sample_sets)]
-        )
+        self._validate_inputs(linear, quadratic, spins)
+        edge_biases = self.edge_biases(quadratic.detach())
+        return torch.tensor([
+            estimate_beta(self.nodes, self.edges, h, J, s)
+            for h, J, s in zip(linear.detach(), edge_biases, spins)
+        ])

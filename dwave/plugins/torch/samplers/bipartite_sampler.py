@@ -45,6 +45,8 @@ class BipartiteGibbsSampler(BlockSampler):
             to ``None``.
 
     Raises:
+        TypeError: If ``model`` is not a
+            :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine`.
         ValueError: If an edge connects two visible or two hidden units.
     """
 
@@ -56,6 +58,11 @@ class BipartiteGibbsSampler(BlockSampler):
         initial_states: Optional[torch.Tensor] = None,
         seed: Optional[int] = None,
     ) -> None:
+        if not isinstance(model, GraphRestrictedBoltzmannMachine):
+            raise TypeError(
+                "BipartiteGibbsSampler requires a GraphRestrictedBoltzmannMachine with hidden "
+                f"units, got {type(model).__name__}."
+            )
         hidden = set(model.hidden_nodes)
         is_hidden = torch.tensor([node in hidden for node in model.nodes], dtype=torch.long)
         offending = BlockSampler._monochromatic_edges(model, is_hidden)

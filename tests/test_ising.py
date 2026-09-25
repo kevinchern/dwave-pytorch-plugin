@@ -15,12 +15,15 @@
 import unittest
 
 import torch
-from dimod import BQM, NullSampler, SampleSet
+from dimod import BQM
 
 from dwave.plugins.torch.nn.modules.ising import (IdentityStatistic, Ising, IsingExpectation,
                                                   IsingStatistic, SpinStatistic)
+from dwave.plugins.torch.samplers import BlockSampler, DimodSampler
+from dwave.plugins.torch.utils import to_bqm
 from dwave.samplers import SimulatedAnnealingSampler as Neal
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
+from tests.helper_functions import randspins
 
 
 class _ConcreteStatistic(SpinStatistic):
@@ -226,59 +229,28 @@ class TestIsingExpectation(unittest.TestCase):
 
 
 class TestIsing(unittest.TestCase):
+    NODES = "abc"
+    EDGES = [("a", "b"), ("a", "c"), ("b", "c")]
 
     def test_has_properties(self):
-        ising = Ising(
-            nodes="abc",
-            edges=[("a", "b"), ("a", "c"), ("b", "c")],
-            beta=1.0,
-            sampler=NullSampler(),
-            statistic=IsingStatistic([1], [0, 1], [1, 2]),
-            sample_params=dict(a=1),
-        )
-        self.assertEqual(1.0, ising.beta)
+        ising = Ising(self.NODES, self.EDGES, statistic=IsingStatistic([1], [0, 1], [1, 2]))
         self.assertTupleEqual(("a", "b", "c"), ising.nodes)
         self.assertTupleEqual((("a", "b"), ("a", "c"), ("b", "c")), ising.edges)
         self.assertDictEqual({"a": 0, "b": 1, "c": 2}, ising.node_to_idx)
         self.assertEqual(3, ising.n_nodes)
         self.assertEqual(3, ising.n_edges)
-        self.assertEqual(NullSampler, ising.sampler.__class__)
-        self.assertDictEqual(dict(a=1), ising.sample_params)
         self.assertEqual(3, ising.dim_out)
-        self.assertNotIn("beta", dict(ising.named_parameters()))
-        self.assertIn("beta", dict(ising.named_buffers()))
         self.assertIs(ising.statistic, dict(ising.named_children())["statistic"])
+        self.assertEqual(0, len(list(ising.parameters())))
         self.assertIn("n_nodes=3, n_edges=3", repr(ising))
 
-    def test_setters(self):
-        ising = Ising(
-            nodes="abc",
-            edges=[("a", "b"), ("a", "c"), ("b", "c")],
-            beta=1.0,
-            sampler=NullSampler(),
-            statistic=IsingStatistic([1], [0, 1], [1, 2]),
-            sample_params=dict(a=1),
-        )
-
-        with self.subTest("Set beta"):
-            ising.set_beta(342.0)
-            self.assertEqual(342.0, ising.beta)
-
-        with self.subTest("Sampling parameters and sampler are plain attributes"):
-            ising.sample_params = dict(b=2)
-            self.assertDictEqual(dict(b=2), ising.sample_params)
-            ising.sampler = Neal()
-            self.assertEqual(Neal, ising.sampler.__class__)
+        with self.subTest("The default statistic is the identity"):
+            ising = Ising(self.NODES, self.EDGES)
+            self.assertIsInstance(ising.statistic, IdentityStatistic)
+            self.assertEqual(3, ising.dim_out)
 
     def test_correct_node_indices_of_edges(self):
-        ising = Ising(
-            nodes="abc",
-            edges=[("b", "a"), ("a", "c"), ("b", "c")],
-            beta=1.0,
-            sampler=NullSampler(),
-            statistic=IsingStatistic([1], [0, 1], [1, 2]),
-            sample_params=dict(a=1),
-        )
+        ising = Ising("abc", [("b", "a"), ("a", "c"), ("b", "c")])
         # Canonical (upper-triangular) orientation regardless of the given orientation
         self.assertListEqual([0, 0, 1], ising.edge_idx_i.tolist())
         self.assertListEqual([1, 2, 2], ising.edge_idx_j.tolist())
@@ -287,7 +259,7 @@ class TestIsing(unittest.TestCase):
         self.assertTrue(torch.equal(expected, ising.adjacency))
 
     def test_edge_biases_roundtrip(self):
-        ising = Ising("abc", [("b", "a"), ("a", "c"), ("b", "c")], NullSampler(), {}, 1.0)
+        ising = Ising("abc", [("b", "a"), ("a", "c"), ("b", "c")])
         per_edge = torch.tensor([[1.0, 2.0, 3.0], [-1.0, -2.0, -3.0]])
         dense = ising.dense_quadratic(per_edge)
         self.assertEqual((2, 3, 3), tuple(dense.shape))
@@ -300,152 +272,54 @@ class TestIsing(unittest.TestCase):
 
     def test_invalid_graph(self):
         with self.assertRaisesRegex(ValueError, "Self-loops"):
-            Ising("abc", [("a", "a")], NullSampler(), {}, 1.0)
+            Ising("abc", [("a", "a")])
         with self.assertRaisesRegex(ValueError, "Duplicate edges"):
-            Ising("abc", [("a", "b"), ("b", "a")], NullSampler(), {}, 1.0)
+            Ising("abc", [("a", "b"), ("b", "a")])
 
-    def test_forward_shape_validation(self):
-        ising = Ising("abc", [("a", "b")], NullSampler(), {}, 1.0)
+    def test_input_validation(self):
+        ising = Ising("abc", [("a", "b")])
+        linear, quadratic, spins = torch.zeros(2, 3), torch.zeros(2, 3, 3), torch.ones(2, 5, 3)
         with self.assertRaisesRegex(ValueError, r"linear should have shape \(B, 3\)"):
-            ising(torch.zeros(2, 4), torch.zeros(2, 3, 3))
+            ising(torch.zeros(2, 4), quadratic, spins)
         with self.assertRaisesRegex(ValueError, r"quadratic should have shape \(B, 3, 3\)"):
-            ising(torch.zeros(2, 3), torch.zeros(2, 2))
-
-    def test_sampling_with_beta(self):
-        sampler = Neal()
-        bs = 10
-        with self.subTest("Spins should be pinned"):
-            sample_params = dict(num_sweeps=1, num_reads=10000, beta_range=[1, 1])
-            model = Ising("abc", [("a", "b"), ("a", "c")],
-                          sampler, sample_params, 1e-20)
-            linear = torch.ones((bs, 3))*1e-6
-            quadratic = torch.zeros((bs, 3, 3))
-            y = model(linear, quadratic)
-            torch.testing.assert_close(y.mean(0), -torch.ones(3))
-
-        with self.subTest("Average should be 0"):
-            sample_params = dict(num_sweeps=2, num_reads=100000, beta_range=[1, 1])
-            model = Ising("abc", [("a", "b"), ("a", "c")],
-                          sampler, sample_params, 1e30)
-            linear = torch.ones((bs, 3))
-            quadratic = torch.zeros((bs, 3, 3))
-            y = model(linear, quadratic)
-            torch.testing.assert_close(y.mean(0), torch.zeros(3), rtol=0.001, atol=0.01)
-
-    def test_beta(self):
-        sampler = NullSampler()
-        with self.subTest("Invalid beta at initialization"):
-            with self.assertRaisesRegex(ValueError, "Effective inverse temperature beta must be positive."):
-                Ising("abc", [], sampler, dict(), 0.0)
-            with self.assertRaisesRegex(ValueError, "Effective inverse temperature beta must be positive."):
-                Ising("abc", [], sampler, dict(), -0.1)
-
-        with self.subTest("Set invalid beta"):
-            ising = Ising("abc", [], sampler, dict(), 1.0)
-            with self.assertRaisesRegex(ValueError, "Effective inverse temperature beta must be positive."):
-                ising.set_beta(0.0)
-            with self.assertRaisesRegex(ValueError, "Effective inverse temperature beta must be positive."):
-                ising.set_beta(-0.1)
-
-    def test_estimate_beta(self):
-        # Here we construct a dummy sampler to output a sample of size 3. The sampler produces these
-        # two samples and returns them in a first-in-first-out manner.
-        s1 = [[-1, -1, -1],
-              [-1,  1,  1],
-              [1,  1,  1]]
-        s2 = [[1,  -1,  1],
-              [-1, -1, 1],
-              [-1, -1, 1]]
-
-        linear = torch.tensor([[0.1, 0.2, 0.4],
-                               [-0.9, -0.8, -0.6]])
-        quadratic = torch.tensor([[1.0, 9.0, 4.0],
-                                  [0.9, 8.0, -12.0]])
-
-        h0 = dict(zip("abc", linear[0].numpy()))
-        J0 = dict(zip([("a", "b"), ("a", "c"), ("b", "c")], quadratic[0].numpy()))
-        bqm0 = BQM.from_ising(h0, J0)
-
-        h1 = dict(zip("abc", linear[1].numpy()))
-        J1 = dict(zip([("a", "b"), ("a", "c"), ("b", "c")], quadratic[1].numpy()))
-        bqm1 = BQM.from_ising(h1, J1)
-
-        class FIFOSampler:
-            def __init__(self):
-                self.samples = [
-                    SampleSet.from_samples_bqm((s1, list("abc")), bqm0),
-                    SampleSet.from_samples_bqm((s2, list("abc")), bqm1)
-                ]
-
-            def sample(self, *args, **kwargs):
-                return self.samples.pop(0)
-
-        sampler = FIFOSampler()
-        sample_params = dict()
-        model = Ising("abc", [("a", "b"), ("a", "c"), ("b", "c")],
-                      sampler, sample_params, 9999.0)
-
-        estimated_betas = model.estimate_betas(linear, model.dense_quadratic(quadratic))
-        dimod_betas = [
-            1 / float(mple(bqm0, (s1, list("abc")))[0].item()),
-            1 / float(mple(bqm1, (s2, list("abc")))[0].item())
-        ]
-        torch.testing.assert_close(torch.tensor(dimod_betas), estimated_betas)
+            ising(linear, torch.zeros(2, 2), spins)
+        with self.assertRaisesRegex(ValueError, r"spins should have shape \(B, M, 3\)"):
+            ising(linear, quadratic, torch.ones(3, 5, 3))
+        with self.assertRaisesRegex(ValueError, r"spins should have shape \(B, M, 3\)"):
+            ising(linear, quadratic, torch.ones(2, 3))
+        with self.assertRaisesRegex(ValueError, r"spins should have shape \(B, M, 3\)"):
+            ising.estimate_betas(linear, quadratic, torch.ones(2, 3))
 
     def test_forward_backward(self):
+        # Two models with three samples each, obtained by whatever means
+        spins = torch.tensor([[[-1, -1, -1],
+                               [-1,  1,  1],
+                               [1,  1,  1]],
+                              [[1, -1,  1],
+                               [-1, -1,  1],
+                               [-1, -1,  1]]]).float().requires_grad_()
+        ising = Ising(self.NODES, self.EDGES, statistic=IsingStatistic([1], [0, 1], [1, 2]))
 
-        # Here we construct a dummy sampler to output a sample of size 3. The sampler produces these
-        # two samples and returns them in a first-in-first-out manner.
-        s1 = [[-1, -1, -1],
-              [-1,  1,  1],
-              [1,  1,  1]]
-        s2 = [[1,  -1,  1],
-              [-1, -1, 1],
-              [-1, -1, 1]]
-
-        class FIFOSampler:
-            def __init__(self):
-                self.samples = [
-                    SampleSet.from_samples((s1, list("abc")), "SPIN", [-1, 0, -2]),
-                    SampleSet.from_samples((s2, list("abc")), "SPIN", [-1, -2, 0])
-                ]
-
-            def sample(self, *args, **kwargs):
-                return self.samples.pop(0)
-
-        ising = Ising(
-            nodes="abc",
-            edges=[("a", "b"), ("a", "c"), ("b", "c")],
-            beta=1.0,
-            sampler=FIFOSampler(),
-            statistic=IsingStatistic([1], [0, 1], [1, 2]),
-            sample_params=dict(),
-        )
-
-        # linear and quadratic values don't matter here because we're using a dummy sampler
+        # The values of the biases do not affect the output; they receive the gradients
         linear = torch.zeros((2, 3), requires_grad=True)
         quadratic = torch.zeros((2, 3, 3), requires_grad=True)
+        y = ising(linear, quadratic, spins)
         with self.subTest("Ising layer produced unexpected output values"):
-            y = ising(linear, quadratic)
             torch.testing.assert_close(y, torch.tensor([[1/3, 1/3, 1],
                                                         [-1, 1/3, -1]]))
 
         # Gradient amounts to summing over gradients per obs
         (y**2).sum().backward()
 
-        # Manually compute the gradients for first observation
-        t1 = torch.tensor(s1).float()
-        stat_1 = torch.hstack([t1[..., [1]], t1[..., [0, 1]] * t1[..., [1, 2]]])
-        input_1 = torch.hstack([t1, t1[..., [0, 0, 1]] * t1[..., [1, 2, 2]]])
-        grad1 = 2*y[0]@(-torch.cat([stat_1, input_1], -1).mT.cov()[:3, 3:])
-
-        # Manually compute the gradients for second observation
-        t2 = torch.tensor(s2).float()
-        stat_2 = torch.hstack([t2[..., [1]], t2[..., [0, 1]] * t2[..., [1, 2]]])
-        input_2 = torch.hstack([t2, t2[..., [0, 0, 1]] * t2[..., [1, 2, 2]]])
-        grad2 = 2*y[1]@(-torch.cat([stat_2, input_2], -1).mT.cov()[:3, 3:])
-
-        grad = torch.vstack([grad1, grad2])
+        # Manually compute the gradients: minus the covariance of the output statistic with the
+        # sufficient statistics (spins and pairwise products along the edges)
+        grads = []
+        for b in range(2):
+            t = spins[b].detach()
+            stat = torch.hstack([t[..., [1]], t[..., [0, 1]] * t[..., [1, 2]]])
+            sufficient = torch.hstack([t, t[..., [0, 0, 1]] * t[..., [1, 2, 2]]])
+            grads.append(2 * y[b] @ (-torch.cat([stat, sufficient], -1).mT.cov()[:3, 3:]))
+        grad = torch.vstack(grads)
 
         with self.subTest("Linear gradients should match"):
             torch.testing.assert_close(grad[:, :3], linear.grad)
@@ -454,25 +328,95 @@ class TestIsing(unittest.TestCase):
             torch.testing.assert_close(grad[:, 3:], ising.edge_biases(quadratic.grad))
             self.assertTrue(torch.all(quadratic.grad[:, ~ising.adjacency] == 0))
 
-    def test_set_beta_keeps_device(self):
-        ising = Ising("abc", [("a", "b")], NullSampler(), {}, 1.0).to("meta")
-        ising.set_beta(2.0)
-        self.assertEqual("meta", ising.beta.device.type)
+        with self.subTest("Spins receive no gradient"):
+            self.assertIsNone(spins.grad)
 
-    def test_aggregated_sample_sets(self):
-        # A QPU returns aggregated sample sets by default; every read must count once
-        class AggregatingSampler:
-            def sample(self, bqm, **kwargs):
-                return SampleSet.from_samples(([[1, 1], [-1, -1]], list(bqm.variables)), "SPIN",
-                                              [0, 0], num_occurrences=[3, 1])
+    def test_energy(self):
+        # The layer inherits the batched energies of its graph
+        ising = Ising(self.NODES, self.EDGES)
+        linear = torch.tensor([[0.1, 0.2, 0.4], [-0.9, -0.8, -0.6]])
+        edge_biases = torch.tensor([[1.0, 9.0, 4.0], [0.9, 8.0, -12.0]])
+        spins = randspins(2, 6, 3, seed=1)
+        energies = ising.energy(spins, linear, ising.dense_quadratic(edge_biases))
+        self.assertEqual((2, 6), tuple(energies.shape))
+        for b in range(2):
+            bqm = to_bqm(ising.nodes, ising.edges, linear[b], edge_biases[b])
+            expected = bqm.energies((spins[b].numpy(), list(ising.nodes)))
+            torch.testing.assert_close(energies[b], torch.tensor(expected, dtype=torch.float32))
 
-        ising = Ising("ab", [("a", "b")], AggregatingSampler(), {}, 1.0)
-        y = ising(torch.zeros(1, 2), torch.zeros(1, 2, 2))
-        torch.testing.assert_close(y, torch.full((1, 2), 0.5))
+    def test_estimate_betas(self):
+        s1 = [[-1, -1, -1],
+              [-1,  1,  1],
+              [1,  1,  1]]
+        s2 = [[1,  -1,  1],
+              [-1, -1, 1],
+              [-1, -1, 1]]
+        linear = torch.tensor([[0.1, 0.2, 0.4],
+                               [-0.9, -0.8, -0.6]])
+        quadratic = torch.tensor([[1.0, 9.0, 4.0],
+                                  [0.9, 8.0, -12.0]])
+        ising = Ising(self.NODES, self.EDGES)
+        spins = torch.tensor([s1, s2]).float()
+
+        estimated_betas = ising.estimate_betas(linear, ising.dense_quadratic(quadratic), spins)
+
+        dimod_betas = []
+        for h, J, s in zip(linear, quadratic, (s1, s2)):
+            bqm = BQM.from_ising(dict(zip("abc", h.tolist())), dict(zip(self.EDGES, J.tolist())))
+            dimod_betas.append(1 / float(mple(bqm, (s, list("abc")))[0]))
+        torch.testing.assert_close(torch.tensor(dimod_betas), estimated_betas)
+
+    def test_sampling_with_block_sampler(self):
+        # End to end: statistics of a batch of models sampled on the layer's graph, on the GPU if
+        # the layer lives there
+        ising = Ising("abc", [("a", "b"), ("a", "c")])
+        sampler = BlockSampler(ising, schedule=[1.0] * 5, seed=0)
+        quadratic = torch.zeros(2, 3, 3)
+
+        with self.subTest("Strong fields pin the spins"):
+            linear = torch.tensor([[10.0] * 3, [-10.0] * 3])
+            spins = sampler.sample_biases(linear, quadratic, num_samples=100)
+            self.assertEqual((2, 100, 3), tuple(spins.shape))
+            torch.testing.assert_close(
+                ising(linear, quadratic, spins), torch.tensor([[-1.0] * 3, [1.0] * 3])
+            )
+
+        with self.subTest("Zero fields give zero average"):
+            linear = torch.zeros(2, 3)
+            spins = sampler.sample_biases(linear, quadratic, num_samples=100_000)
+            torch.testing.assert_close(
+                ising(linear, quadratic, spins), torch.zeros(2, 3), atol=0.02, rtol=0
+            )
+
+        with self.subTest("The layer has no parameters of its own to sample"):
+            with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
+                sampler.sample()
+
+    def test_sampling_with_dimod_sampler(self):
+        # A sampler operating at effective inverse temperature beta is given the biases scaled by
+        # 1/beta, the prefactor of the wrapper
+        ising = Ising("abc", [("a", "b"), ("a", "c")])
+        bs = 10
+        quadratic = torch.zeros((bs, 3, 3))
+
+        with self.subTest("Spins should be pinned"):
+            sampler = DimodSampler(ising, Neal(), prefactor=1e20,
+                                   sample_kwargs=dict(num_sweeps=1, num_reads=10000, beta_range=[1, 1]))
+            linear = torch.ones((bs, 3)) * 1e-6
+            spins = sampler.sample_biases(linear, quadratic)
+            self.assertEqual((bs, 10000, 3), tuple(spins.shape))
+            torch.testing.assert_close(ising(linear, quadratic, spins).mean(0), -torch.ones(3))
+
+        with self.subTest("Average should be 0"):
+            sampler = DimodSampler(ising, Neal(), prefactor=1e-30,
+                                   sample_kwargs=dict(num_sweeps=2, num_reads=100000, beta_range=[1, 1]))
+            linear = torch.ones((bs, 3))
+            spins = sampler.sample_biases(linear, quadratic)
+            torch.testing.assert_close(ising(linear, quadratic, spins).mean(0), torch.zeros(3),
+                                       rtol=0.001, atol=0.01)
 
     def test_statistic_moves_with_layer(self):
-        ising = Ising("abc", [("a", "b")], NullSampler(), {}, 1.0,
-                      statistic=IsingStatistic([1], [0], [1])).to("meta")
+        ising = Ising("abc", [("a", "b")], statistic=IsingStatistic([1], [0], [1])).to("meta")
         self.assertEqual("meta", ising.statistic.node_indices.device.type)
         self.assertNotIn("statistic.node_indices", ising.state_dict())
 

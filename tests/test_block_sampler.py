@@ -23,7 +23,7 @@ from parameterized import parameterized
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.block_spin_sampler import BlockSampler
-from dwave.plugins.torch.utils import sampleset_to_tensor
+from dwave.plugins.torch.utils import GraphIndex, sampleset_to_tensor
 from tests.helper_functions import model_to_bqm, set_weights
 
 
@@ -81,7 +81,7 @@ class TestBlockSampler(unittest.TestCase):
 
             bss2 = BlockSampler(grbm, crayon, 10, [1.0], pac, seed=1)
             for beta in schedule:
-                bss2._step(beta, bss2.state)
+                bss2._step(beta, bss2.state, grbm.linear, grbm.symmetric_coupling())
 
             self.assertListEqual(bss1.state.tolist(), bss2.state.tolist())
             self.assertListEqual(samples.tolist(), bss1.state.tolist())
@@ -295,6 +295,51 @@ class TestBlockSampler(unittest.TestCase):
         expected = -torch.tanh(model.effective_field(x, block))
         torch.testing.assert_close(samples[0, :, block].mean(0, keepdim=True), expected,
                                    atol=5e-3, rtol=0)
+
+    def test_sample_biases(self):
+        model_a = five_cycle_with_chord()
+        model_b = five_cycle_with_chord()
+        set_weights(model_b, [-0.4, 0.3, 0.1, -0.5, 0.2], [0.5, 0.9, -0.4, 0.6, -0.8, 0.3])
+        linear = torch.stack([model_a.linear, model_b.linear]).detach()
+        quadratic = torch.stack([model_a.quadratic, model_b.quadratic]).detach()
+
+        # A sampler bound to the bare graph samples any biases on it
+        sampler = BlockSampler(GraphIndex(model_a.nodes, model_a.edges), schedule=[1.0] * 6, seed=1)
+        samples = sampler.sample_biases(linear, quadratic, num_samples=100_000)
+        self.assertEqual((2, 100_000, 5), tuple(samples.shape))
+        self.assertTrue(torch.all(samples.abs() == 1))
+        for b, model in enumerate((model_a, model_b)):
+            with self.subTest(f"Batch element {b} follows its Boltzmann distribution"):
+                self.assertLess(total_variation(model, samples[b]), 0.02)
+
+        with self.subTest("Unbatched biases give (num_samples, n_nodes)"):
+            samples = sampler.sample_biases(model_a.linear, model_a.quadratic, num_samples=7)
+            self.assertEqual((7, 5), tuple(samples.shape))
+
+        with self.subTest("Arbitrary batch dimensions"):
+            samples = sampler.sample_biases(linear.reshape(2, 1, 5), quadratic.reshape(2, 1, 5, 5), 3)
+            self.assertEqual((2, 1, 3, 5), tuple(samples.shape))
+
+        with self.subTest("Invalid inputs"):
+            with self.assertRaisesRegex(ValueError, "linear must have shape"):
+                sampler.sample_biases(torch.zeros(2, 4), quadratic)
+            with self.assertRaisesRegex(ValueError, "quadratic must have shape"):
+                sampler.sample_biases(linear, torch.zeros(2, 5, 4))
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                sampler.sample_biases(linear, quadratic, num_samples=0)
+
+        with self.subTest("A graph-bound sampler has no parameters to sample"):
+            with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
+                sampler.sample()
+            with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
+                sampler.complete(torch.ones(1, 5))
+
+        with self.subTest("A model-bound sampler samples other biases without touching its chains"):
+            sampler = BlockSampler(model_a, schedule=[1.0] * 6, seed=1)
+            chains = sampler.state.clone()
+            samples = sampler.sample_biases(model_b.linear, model_b.quadratic, num_samples=50_000)
+            self.assertLess(total_variation(model_b, samples), 0.03)
+            self.assertTrue(torch.equal(chains, sampler.state))
 
     def test_device(self):
         grbm = GRBM(list("ab"), [["a", "b"]])

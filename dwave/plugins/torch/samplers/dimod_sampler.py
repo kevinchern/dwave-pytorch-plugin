@@ -14,14 +14,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Hashable, Optional
 
 import dimod
 import torch
 
-from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
 from dwave.plugins.torch.samplers.base import TorchSampler
-from dwave.plugins.torch.utils import _scale_and_clip, sampleset_to_tensor, to_ising
+from dwave.plugins.torch.utils import GraphIndex, _scale_and_clip, sampleset_to_tensor, to_ising
 
 __all__ = ["DimodSampler"]
 
@@ -34,9 +33,12 @@ class DimodSampler(TorchSampler):
     builds, for every row of partially observed spins, the binary quadratic model of the
     unobserved variables: their effective fields (linear biases plus couplings to the observed
     spins, scaled by ``prefactor`` and clipped to ``linear_range``) and the couplings among them.
+    :meth:`sample_biases` submits a batch of Ising models given by their biases, scaled and
+    clipped in the same way, one model after the other.
 
     Args:
-        model (GraphRestrictedBoltzmannMachine): The model to sample from.
+        model (GraphIndex): The model to sample from, or the graph module (for example an Ising
+            layer) on whose graph explicit biases are sampled.
         sampler (dimod.Sampler): Dimod sampler.
         prefactor (float): The prefactor for which the Hamiltonian is scaled by. This quantity
             is typically the temperature at which the sampler operates at. Standard CPU-based
@@ -63,7 +65,7 @@ class DimodSampler(TorchSampler):
 
     def __init__(
         self,
-        model: GraphRestrictedBoltzmannMachine,
+        model: GraphIndex,
         sampler: dimod.Sampler,
         prefactor: float = 1.0,
         linear_range: Optional[tuple[float, float]] = None,
@@ -80,33 +82,60 @@ class DimodSampler(TorchSampler):
 
     @property
     def sample_set(self) -> dimod.SampleSet:
-        """The sample set returned by the dimod sampler in the latest :meth:`sample` call (for
-        conditional sampling, the one of the last row).
+        """The sample set returned by the dimod sampler in the latest sampling call (for
+        conditional sampling and for :meth:`sample_biases`, the one of the last row).
 
         Raises:
-            RuntimeError: If :meth:`sample` has not been called yet.
+            RuntimeError: If nothing has been sampled yet.
         """
         if self._sample_set is None:
             # NOTE: an AttributeError would be swallowed by ``torch.nn.Module.__getattr__``
             raise RuntimeError("no samples found; call 'sample()' first")
         return self._sample_set
 
+    def _ising(
+        self, linear: torch.Tensor, edge_biases: torch.Tensor
+    ) -> tuple[dict[Hashable, float], dict[tuple[Hashable, Hashable], float]]:
+        """The Ising dictionaries of the given biases, scaled by :attr:`prefactor` and clipped to
+        :attr:`linear_range` and :attr:`quadratic_range`."""
+        model = self.model
+        return to_ising(
+            model.nodes, model.edges, linear, edge_biases,
+            self.prefactor, self.linear_range, self.quadratic_range,
+        )
+
     def to_ising(self) -> tuple[dict, dict]:
         """The model in Ising format as it is submitted to the dimod sampler: biases scaled by
         :attr:`prefactor` and clipped to :attr:`linear_range` and :attr:`quadratic_range`.
+
+        Raises:
+            TypeError: If the sampler is not bound to a
+                :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine`.
 
         Returns:
             tuple[dict, dict]: Linear biases keyed by node and quadratic biases keyed by the edges
             of the model; see :func:`~dwave.plugins.torch.utils.to_ising`.
         """
-        model = self.model
-        return to_ising(
-            model.nodes, model.edges, model.linear, model.edge_biases(),
-            self.prefactor, self.linear_range, self.quadratic_range,
-        )
+        model = self._require_model()
+        return self._ising(model.linear, model.edge_biases())
+
+    def _submit(self, h: dict, J: dict) -> torch.Tensor:
+        """Submit Ising dictionaries to the dimod sampler and return the reads as a CPU tensor with
+        one column per node, in the order of the nodes."""
+        self._sample_set = self.sampler.sample_ising(h, J, **self.sample_kwargs)
+        return sampleset_to_tensor(self.model.nodes, self._sample_set)
+
+    def _check_num_reads(self, results: list[torch.Tensor]) -> None:
+        """Raise if the sampler returned different numbers of reads for different models."""
+        num_reads = {result.shape[0] for result in results}
+        if len(num_reads) > 1:
+            raise ValueError(
+                f"Expected all samples to have shape ({results[0].shape[0]}, "
+                f"{self.model.n_nodes}), got sample sizes {sorted(num_reads)}."
+            )
 
     def sample(self, x: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Sample from the dimod sampler and return the corresponding tensor.
+        """Sample the model's parameters with the dimod sampler and return the corresponding tensor.
 
         Args:
             x (torch.Tensor, optional): Partially observed spins of shape ``(..., n_nodes)``;
@@ -114,6 +143,8 @@ class DimodSampler(TorchSampler):
                 ``None``, samples are drawn from the joint distribution.
 
         Raises:
+            TypeError: If the sampler is not bound to a
+                :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine`.
             ValueError: If ``x`` has an invalid shape, contains values other than ``±1`` or
                 ``torch.nan``, or the sampler returns a different number of samples for
                 different rows.
@@ -122,13 +153,11 @@ class DimodSampler(TorchSampler):
             torch.Tensor: Spins with entries in ``{-1, +1}`` of shape ``(num_reads, n_nodes)`` if
             ``x`` is ``None`` and ``(..., num_reads, n_nodes)`` otherwise.
         """
-        model = self.model
+        model = self._require_model()
         device = model.linear.device
 
         if x is None:
-            h, J = self.to_ising()
-            self._sample_set = self.sampler.sample_ising(h, J, **self.sample_kwargs)
-            return sampleset_to_tensor(model.nodes, self._sample_set, device)
+            return self._submit(*self.to_ising()).to(device)
 
         x, clamp_mask, batch_shape = self._validate_conditional_input(x)
         n_nodes = model.n_nodes
@@ -167,10 +196,33 @@ class DimodSampler(TorchSampler):
             full[:, free_idx] = free_samples.to(full.dtype)
             results.append(full)
 
-        num_reads = {result.shape[0] for result in results}
-        if len(num_reads) != 1:
-            raise ValueError(
-                f"Expected all samples to have shape ({results[0].shape[0]}, {n_nodes}), got "
-                f"sample sizes {sorted(num_reads)}."
-            )
+        self._check_num_reads(results)
         return torch.stack(results).reshape(*batch_shape, -1, n_nodes).to(device)
+
+    def sample_biases(self, linear: torch.Tensor, quadratic: torch.Tensor) -> torch.Tensor:
+        """Sample a batch of Ising models given by their biases with the dimod sampler.
+
+        Every model is scaled by :attr:`prefactor`, clipped to :attr:`linear_range` and
+        :attr:`quadratic_range`, and submitted to :meth:`dimod.Sampler.sample_ising` in turn.
+
+        Args:
+            linear (torch.Tensor): Linear biases of shape ``(*batch, n_nodes)``, one model per
+                batch element; ``(n_nodes,)`` for a single model.
+            quadratic (torch.Tensor): Dense quadratic biases of shape
+                ``(*batch, n_nodes, n_nodes)`` in canonical orientation.
+
+        Raises:
+            ValueError: If the biases have inconsistent shapes or the sampler returns a different
+                number of reads for different models.
+
+        Returns:
+            torch.Tensor: Spins with entries in ``{-1, +1}`` of shape
+            ``(*batch, num_reads, n_nodes)``, on the device of ``linear``.
+        """
+        model = self.model
+        batch_shape = self._validate_biases(linear, quadratic)
+        linear_cpu = linear.detach().reshape(-1, model.n_nodes).cpu()
+        edge_biases_cpu = model.edge_biases(quadratic.detach()).reshape(-1, model.n_edges).cpu()
+        results = [self._submit(*self._ising(h, J)) for h, J in zip(linear_cpu, edge_biases_cpu)]
+        self._check_num_reads(results)
+        return torch.stack(results).reshape(*batch_shape, -1, model.n_nodes).to(linear.device)

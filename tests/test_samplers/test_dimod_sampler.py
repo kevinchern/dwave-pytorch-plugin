@@ -19,6 +19,7 @@ from dimod import SPIN, ExactSolver, IdentitySampler, SampleSet, TrackingComposi
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.dimod_sampler import DimodSampler
+from dwave.plugins.torch.utils import GraphIndex
 from dwave.samplers import SimulatedAnnealingSampler, SteepestDescentSampler
 from tests.helper_functions import set_weights
 
@@ -285,6 +286,68 @@ class TestDimodSampler(unittest.TestCase):
         ])
         with self.assertRaisesRegex(ValueError, "Expected all samples to have shape"):
             sampler.sample(x)
+
+    def test_sample_biases(self):
+        graph = GraphIndex(self.nodes, self.edges)
+        tracker = TrackingComposite(SteepestDescentSampler())
+        sampler = DimodSampler(graph, tracker, prefactor=2.0, linear_range=(-1, 5),
+                               quadratic_range=(-0.5, 3), sample_kwargs=dict(num_reads=3))
+        linear = torch.tensor([[-3.0, 0.0, 1.0, 3.0], [1.0, 1.0, 1.0, 1.0]])
+        quadratic = graph.dense_quadratic(torch.tensor([[-1.0, 1.0, 2.0, 0.0], [0.5, 0.5, 0.5, 0.5]]))
+
+        spins = sampler.sample_biases(linear, quadratic)
+        self.assertEqual((2, 3, 4), tuple(spins.shape))
+        self.assertTrue(torch.all(spins.abs() == 1))
+        self.assertIsInstance(sampler.sample_set, SampleSet)
+
+        with self.subTest("Every model is submitted scaled by the prefactor and clipped"):
+            self.assertEqual(2, len(tracker.inputs))
+            self.assertDictEqual(tracker.inputs[0]["h"], {"d": -1.0, "b": 0.0, "a": 2.0, "c": 5.0})
+            self.assertDictEqual(tracker.inputs[0]["J"], {("a", "b"): -0.5, ("a", "c"): 2.0,
+                                                          ("a", "d"): 3.0, ("b", "c"): 0.0})
+            self.assertDictEqual(tracker.input["h"], {"d": 2.0, "b": 2.0, "a": 2.0, "c": 2.0})
+            self.assertDictEqual(tracker.input["J"], {edge: 1.0 for edge in graph.edges})
+
+        with self.subTest("Unbatched biases give (num_reads, n_nodes)"):
+            self.assertEqual((3, 4), tuple(sampler.sample_biases(linear[0], quadratic[0]).shape))
+
+        with self.subTest("Aggregated sample sets are expanded"):
+            class AggregatingSampler:
+                def sample_ising(self, h, J, **kwargs):
+                    return SampleSet.from_samples(
+                        ([[1, 1, 1, 1], [-1, -1, -1, -1]], list(h)), vartype=SPIN, energy=[0, 0],
+                        num_occurrences=[3, 1],
+                    )
+
+            spins = DimodSampler(graph, AggregatingSampler()).sample_biases(linear, quadratic)
+            self.assertEqual((2, 4, 4), tuple(spins.shape))
+            self.assertTrue(torch.all((spins[:, :, 0] == 1).sum(1) == 3))
+
+        with self.subTest("Inconsistent numbers of reads are rejected"):
+            class InconsistentReadSampler:
+                def __init__(self):
+                    self.calls = 0
+
+                def sample_ising(self, h, J, **kwargs):
+                    self.calls += 1
+                    num_reads = 5 if self.calls == 1 else 3
+                    return SampleSet.from_samples(
+                        ([[1] * 4] * num_reads, list(h)), vartype=SPIN, energy=[0.0] * num_reads
+                    )
+
+            with self.assertRaisesRegex(ValueError, "Expected all samples to have shape"):
+                DimodSampler(graph, InconsistentReadSampler()).sample_biases(linear, quadratic)
+
+        with self.subTest("A graph-bound sampler has no parameters to sample"):
+            with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
+                sampler.sample()
+            with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
+                sampler.to_ising()
+
+        with self.subTest("A model-bound sampler samples other biases on its graph"):
+            sampler = DimodSampler(self.bm, IdentitySampler(),
+                                   sample_kwargs=dict(initial_states=([[1, 1, 1, 1]], "dbac")))
+            self.assertEqual((2, 1, 4), tuple(sampler.sample_biases(linear, quadratic).shape))
 
     def test_sample_set(self):
         grbm = GRBM(list("abcd"), [("a", "b")])

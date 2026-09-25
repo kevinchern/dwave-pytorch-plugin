@@ -19,7 +19,10 @@ import torch
 from dimod import SPIN, BinaryQuadraticModel, SampleSet
 from torch import Tensor
 
-from dwave.plugins.torch.utils import GraphIndex, sampleset_to_tensor, to_bqm, to_ising
+from dwave.plugins.torch.utils import (GraphIndex, estimate_beta, sampleset_to_tensor, to_bqm,
+                                       to_ising)
+from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
+from tests.helper_functions import randspins
 
 
 class TestUtils(unittest.TestCase):
@@ -100,6 +103,18 @@ class TestToIsing(unittest.TestCase):
         )
 
 
+class TestEstimateBeta(unittest.TestCase):
+    def test_estimate_beta(self):
+        nodes, edges = list("dbac"), [("a", "b"), ("a", "c"), ("a", "d"), ("b", "c")]
+        linear = torch.tensor([0.0, 1.0, 2.0, 3.0])
+        quadratic = torch.tensor([1.0, 2.0, 3.0, 6.0])
+        spins = torch.tensor([[1, -1, 1, 1], [-1, -1, 1, 1], [1, -1, -1, 1], [1, 1, 1, -1]])
+        beta = estimate_beta(nodes, edges, linear, quadratic, spins)
+        self.assertIsInstance(beta, float)
+        bqm = to_bqm(nodes, edges, linear, quadratic)
+        self.assertEqual(1.0 / mple(bqm, (spins.numpy(), nodes))[0], beta)
+
+
 class TestGraphIndex(unittest.TestCase):
     def test_index(self):
         graph = GraphIndex("dbac", [("a", "b"), ("a", "c"), ("d", "a"), ("b", "c")])
@@ -148,6 +163,60 @@ class TestGraphIndex(unittest.TestCase):
         torch.testing.assert_close(graph.edge_biases(dense), per_edge)
         with self.assertRaisesRegex(ValueError, "Expected 3 edge biases"):
             graph.dense_quadratic(torch.zeros(2, 2))
+
+    def test_energy_and_effective_field(self):
+        graph = GraphIndex("dbac", [("a", "b"), ("a", "c"), ("a", "d"), ("b", "c")])
+        linear = torch.tensor([[0.0, 1.0, 2.0, 3.0], [0.5, -1.0, 0.0, 2.0]])
+        edge_biases = torch.tensor([[1.0, 2.0, 3.0, 6.0], [-1.0, 0.5, 0.0, 2.0]])
+        quadratic = graph.dense_quadratic(edge_biases)
+        spins = randspins(2, 7, 4, seed=3)
+        energies = graph.energy(spins, linear, quadratic)
+        self.assertEqual((2, 7), tuple(energies.shape))
+
+        with self.subTest("Batched biases match dimod energies model by model"):
+            for b in range(2):
+                bqm = to_bqm(graph.nodes, graph.edges, linear[b], edge_biases[b])
+                expected = bqm.energies((spins[b].numpy(), list(graph.nodes)))
+                torch.testing.assert_close(energies[b], torch.tensor(expected, dtype=torch.float32))
+
+        with self.subTest("Unbatched biases apply to spins of any leading shape"):
+            unbatched = graph.energy(spins, linear[0], quadratic[0])
+            self.assertEqual((2, 7), tuple(unbatched.shape))
+            torch.testing.assert_close(unbatched[0], energies[0])
+            torch.testing.assert_close(graph.energy(spins[1, 0], linear[0], quadratic[0]), unbatched[1, 0])
+
+        with self.subTest("One configuration per batched model"):
+            torch.testing.assert_close(graph.energy(spins[:, 0], linear, quadratic), energies[:, 0])
+
+        with self.subTest("Effective fields are the gradients of the energy"):
+            x = spins.clone().requires_grad_()
+            grad, = torch.autograd.grad(graph.energy(x, linear, quadratic).sum(), x)
+            fields = graph.effective_field(spins, linear=linear, quadratic=quadratic)
+            torch.testing.assert_close(grad, fields)
+            torch.testing.assert_close(
+                graph.effective_field(spins[:, 0], linear=linear, quadratic=quadratic), fields[:, 0]
+            )
+
+        with self.subTest("Subsets of nodes and precomputed couplings"):
+            idx = torch.tensor([2, 0])
+            coupling = graph.symmetric_coupling(quadratic)
+            torch.testing.assert_close(
+                graph.effective_field(spins, linear=linear, coupling=coupling, idx=idx), fields[..., idx]
+            )
+
+        with self.subTest("Unknown spins contribute nothing"):
+            x = spins.clone()
+            x[..., 1] = torch.nan
+            zeroed = spins.clone()
+            zeroed[..., 1] = 0.0
+            torch.testing.assert_close(
+                graph.effective_field(x, linear=linear, quadratic=quadratic),
+                graph.effective_field(zeroed, linear=linear, quadratic=quadratic),
+            )
+
+        with self.subTest("Couplings are required"):
+            with self.assertRaisesRegex(ValueError, "`quadratic` or `coupling`"):
+                graph.effective_field(spins, linear=linear)
 
     def test_edgeless(self):
         graph = GraphIndex([0, 1], [])

@@ -19,8 +19,9 @@ from typing import Hashable, Iterable, Optional, Sequence
 import numpy as np
 import torch
 from dimod import BinaryQuadraticModel, SampleSet
+from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
 
-__all__ = ["GraphIndex", "sampleset_to_tensor", "to_bqm", "to_ising"]
+__all__ = ["GraphIndex", "estimate_beta", "sampleset_to_tensor", "to_bqm", "to_ising"]
 
 
 class GraphIndex(torch.nn.Module):
@@ -41,6 +42,11 @@ class GraphIndex(torch.nn.Module):
     Raises:
         ValueError: If ``nodes`` contains duplicates, an edge references an unknown node, an
             edge is a self-loop, or an edge is duplicated (in either orientation).
+
+    The module also evaluates the Ising :meth:`energy` and :meth:`effective_field` of spins
+    under biases that are given explicitly, for a single model or a batch of models on the graph.
+    Subclasses that own parameters, such as the Boltzmann machine, wrap these methods with their
+    own biases.
 
     Attributes:
         nodes (tuple[Hashable, ...]): The nodes, in index order.
@@ -141,6 +147,120 @@ class GraphIndex(torch.nn.Module):
         quadratic = edge_biases.new_zeros(*edge_biases.shape[:-1], self.n_nodes, self.n_nodes)
         quadratic[..., self.edge_idx_i, self.edge_idx_j] = edge_biases
         return quadratic
+
+    # ------------------------------------------------------------------ Ising energies -----------
+
+    def coupling(self, quadratic: torch.Tensor) -> torch.Tensor:
+        """The coupling matrix :math:`J` of dense quadratic biases, with off-graph entries forced
+        to zero.
+
+        Args:
+            quadratic (torch.Tensor): Dense quadratic biases of shape ``(..., n_nodes, n_nodes)``
+                in canonical orientation.
+
+        Returns:
+            torch.Tensor: ``quadratic * adjacency``, a strictly upper-triangular tensor of the
+            shape of ``quadratic``.
+        """
+        return quadratic * self.adjacency
+
+    def symmetric_coupling(self, quadratic: torch.Tensor) -> torch.Tensor:
+        """The symmetrized coupling matrix :math:`J + J^T`, whose row ``k`` holds the couplings
+        of node ``k`` to every other node.
+
+        Args:
+            quadratic (torch.Tensor): Dense quadratic biases of shape ``(..., n_nodes, n_nodes)``
+                in canonical orientation.
+
+        Returns:
+            torch.Tensor: A symmetric tensor of the shape of ``quadratic`` with zero diagonal.
+        """
+        coupling = self.coupling(quadratic)
+        return coupling + coupling.mT
+
+    def energy(
+        self, x: torch.Tensor, linear: torch.Tensor, quadratic: torch.Tensor
+    ) -> torch.Tensor:
+        r"""Energies :math:`\sum_i h_i s_i + \sum_{(i, j)} J_{ij} s_i s_j` of spins under given
+        biases.
+
+        The biases define one Ising model or a batch of them. Unbatched biases, of shapes
+        ``(n_nodes,)`` and ``(n_nodes, n_nodes)``, apply to spins of any shape ``(..., n_nodes)``.
+        Batched biases, of shapes ``(*batch, n_nodes)`` and ``(*batch, n_nodes, n_nodes)``, define
+        one model per batch element and apply to spins of shape ``(*batch, M, n_nodes)``, i.e.
+        ``M`` configurations per model, or ``(*batch, n_nodes)``, one configuration per model.
+
+        Args:
+            x (torch.Tensor): Spins.
+            linear (torch.Tensor): Linear biases.
+            quadratic (torch.Tensor): Dense quadratic biases in canonical orientation; entries
+                outside :attr:`adjacency` are ignored.
+
+        Returns:
+            torch.Tensor: Energies of shape ``x.shape[:-1]``.
+        """
+        x, squeeze = self._align_spins(x, linear)
+        coupling = self.coupling(quadratic)
+        energy = (x @ linear.unsqueeze(-1)).squeeze(-1) + ((x @ coupling) * x).sum(-1)
+        return energy.squeeze(-1) if squeeze else energy
+
+    def effective_field(
+        self,
+        x: torch.Tensor,
+        *,
+        linear: torch.Tensor,
+        quadratic: Optional[torch.Tensor] = None,
+        idx: Optional[torch.Tensor] = None,
+        coupling: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        r"""Effective fields :math:`h_k + \sum_{l} J_{kl} s_l` acting on nodes under given biases.
+
+        The effective field of node :math:`k` is the derivative of the energy with respect to
+        :math:`s_k`; the conditional distribution of :math:`s_k` given all other spins is
+        :math:`P(s_k = \pm 1) = \sigma(\mp 2 h^{\text{eff}}_k)`. Entries of ``x`` that are
+        ``torch.nan`` denote unknown spins and contribute nothing to the fields. Biases are batched
+        as in :meth:`energy`.
+
+        Args:
+            x (torch.Tensor): Spins of shape ``(..., n_nodes)``; ``torch.nan`` marks unknown spins.
+            linear (torch.Tensor): Linear biases.
+            quadratic (torch.Tensor, optional): Dense quadratic biases in canonical orientation.
+                Required unless ``coupling`` is given.
+            idx (torch.Tensor, optional): Indices of the nodes whose fields are returned. If
+                ``None``, the fields of all nodes are returned. Defaults to ``None``.
+            coupling (torch.Tensor, optional): The :meth:`symmetric_coupling` of ``quadratic``,
+                which a caller evaluating the fields of several blocks of nodes can pass to avoid
+                recomputing it. Defaults to ``None``, i.e. it is computed from ``quadratic``.
+
+        Raises:
+            ValueError: If neither ``quadratic`` nor ``coupling`` is given.
+
+        Returns:
+            torch.Tensor: Effective fields of shape ``(..., n_nodes)`` or ``(..., len(idx))``.
+        """
+        if coupling is None:
+            if quadratic is None:
+                raise ValueError("Either `quadratic` or `coupling` is required.")
+            coupling = self.symmetric_coupling(quadratic)
+        x, squeeze = self._align_spins(x, linear)
+        spins = torch.nan_to_num(x, nan=0.0)
+        fields = linear if linear.ndim == 1 else linear.unsqueeze(-2)
+        if idx is not None:
+            fields, coupling = fields[..., idx], coupling[..., :, idx]
+        fields = fields + spins @ coupling
+        return fields.squeeze(-2) if squeeze else fields
+
+    @staticmethod
+    def _align_spins(x: torch.Tensor, linear: torch.Tensor) -> tuple[torch.Tensor, bool]:
+        """Insert a sample dimension into ``x`` when it holds one configuration per batched model.
+
+        Returns:
+            tuple[torch.Tensor, bool]: The spins with a sample dimension, and whether one was
+            inserted (and should be squeezed out of the results again).
+        """
+        if linear.ndim > 1 and x.ndim == linear.ndim:
+            return x.unsqueeze(-2), True
+        return x, False
 
 
 def sampleset_to_tensor(
@@ -250,3 +370,34 @@ def to_bqm(
     return BinaryQuadraticModel.from_ising(
         *to_ising(nodes, edges, linear, quadratic, prefactor, linear_range, quadratic_range)
     )
+
+
+def estimate_beta(
+    nodes: Sequence[Hashable],
+    edges: Sequence[tuple[Hashable, Hashable]],
+    linear: torch.Tensor,
+    quadratic: torch.Tensor,
+    spins: torch.Tensor,
+) -> float:
+    """Maximum pseudolikelihood estimate of the inverse temperature at which spins were sampled
+    from an Ising model.
+
+    Uses ``dwave.system.temperatures.maximum_pseudolikelihood_temperature`` on the binary
+    quadratic model of the given biases; see :func:`to_bqm` for the arguments describing the
+    model. See `Global Warming: Temperature Estimation in Annealers
+    <https://doi.org/10.3389/fict.2016.00023>`_ for more on estimating beta.
+
+    Args:
+        nodes (Sequence[Hashable]): Node labels, in the order of ``linear``.
+        edges (Sequence[tuple[Hashable, Hashable]]): Edge labels, in the order of ``quadratic``.
+        linear (torch.Tensor): Linear biases of shape ``(len(nodes),)``.
+        quadratic (torch.Tensor): Quadratic biases of the edges, shape ``(len(edges),)``.
+        spins (torch.Tensor): Spins of shape ``(M, len(nodes))`` with one column per node, in the
+            order of ``nodes``.
+
+    Returns:
+        float: The estimated inverse temperature.
+    """
+    bqm = to_bqm(nodes, edges, linear, quadratic)
+    samples = torch.as_tensor(spins).detach().cpu().numpy()
+    return float(1 / mple(bqm, (samples, list(nodes)))[0])

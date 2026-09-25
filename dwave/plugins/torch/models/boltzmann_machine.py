@@ -29,9 +29,8 @@ from __future__ import annotations
 from typing import Hashable, Iterable, Optional
 
 import torch
-from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
 
-from dwave.plugins.torch.utils import GraphIndex, to_bqm
+from dwave.plugins.torch.utils import GraphIndex, estimate_beta
 
 __all__ = ["GraphRestrictedBoltzmannMachine"]
 
@@ -229,23 +228,30 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         with torch.no_grad():
             self.quadratic[rows, cols] = values
 
-    def coupling(self) -> torch.Tensor:
+    def coupling(self, quadratic: Optional[torch.Tensor] = None) -> torch.Tensor:
         """The coupling matrix :math:`J` with off-graph entries forced to zero.
 
-        Returns:
-            torch.Tensor: A strictly upper-triangular ``(n_nodes, n_nodes)`` tensor.
-        """
-        return self.quadratic * self.adjacency
+        Args:
+            quadratic (torch.Tensor, optional): Dense quadratic biases of shape
+                ``(..., n_nodes, n_nodes)``. Defaults to the model's :attr:`quadratic`.
 
-    def symmetric_coupling(self) -> torch.Tensor:
+        Returns:
+            torch.Tensor: A strictly upper-triangular tensor of the shape of ``quadratic``.
+        """
+        return super().coupling(self.quadratic if quadratic is None else quadratic)
+
+    def symmetric_coupling(self, quadratic: Optional[torch.Tensor] = None) -> torch.Tensor:
         """The symmetrized coupling matrix :math:`J + J^T`, whose row ``k`` holds the couplings
         of node ``k`` to every other node.
 
+        Args:
+            quadratic (torch.Tensor, optional): Dense quadratic biases of shape
+                ``(..., n_nodes, n_nodes)``. Defaults to the model's :attr:`quadratic`.
+
         Returns:
-            torch.Tensor: A symmetric ``(n_nodes, n_nodes)`` tensor with zero diagonal.
+            torch.Tensor: A symmetric tensor of the shape of ``quadratic`` with zero diagonal.
         """
-        coupling = self.coupling()
-        return coupling + coupling.mT
+        return super().symmetric_coupling(self.quadratic if quadratic is None else quadratic)
 
     def edge_biases(self, quadratic: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Quadratic biases of the edges, of shape ``(..., n_edges)`` and in the order of
@@ -297,14 +303,16 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         Returns:
             torch.Tensor: Hamiltonians of shape (...,).
         """
-        coupling = self.coupling()
-        return x @ self.linear + ((x @ coupling) * x).sum(-1)
+        return self.energy(x, self.linear, self.quadratic)
 
     def effective_field(
         self,
         x: torch.Tensor,
         idx: Optional[torch.Tensor] = None,
         coupling: Optional[torch.Tensor] = None,
+        *,
+        linear: Optional[torch.Tensor] = None,
+        quadratic: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         r"""Effective fields :math:`h_k + \sum_{l} J_{kl} s_l` acting on nodes.
 
@@ -323,16 +331,22 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
             coupling (torch.Tensor, optional): The :meth:`symmetric_coupling` matrix, which a
                 caller evaluating the fields of several blocks of nodes can pass to avoid
                 recomputing it. Defaults to ``None``, i.e. it is computed.
+            linear (torch.Tensor, optional): Linear biases to use instead of the model's
+                :attr:`linear`, possibly a batch of them (see
+                :meth:`~dwave.plugins.torch.utils.GraphIndex.effective_field`).
+            quadratic (torch.Tensor, optional): Dense quadratic biases to use instead of the
+                model's :attr:`quadratic`.
 
         Returns:
             torch.Tensor: Effective fields of shape (..., N) or (..., ``len(idx)``).
         """
-        spins = torch.nan_to_num(x, nan=0.0)
-        if coupling is None:
-            coupling = self.symmetric_coupling()
-        if idx is None:
-            return self.linear + spins @ coupling
-        return self.linear[idx] + spins @ coupling[:, idx]
+        return super().effective_field(
+            x,
+            linear=self.linear if linear is None else linear,
+            quadratic=self.quadratic if quadratic is None else quadratic,
+            idx=idx,
+            coupling=coupling,
+        )
 
     def sufficient_statistics(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Batch-averaged sufficient statistics of spins, in the layout of the parameters.
@@ -487,5 +501,4 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         Returns:
             float: The estimated inverse temperature of the model.
         """
-        bqm = to_bqm(self.nodes, self.edges, self.linear, self.edge_biases())
-        return float(1 / mple(bqm, (spins.detach().cpu().numpy(), list(self.nodes)))[0])
+        return estimate_beta(self.nodes, self.edges, self.linear, self.edge_biases(), spins)

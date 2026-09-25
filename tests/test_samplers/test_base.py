@@ -17,7 +17,9 @@ import unittest
 import torch
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
+from dwave.plugins.torch.nn import Ising
 from dwave.plugins.torch.samplers.base import TorchSampler
+from dwave.plugins.torch.utils import GraphIndex
 
 
 class ConstantSampler(TorchSampler):
@@ -30,6 +32,10 @@ class ConstantSampler(TorchSampler):
         completed = torch.where(clamp_mask, x, torch.ones_like(x))
         completed = completed.unsqueeze(-2).repeat_interleave(num_samples, -2)
         return completed.reshape(*batch_shape, num_samples, -1)
+
+    def sample_biases(self, linear, quadratic, num_samples=1):
+        batch_shape = self._validate_biases(linear, quadratic)
+        return torch.ones(*batch_shape, num_samples, self.model.n_nodes)
 
 
 class TestTorchSampler(unittest.TestCase):
@@ -46,8 +52,15 @@ class TestTorchSampler(unittest.TestCase):
         with self.assertRaises(TypeError):
             EmptySubClass(self.model)  # type: ignore
 
-    def test_requires_model(self):
-        with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
+        class OnlySample(TorchSampler):
+            def sample(self, x=None):
+                return torch.ones(1, 3)
+
+        with self.assertRaises(TypeError):
+            OnlySample(self.model)  # type: ignore
+
+    def test_requires_graph(self):
+        with self.assertRaisesRegex(TypeError, "GraphIndex"):
             ConstantSampler(torch.nn.Linear(3, 3))
 
     def test_simple_subclass(self):
@@ -72,6 +85,23 @@ class TestTorchSampler(unittest.TestCase):
             self.assertIs(sampler, result)
             self.assertEqual(torch.device("meta"), self.model.linear.device)
             self.assertEqual(torch.device("meta"), self.model.adjacency.device)
+
+    def test_graph_bound_sampler(self):
+        graph = GraphIndex(list("abc"), [("a", "b"), ("b", "c")])
+        sampler = ConstantSampler(graph)
+        self.assertIs(graph, sampler.model)
+        spins = sampler.sample_biases(torch.zeros(2, 3), torch.zeros(2, 3, 3))
+        self.assertEqual((2, 1, 3), tuple(spins.shape))
+
+        with self.subTest("Methods that need parameters require a Boltzmann machine"):
+            with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
+                sampler.complete(torch.ones(1, 3))
+            with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
+                sampler._validate_conditional_input(torch.ones(1, 3))
+
+        with self.subTest("An Ising layer is a graph module"):
+            layer = Ising(list("abc"), [("a", "b")])
+            self.assertIs(layer, ConstantSampler(layer).model)
 
     def test_complete(self):
         model = GRBM(list("abc"), [("a", "b"), ("b", "c")], hidden_nodes=["b"])
@@ -122,6 +152,17 @@ class TestTorchSampler(unittest.TestCase):
         with self.subTest("Non-spin values"):
             with self.assertRaisesRegex(ValueError, "only ±1 or NaN"):
                 sampler._validate_conditional_input(torch.tensor([[0.5, 1.0, float("nan")]]))
+
+    def test_validate_biases(self):
+        sampler = ConstantSampler(self.model)
+        self.assertEqual(
+            (2, 5), tuple(sampler._validate_biases(torch.zeros(2, 5, 3), torch.zeros(2, 5, 3, 3)))
+        )
+        self.assertEqual((), tuple(sampler._validate_biases(torch.zeros(3), torch.zeros(3, 3))))
+        with self.assertRaisesRegex(ValueError, r"linear must have shape \(\.\.\., 3\)"):
+            sampler._validate_biases(torch.zeros(2, 4), torch.zeros(2, 3, 3))
+        with self.assertRaisesRegex(ValueError, r"quadratic must have shape \(\.\.\., 3, 3\)"):
+            sampler._validate_biases(torch.zeros(2, 3), torch.zeros(3, 3))
 
 
 if __name__ == "__main__":

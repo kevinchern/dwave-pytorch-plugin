@@ -57,7 +57,7 @@ class TestBipartiteGibbsSampler(unittest.TestCase):
 
         samples = sampler1.sample()
         for beta in sampler2.schedule:
-            sampler2._step(beta, sampler2.state)
+            sampler2._step(beta, sampler2.state, grbm.linear, grbm.symmetric_coupling())
         self.assertListEqual(samples.tolist(), sampler2.state.tolist())
 
     def test_sample_conditional(self):

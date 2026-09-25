@@ -56,6 +56,9 @@ class FixedHiddenSampler(TorchSampler):
         out[..., self.model.hidden_idx] = self.hidden_samples
         return out.reshape(*batch_shape, -1, self.model.n_nodes)
 
+    def sample_biases(self, linear, quadratic):
+        raise NotImplementedError
+
 
 class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
     def setUp(self) -> None:
@@ -273,6 +276,12 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         with self.subTest("Edge biases of another dense tensor"):
             torch.testing.assert_close(bm.edge_biases(2 * bm.quadratic), 2 * bm.edge_biases())
 
+        with self.subTest("Couplings of other quadratic biases"):
+            torch.testing.assert_close(bm.coupling(2 * bm.quadratic), 2 * bm.coupling())
+            torch.testing.assert_close(
+                bm.symmetric_coupling(2 * bm.quadratic), 2 * bm.symmetric_coupling()
+            )
+
         with self.subTest("Entries outside the adjacency are ignored"):
             energies = bm(self.pmones)
             with torch.no_grad():
@@ -300,6 +309,15 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             torch.testing.assert_close(self.bm.effective_field(spins, coupling=coupling), expected)
             torch.testing.assert_close(
                 self.bm.effective_field(spins, idx, coupling), expected[:, [2, 0]]
+            )
+
+        with self.subTest("Explicit biases override the parameters"):
+            torch.testing.assert_close(
+                self.bm.effective_field(spins, linear=torch.zeros(4)), expected - self.bm.linear
+            )
+            torch.testing.assert_close(
+                self.bm.effective_field(spins, quadratic=torch.zeros(4, 4)),
+                self.bm.linear.expand_as(expected),
             )
 
         with self.subTest("NaN spins contribute nothing"):

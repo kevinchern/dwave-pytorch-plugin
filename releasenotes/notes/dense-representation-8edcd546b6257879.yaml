@@ -38,13 +38,29 @@ features:
     ``dwave.plugins.torch.utils.GraphIndex`` is the ``torch.nn.Module`` base class of
     ``GraphRestrictedBoltzmannMachine`` and ``Ising``. It validates the graph and provides the
     graph attributes ``nodes``, ``edges``, ``node_to_idx``, ``n_nodes`` and ``n_edges``, the
-    buffers ``edge_idx_i``, ``edge_idx_j`` and ``adjacency``, and the conversions ``edge_biases``
-    and ``dense_quadratic`` between per-edge and dense quadratic biases.
+    buffers ``edge_idx_i``, ``edge_idx_j`` and ``adjacency``, the conversions ``edge_biases``
+    and ``dense_quadratic`` between per-edge and dense quadratic biases, and the Ising
+    ``energy``, ``coupling``, ``symmetric_coupling`` and ``effective_field`` of spins under
+    explicitly given biases, for a single model or a batch of models on the graph.
+    ``dwave.plugins.torch.utils.estimate_beta`` estimates the inverse temperature of samples of
+    such a model by maximum pseudolikelihood.
   - |
-    The ``Ising`` layer takes dense ``(B, n_nodes, n_nodes)`` quadratic biases and returns dense
-    gradients (nonzero only at edges); ``edge_biases`` and ``dense_quadratic`` convert between
-    per-edge and dense biases. ``SpinStatistic`` is a ``torch.nn.Module``, so the statistic of a
-    layer moves to the device of the layer.
+    Samplers bind to any ``GraphIndex`` and gain ``sample_biases(linear, quadratic)``, which
+    samples a batch of Ising models on the graph given by their biases. ``BlockSampler`` updates
+    every block for all models and chains with one batched matrix product, so batches of models
+    are sampled on the GPU; ``DimodSampler`` scales, clips and submits the models one after the
+    other. ``sample`` and ``complete`` keep sampling the parameters of a bound
+    ``GraphRestrictedBoltzmannMachine``.
+  - |
+    The ``Ising`` layer no longer samples: ``forward(linear, quadratic, spins)`` takes the spins
+    sampled from its inputs by the ``sample_biases`` method of any sampler bound to the layer, in
+    the same way that ``quasi_objective`` takes the samples of a Boltzmann machine. The layer
+    therefore works with ``BlockSampler`` on the GPU as well as with ``DimodSampler``, whose
+    ``prefactor`` and clipping ranges replace the layer's ``beta``. The layer takes dense
+    ``(B, n_nodes, n_nodes)`` quadratic biases and returns dense gradients (nonzero only at edges);
+    ``edge_biases`` and ``dense_quadratic`` convert between per-edge and dense biases.
+    ``SpinStatistic`` is a ``torch.nn.Module``, so the statistic of a layer moves to the device of
+    the layer.
   - |
     ``dwave.plugins.torch.nn`` exports the kernels, losses and Ising modules;
     ``dwave.plugins.torch.samplers`` exports ``BipartiteGibbsSampler``.
@@ -83,14 +99,20 @@ upgrade:
     size no longer has to equal the number of chains). ``BipartiteGibbsSampler`` rejects
     hidden-hidden as well as visible-visible edges. Unseeded samplers draw from the global PyTorch
     generator. ``DimodSampler.sample_set`` is the sample set as returned by the wrapped sampler.
+    ``TorchSampler`` subclasses implement ``sample_biases`` in addition to ``sample``, and
+    ``sample``, ``complete`` and ``DimodSampler.to_ising`` raise ``TypeError`` when the sampler is
+    bound to a graph module that is not a ``GraphRestrictedBoltzmannMachine``.
   - |
-    ``Ising.forward`` and ``Ising.estimate_betas`` take dense quadratic biases and both sample
-    through ``sampler.sample``. ``node_idx_of_edges_1``/``node_idx_of_edges_2`` are renamed
-    ``edge_idx_i``/``edge_idx_j``, ``num_nodes``/``num_edges`` are renamed ``n_nodes``/``n_edges``,
-    ``nodes`` and ``edges`` are tuples, ``beta`` is a buffer that is set with ``set_beta``, and
-    ``sampler`` and ``sample_params`` are plain attributes (``set_sampler`` and
-    ``set_sample_params`` are removed). ``IdentityStatistic`` takes ``dim_out`` and
-    ``IsingStatistic`` stores its indices as buffers.
+    ``Ising(nodes, edges, statistic=None)`` no longer takes ``sampler``, ``sample_params`` or
+    ``beta``, and ``set_sampler``, ``set_sample_params``, ``set_beta`` and the ``beta`` buffer are
+    removed. ``Ising.forward(linear, quadratic, spins)`` and
+    ``Ising.estimate_betas(linear, quadratic, spins)`` take dense quadratic biases and the spins
+    sampled from the models, e.g. ``BlockSampler(ising).sample_biases(linear, quadratic)`` or
+    ``DimodSampler(ising, sampler, prefactor=1 / beta).sample_biases(linear, quadratic)``.
+    ``node_idx_of_edges_1``/``node_idx_of_edges_2`` are renamed ``edge_idx_i``/``edge_idx_j``,
+    ``num_nodes``/``num_edges`` are renamed ``n_nodes``/``n_edges``, and ``nodes`` and ``edges``
+    are tuples. ``IdentityStatistic`` takes ``dim_out`` and ``IsingStatistic`` stores its indices
+    as buffers.
   - |
     ``dwave-hybrid`` and ``einops`` are no longer dependencies, and ``dwave-graphs`` is required only
     by the tests and examples. Package discovery is restricted to the ``dwave`` namespace.

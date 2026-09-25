@@ -44,11 +44,12 @@ The package provides the following components.
   Boltzmann machines, and ``DimodSampler`` wraps any dimod sampler, including the
   ``DWaveSampler`` of `dwave-system <https://github.com/dwavesystems/dwave-system>`_, scaling and
   clipping the Hamiltonian before it is submitted. All samplers support conditional sampling of
-  partially observed spins.
+  partially observed spins and sampling from batches of Ising models given by their biases, which
+  is how the inputs of the ``Ising`` layer are sampled.
 
 * **Neural network modules** (``dwave.plugins.torch.nn``). An ``Ising`` layer takes the biases
-  of an Ising model as inputs and returns expected statistics of samples drawn by a dimod
-  sampler, with a backward pass approximated by sample covariances; ``SpinStatistic``
+  of a batch of Ising models and spins sampled from them by any of the samplers, and returns
+  expected statistics with a backward pass approximated by sample covariances; ``SpinStatistic``
   classes define the statistics it returns. Also included are ``LinearBlock``, ``SkipLinear``,
   and ``Affine`` layers, a ``GaussianKernel``, a ``MaximumMeanDiscrepancyLoss``, and, in
   ``dwave.plugins.torch.nn.functional``, the functional form of that loss and soft
