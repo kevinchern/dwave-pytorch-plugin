@@ -10,7 +10,7 @@ features:
     ``(n_nodes, n_nodes)`` parameter whose off-graph entries are structurally zero (masked by the new
     ``adjacency`` buffer). New methods ``coupling``, ``symmetric_coupling``, ``edge_biases``,
     ``effective_field``, ``sufficient_statistics``, ``conditional_expectation`` and
-    ``pad_visible``; new properties ``adjacency``, ``visible_nodes``, ``n_visible``, ``n_hidden``
+    ``pad_visible``; new attributes ``adjacency``, ``visible_nodes``, ``n_visible``, ``n_hidden``
     and ``connected_hidden``. All methods accept arbitrary leading batch dimensions.
   - |
     ``quasi_objective`` takes complete spin configurations of data and model. For models with
@@ -46,11 +46,18 @@ upgrade:
     are ``quadratic[edge_idx_i, edge_idx_j]`` (``edge_biases()``). ``sufficient_statistics`` returns
     batch-averaged statistics in the layout of the parameters instead of per-sample statistics.
     ``theta``, ``interactions``, ``to_ising`` (use ``dwave.plugins.torch.utils.to_ising`` or
-    ``DimodSampler.to_ising``) and the deprecated ``sample``/``sampleset_to_tensor`` methods are
-    removed. ``edge_idx_i``/
+    ``DimodSampler.to_ising``), ``idx_to_node`` (use ``nodes[idx]``) and the deprecated
+    ``sample``/``sampleset_to_tensor`` methods are removed. ``edge_idx_i``/
     ``edge_idx_j`` hold the smaller/larger node index of each edge irrespective of the orientation
     given at construction. Duplicate nodes or edges, unknown edge endpoints and unknown hidden nodes
     raise ``ValueError``.
+  - |
+    The parameters and buffers of ``GraphRestrictedBoltzmannMachine`` are registered under their
+    public names, so the keys of ``state_dict()`` are ``linear``, ``quadratic``, ``adjacency``,
+    ``edge_idx_i``, ``edge_idx_j``, ``visible_idx`` and ``hidden_idx`` instead of
+    underscore-prefixed names; checkpoints saved with earlier versions cannot be loaded.
+    ``nodes``, ``edges``, ``hidden_nodes`` and ``visible_nodes`` are tuples and ``node_to_idx``
+    is a read-only mapping.
   - |
     ``quasi_objective(s_data, s_model)`` no longer takes ``kind``, ``sampler``, ``prefactor``,
     ``linear_range``, ``quadratic_range`` or ``sample_kwargs``: data of a model with hidden units

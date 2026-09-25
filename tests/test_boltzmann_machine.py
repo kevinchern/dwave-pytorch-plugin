@@ -102,17 +102,17 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
 
     def test_constructor(self):
         bm = self.bm
-        self.assertListEqual(bm.nodes, self.nodes)
-        self.assertListEqual(bm.edges, [tuple(e) for e in self.edges])
-        self.assertListEqual([bm.idx_to_node[i] for i in range(bm.n_nodes)], self.nodes)
-        self.assertDictEqual(bm.node_to_idx, {"d": 0, "b": 1, "a": 2, "c": 3})
+        self.assertTupleEqual(bm.nodes, tuple(self.nodes))
+        self.assertTupleEqual(bm.edges, tuple(tuple(e) for e in self.edges))
+        self.assertDictEqual(dict(bm.node_to_idx), {"d": 0, "b": 1, "a": 2, "c": 3})
+        self.assertListEqual([bm.nodes[bm.node_to_idx[v]] for v in self.nodes], self.nodes)
         self.assertEqual((4, 4), tuple(bm.quadratic.shape))
         self.assertEqual((4,), tuple(bm.linear.shape))
         self.assertEqual(4, bm.n_nodes)
         self.assertEqual(4, bm.n_edges)
         self.assertEqual(4, bm.n_visible)
         self.assertEqual(0, bm.n_hidden)
-        self.assertListEqual(bm.visible_nodes, self.nodes)
+        self.assertTupleEqual(bm.visible_nodes, tuple(self.nodes))
         self.assertFalse(bm.connected_hidden)
         self.assertIn("n_nodes=4, n_edges=4, n_hidden=0", repr(bm))
 
@@ -133,6 +133,31 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             bm = GRBM(self.nodes, self.edges, None, {"a": w1}, {("c", "b"): w2})
             self.assertAlmostEqual(bm.linear[2].item(), w1, 2)
             self.assertAlmostEqual(bm.quadratic[1, 3].item(), w2, 2)
+
+    def test_public_parameters_and_buffers(self):
+        bm = GRBM([0, 1, 2], [(0, 1), (1, 2)], hidden_nodes=[2])
+        self.assertListEqual(["linear", "quadratic"], [name for name, _ in bm.named_parameters()])
+        self.assertListEqual(
+            ["edge_idx_i", "edge_idx_j", "adjacency", "visible_idx", "hidden_idx"],
+            [name for name, _ in bm.named_buffers()],
+        )
+        self.assertSetEqual(
+            {"linear", "quadratic", "edge_idx_i", "edge_idx_j", "adjacency", "visible_idx",
+             "hidden_idx"},
+            set(bm.state_dict()),
+        )
+        with self.assertRaises(TypeError):
+            bm.linear = torch.zeros(3)  # torch refuses to replace a parameter by a tensor
+
+    def test_graph_attributes_are_immutable(self):
+        bm = GRBM([0, 1, 2], [(0, 1), (1, 2)], hidden_nodes=[2])
+        for name in ("nodes", "edges", "hidden_nodes", "visible_nodes"):
+            with self.subTest(name):
+                self.assertIsInstance(getattr(bm, name), tuple)
+        self.assertEqual(2, bm.node_to_idx[2])
+        with self.assertRaises(TypeError):
+            bm.node_to_idx[3] = 3
+        self.assertFalse(hasattr(bm, "idx_to_node"))
 
     def test_default_quadratic_initialization_uses_connectivity(self):
         nodes = list("abcd")
@@ -183,11 +208,23 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         self.assertEqual(0, self.bm.quadratic[2, 1].item())
         self.assertEqual(999, self.bm.edge_biases()[0].item())
         self.bm.set_quadratic({})
+        with self.subTest("Several edges in mixed orientations"):
+            self.bm.set_quadratic({("c", "a"): 7, ("a", "d"): 8, ("b", "c"): 9})
+            torch.testing.assert_close(self.bm.edge_biases(), torch.tensor([999.0, 7.0, 8.0, 9.0]))
+            self.assertTrue(torch.all(self.bm.quadratic[~self.bm.adjacency] == 0))
 
     def test_set_quadratic_unknown_edge(self):
         quadratic = self.bm.quadratic.detach().clone()
         with self.assertRaisesRegex(ValueError, r"Edge \('d', 'b'\) is not in the model"):
             self.bm.set_quadratic({("d", "b"): 999})
+        with self.subTest("Self-loops and unknown nodes are not edges"):
+            with self.assertRaisesRegex(ValueError, r"Edge \('a', 'a'\) is not in the model"):
+                self.bm.set_quadratic({("a", "a"): 999})
+            with self.assertRaisesRegex(ValueError, r"Edge \('a', 'z'\) is not in the model"):
+                self.bm.set_quadratic({("a", "z"): 999})
+        with self.subTest("A rejected call leaves every bias unchanged"):
+            with self.assertRaisesRegex(ValueError, r"Edge \('d', 'c'\) is not in the model"):
+                self.bm.set_quadratic({("a", "b"): 999, ("d", "c"): 999})
         torch.testing.assert_close(self.bm.quadratic, quadratic)
 
     def test_set_linear(self):
@@ -385,7 +422,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         bm = GRBM([0, 1, 2], [(0, 1), (0, 2), (1, 2)], [1])
         self.assertEqual(2, bm.n_visible)
         self.assertEqual(1, bm.n_hidden)
-        self.assertListEqual(bm.visible_nodes, [0, 2])
+        self.assertTupleEqual(bm.visible_nodes, (0, 2))
         padded = bm.pad_visible(torch.zeros((99, 2)))
         self.assertEqual((99, 3), tuple(padded.shape))
         self.assertTrue(padded[:, 1].isnan().all())

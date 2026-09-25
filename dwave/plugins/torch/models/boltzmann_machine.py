@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Hashable, Iterable, Optional
 
 import torch
@@ -78,6 +79,10 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
     samples drawn by the ``complete`` method of a
     :class:`~dwave.plugins.torch.samplers.TorchSampler` otherwise.
 
+    The parameters and buffers of the module are registered under the attribute names listed
+    below, which are therefore the keys of :meth:`~torch.nn.Module.state_dict`. The graph
+    attributes ``nodes``, ``edges``, ``hidden_nodes`` and ``node_to_idx`` are immutable.
+
     Args:
         nodes (Iterable[Hashable]): List of nodes.
         edges (Iterable[tuple[Hashable, Hashable]]): List of edges. Self-loops and duplicate
@@ -92,6 +97,29 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
     Raises:
         ValueError: If ``nodes`` contains duplicates, an edge references an unknown node, an edge
             is a self-loop or a duplicate, or a hidden node is not a node of the model.
+
+    Attributes:
+        linear (torch.nn.Parameter): The linear biases, of shape ``(n_nodes,)``.
+        quadratic (torch.nn.Parameter): The quadratic biases as a dense ``(n_nodes, n_nodes)``
+            tensor. The bias of the edge between the nodes with indices ``i < j`` is stored at
+            ``[i, j]``; entries outside :attr:`adjacency` are ignored by every computation. The
+            per-edge biases, in the order of :attr:`edges`, are returned by :meth:`edge_biases`.
+        adjacency (torch.Tensor): Strictly upper-triangular boolean buffer of shape
+            ``(n_nodes, n_nodes)`` that is ``True`` exactly at the entries of :attr:`quadratic`
+            that correspond to edges.
+        edge_idx_i (torch.Tensor): The smaller node index of each edge, in the order of
+            :attr:`edges`.
+        edge_idx_j (torch.Tensor): The larger node index of each edge, in the order of
+            :attr:`edges`.
+        visible_idx (torch.Tensor): Indices of the visible units, in the order of the columns
+            of observations.
+        hidden_idx (torch.Tensor): Indices of the hidden units.
+        nodes (tuple[Hashable, ...]): The nodes of the model, visible and hidden, in index
+            order.
+        edges (tuple[tuple[Hashable, Hashable], ...]): The edges of the model, in the
+            orientation given at construction.
+        hidden_nodes (tuple[Hashable, ...]): The hidden nodes.
+        node_to_idx (Mapping[Hashable, int]): Read-only mapping from node to index.
     """
     # QPU beta has been measured to be 5-8 (in inverse units of programmed J)
     # Considering the higher temperature within this range, to sample from a beta=1
@@ -112,43 +140,36 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         super().__init__()
 
         graph = GraphIndex.from_graph(nodes, edges)
-        self._nodes = graph.nodes
-        self._edges = graph.edges
-        self._node_to_idx = graph.node_to_idx
-        self._idx_to_node = dict(enumerate(self._nodes))
-        self._edge_to_idx = {edge: k for k, edge in enumerate(self._edges)}
-        self._n_nodes = graph.n_nodes
-        self._n_edges = graph.n_edges
+        self.nodes = tuple(graph.nodes)
+        self.edges = tuple(graph.edges)
+        self.node_to_idx = MappingProxyType(dict(graph.node_to_idx))
 
-        self.register_buffer("_edge_idx_i", graph.edge_idx_i)
-        self.register_buffer("_edge_idx_j", graph.edge_idx_j)
-        self.register_buffer("_adjacency", graph.adjacency())
+        self.register_buffer("edge_idx_i", graph.edge_idx_i)
+        self.register_buffer("edge_idx_j", graph.edge_idx_j)
+        self.register_buffer("adjacency", graph.adjacency())
 
-        quadratic_init = torch.zeros(self._n_nodes, self._n_nodes)
-        if self._n_edges:
+        quadratic_init = torch.zeros(graph.n_nodes, graph.n_nodes)
+        if graph.n_edges:
             degrees = graph.degrees().to(quadratic_init.dtype)
             quadratic_std = self._INIT_INVERSE_TEMP / (
-                degrees[self._edge_idx_i] * degrees[self._edge_idx_j]
+                degrees[self.edge_idx_i] * degrees[self.edge_idx_j]
             )**0.25
-            quadratic_init[self._edge_idx_i, self._edge_idx_j] = (
-                torch.randn(self._n_edges) * quadratic_std
+            quadratic_init[self.edge_idx_i, self.edge_idx_j] = (
+                torch.randn(graph.n_edges) * quadratic_std
             )
-        self._linear = torch.nn.Parameter(torch.zeros(self._n_nodes))
-        self._quadratic = torch.nn.Parameter(quadratic_init)
+        self.linear = torch.nn.Parameter(torch.zeros(graph.n_nodes))
+        self.quadratic = torch.nn.Parameter(quadratic_init)
 
-        self._hidden_nodes = [] if hidden_nodes is None else list(hidden_nodes)
-        hidden_set = set(self._hidden_nodes)
-        if len(hidden_set) != len(self._hidden_nodes):
+        self.hidden_nodes = () if hidden_nodes is None else tuple(hidden_nodes)
+        hidden_set = set(self.hidden_nodes)
+        if len(hidden_set) != len(self.hidden_nodes):
             raise ValueError("`hidden_nodes` contains duplicate entries.")
-        unknown = hidden_set.difference(self._nodes)
+        unknown = hidden_set.difference(self.nodes)
         if unknown:
             raise ValueError(f"Hidden nodes {list(unknown)!r} are not nodes of the model.")
-        is_hidden = torch.tensor([v in hidden_set for v in self._nodes], dtype=torch.bool)
-        self.register_buffer("_visible_idx", torch.nonzero(~is_hidden).flatten())
-        self.register_buffer("_hidden_idx", torch.nonzero(is_hidden).flatten())
-        self._connected_hidden = bool(
-            (is_hidden[self._edge_idx_i] & is_hidden[self._edge_idx_j]).any()
-        )
+        is_hidden = torch.tensor([v in hidden_set for v in self.nodes], dtype=torch.bool)
+        self.register_buffer("visible_idx", torch.nonzero(~is_hidden).flatten())
+        self.register_buffer("hidden_idx", torch.nonzero(is_hidden).flatten())
 
         if linear is not None:
             self.set_linear(linear)
@@ -157,8 +178,8 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
 
     def extra_repr(self) -> str:
         return (
-            f"n_nodes={self._n_nodes}, n_edges={self._n_edges}, "
-            f"n_hidden={len(self._hidden_nodes)}"
+            f"n_nodes={self.n_nodes}, n_edges={self.n_edges}, "
+            f"n_hidden={len(self.hidden_nodes)}"
         )
 
     # ------------------------------------------------------------------ parameters --------------
@@ -177,13 +198,13 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         if not linear:
             return
         try:
-            node_idx = [self._node_to_idx[node] for node in linear]
+            node_idx = [self.node_to_idx[node] for node in linear]
         except KeyError as err:
             raise ValueError(f"Node {err.args[0]!r} is not in the model.") from None
-        device = self._linear.device
-        values = torch.tensor(list(linear.values()), dtype=self._linear.dtype, device=device)
+        device = self.linear.device
+        values = torch.tensor(list(linear.values()), dtype=self.linear.dtype, device=device)
         with torch.no_grad():
-            self._linear[torch.tensor(node_idx, device=device)] = values
+            self.linear[torch.tensor(node_idx, device=device)] = values
 
     def set_quadratic(self, quadratic: dict[tuple[Hashable, Hashable], float]) -> None:
         """Set quadratic biases of the model.
@@ -194,43 +215,32 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
                 quadratic biases need to be set; edges without a mapping keep their current values.
 
         Raises:
-            ValueError: If an edge is not in the model.
+            ValueError: If a key is not an edge of the model, e.g. it references an unknown
+                node, is a self-loop or joins two nodes that are not adjacent.
         """
         if not quadratic:
             return
-        edge_idx = []
+        # The bias of edge (u, v) lives at the canonical position [min(i, j), max(i, j)]
+        rows, cols = [], []
         for u, v in quadratic:
-            idx = self._edge_to_idx.get((u, v), self._edge_to_idx.get((v, u)))
-            if idx is None:
-                raise ValueError(f"Edge {(u, v)!r} is not in the model.")
-            edge_idx.append(idx)
-        device = self._quadratic.device
-        edge_idx = torch.tensor(edge_idx, device=device)
+            try:
+                i, j = sorted((self.node_to_idx[u], self.node_to_idx[v]))
+            except KeyError:
+                raise ValueError(f"Edge {(u, v)!r} is not in the model.") from None
+            rows.append(i)
+            cols.append(j)
+        device = self.quadratic.device
+        rows = torch.tensor(rows, device=device)
+        cols = torch.tensor(cols, device=device)
+        is_edge = self.adjacency[rows, cols]
+        if not is_edge.all():
+            offending = next(edge for edge, ok in zip(quadratic, is_edge.tolist()) if not ok)
+            raise ValueError(f"Edge {offending!r} is not in the model.")
         values = torch.tensor(
-            list(quadratic.values()), dtype=self._quadratic.dtype, device=device
+            list(quadratic.values()), dtype=self.quadratic.dtype, device=device
         )
         with torch.no_grad():
-            self._quadratic[self._edge_idx_i[edge_idx], self._edge_idx_j[edge_idx]] = values
-
-    @property
-    def linear(self) -> torch.nn.Parameter:
-        """The linear biases of the model, shape ``(n_nodes,)``."""
-        return self._linear
-
-    @property
-    def quadratic(self) -> torch.nn.Parameter:
-        """The quadratic biases of the model as a dense ``(n_nodes, n_nodes)`` tensor.
-
-        The bias of the edge between the nodes with indices ``i < j`` is stored at ``[i, j]``.
-        Entries outside :attr:`adjacency` are ignored by every computation. The per-edge biases,
-        in the order of :attr:`edges`, are ``quadratic[edge_idx_i, edge_idx_j]``."""
-        return self._quadratic
-
-    @property
-    def adjacency(self) -> torch.Tensor:
-        """Strictly upper-triangular boolean tensor of shape ``(n_nodes, n_nodes)`` that is
-        ``True`` exactly at the entries of :attr:`quadratic` that correspond to edges."""
-        return self._adjacency
+            self.quadratic[rows, cols] = values
 
     def coupling(self) -> torch.Tensor:
         """The coupling matrix :math:`J` with off-graph entries forced to zero.
@@ -238,7 +248,7 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         Returns:
             torch.Tensor: A strictly upper-triangular ``(n_nodes, n_nodes)`` tensor.
         """
-        return self._quadratic * self._adjacency
+        return self.quadratic * self.adjacency
 
     def symmetric_coupling(self) -> torch.Tensor:
         """The symmetrized coupling matrix :math:`J + J^T`, whose row ``k`` holds the couplings
@@ -253,84 +263,41 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
     def edge_biases(self) -> torch.Tensor:
         """Quadratic biases of the edges, of shape ``(n_edges,)`` and in the order of
         :attr:`edges`; equivalent to ``quadratic[edge_idx_i, edge_idx_j]``."""
-        return self._quadratic[self._edge_idx_i, self._edge_idx_j]
+        return self.quadratic[self.edge_idx_i, self.edge_idx_j]
 
     # ------------------------------------------------------------------ graph --------------------
 
     @property
-    def nodes(self) -> list[Hashable]:
-        """List of nodes in the model. This list includes both visible and hidden nodes."""
-        return self._nodes
-
-    @property
-    def hidden_nodes(self) -> list[Hashable]:
-        """List of hidden nodes in the model."""
-        return self._hidden_nodes
-
-    @property
-    def visible_nodes(self) -> list[Hashable]:
-        """List of visible nodes in the model, in the order of :attr:`visible_idx`."""
-        return [self._nodes[idx] for idx in self._visible_idx.tolist()]
-
-    @property
-    def edges(self) -> list[tuple[Hashable, Hashable]]:
-        """List of edges in the model, in the orientation given at construction."""
-        return self._edges
-
-    @property
-    def node_to_idx(self) -> dict[Hashable, int]:
-        """A dictionary mapping from node to index of model variables."""
-        return self._node_to_idx
-
-    @property
-    def idx_to_node(self) -> dict[int, Hashable]:
-        """A dictionary mapping from index of model variables to nodes."""
-        return self._idx_to_node
+    def visible_nodes(self) -> tuple[Hashable, ...]:
+        """The visible nodes, in the order of :attr:`visible_idx`."""
+        return tuple(self.nodes[idx] for idx in self.visible_idx.tolist())
 
     @property
     def n_nodes(self) -> int:
-        """Total number of model variables or graph nodes (including hidden units)."""
-        return self._n_nodes
+        """Total number of nodes, visible and hidden."""
+        return len(self.nodes)
 
     @property
     def n_edges(self) -> int:
-        """Total number of edges in the model or graph."""
-        return self._n_edges
+        """Number of edges."""
+        return len(self.edges)
 
     @property
     def n_visible(self) -> int:
         """Number of visible units."""
-        return self._visible_idx.numel()
+        return self.visible_idx.numel()
 
     @property
     def n_hidden(self) -> int:
         """Number of hidden units."""
-        return self._hidden_idx.numel()
-
-    @property
-    def visible_idx(self) -> torch.Tensor:
-        """A ``torch.Tensor`` of model variable indices corresponding to visible units."""
-        return self._visible_idx
-
-    @property
-    def hidden_idx(self) -> torch.Tensor:
-        """A ``torch.Tensor`` of model variable indices corresponding to hidden units."""
-        return self._hidden_idx
+        return self.hidden_idx.numel()
 
     @property
     def connected_hidden(self) -> bool:
         """Whether any edge connects two hidden units."""
-        return self._connected_hidden
-
-    @property
-    def edge_idx_i(self) -> torch.Tensor:
-        """The smaller node index of each edge, in the order of :attr:`edges`."""
-        return self._edge_idx_i
-
-    @property
-    def edge_idx_j(self) -> torch.Tensor:
-        """The larger node index of each edge, in the order of :attr:`edges`."""
-        return self._edge_idx_j
+        is_hidden = torch.zeros(self.n_nodes, dtype=torch.bool, device=self.hidden_idx.device)
+        is_hidden[self.hidden_idx] = True
+        return bool((is_hidden[self.edge_idx_i] & is_hidden[self.edge_idx_j]).any())
 
     # ------------------------------------------------------------------ energies -----------------
 
@@ -345,7 +312,7 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
             torch.Tensor: Hamiltonians of shape (...,).
         """
         coupling = self.coupling()
-        return x @ self._linear + ((x @ coupling) * x).sum(-1)
+        return x @ self.linear + ((x @ coupling) * x).sum(-1)
 
     def effective_field(self, x: torch.Tensor, idx: Optional[torch.Tensor] = None) -> torch.Tensor:
         r"""Effective fields :math:`h_k + \sum_{l} J_{kl} s_l` acting on nodes.
@@ -369,8 +336,8 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         spins = torch.nan_to_num(x, nan=0.0)
         coupling = self.symmetric_coupling()
         if idx is None:
-            return self._linear + spins @ coupling
-        return self._linear[idx] + spins @ coupling[:, idx]
+            return self.linear + spins @ coupling
+        return self.linear[idx] + spins @ coupling[:, idx]
 
     def sufficient_statistics(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Batch-averaged sufficient statistics of spins, in the layout of the parameters.
@@ -392,15 +359,15 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
             canonical orientation of :attr:`quadratic`; entries that are not edges are zero.
         """
         x = self._flatten(x)
-        return x.mean(0), (x.mT @ x) * self._adjacency / x.shape[0]
+        return x.mean(0), (x.mT @ x) * self.adjacency / x.shape[0]
 
     def _flatten(self, x: torch.Tensor) -> torch.Tensor:
         """Flatten all leading dimensions of a (..., N) tensor into one batch dimension."""
-        if x.shape[-1] != self._n_nodes:
+        if x.shape[-1] != self.n_nodes:
             raise ValueError(
-                f"Expected spins with trailing dimension {self._n_nodes}, got {x.shape[-1]}."
+                f"Expected spins with trailing dimension {self.n_nodes}, got {x.shape[-1]}."
             )
-        return x.reshape(-1, self._n_nodes)
+        return x.reshape(-1, self.n_nodes)
 
     # ------------------------------------------------------------------ learning -----------------
 
@@ -441,8 +408,8 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         mean_data, second_data = self.sufficient_statistics(s_data)
         mean_model, second_model = self.sufficient_statistics(s_model)
         return (
-            (mean_data - mean_model) @ self._linear
-            + ((second_data - second_model) * self._quadratic).sum()
+            (mean_data - mean_model) @ self.linear
+            + ((second_data - second_model) * self.quadratic).sum()
         )
 
     # ------------------------------------------------------------------ hidden units -------------
@@ -467,11 +434,11 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
                 f"Expected observations with trailing dimension {self.n_visible} (number of "
                 f"visible units), got {x.shape[-1]}."
             )
-        dtype = x.dtype if x.is_floating_point() else self._linear.dtype
+        dtype = x.dtype if x.is_floating_point() else self.linear.dtype
         padded = torch.full(
-            (*x.shape[:-1], self._n_nodes), torch.nan, dtype=dtype, device=x.device
+            (*x.shape[:-1], self.n_nodes), torch.nan, dtype=dtype, device=x.device
         )
-        padded[..., self._visible_idx] = x
+        padded[..., self.visible_idx] = x
         return padded
 
     def conditional_expectation(self, x: torch.Tensor) -> torch.Tensor:
@@ -506,7 +473,7 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         """
         unknown = torch.isnan(x)
         with torch.no_grad():
-            neighbours = (self._adjacency | self._adjacency.mT).to(x.dtype)
+            neighbours = (self.adjacency | self.adjacency.mT).to(x.dtype)
             unknown_spins = unknown.to(x.dtype)
             if ((unknown_spins @ neighbours) * unknown_spins).any():
                 raise ValueError(
@@ -531,6 +498,6 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
             float: The estimated inverse temperature of the model.
         """
         bqm = BinaryQuadraticModel.from_ising(
-            *to_ising(self._nodes, self._edges, self._linear, self.edge_biases())
+            *to_ising(self.nodes, self.edges, self.linear, self.edge_biases())
         )
-        return float(1 / mple(bqm, (spins.detach().cpu().numpy(), self._nodes))[0])
+        return float(1 / mple(bqm, (spins.detach().cpu().numpy(), list(self.nodes)))[0])

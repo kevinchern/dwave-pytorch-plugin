@@ -62,7 +62,7 @@ class TestTorchSampler(unittest.TestCase):
         self.assertIsInstance(sampler, torch.nn.Module)
         self.assertIs(self.model, sampler.model)
         self.assertListEqual([self.model], list(sampler.children()))
-        self.assertSetEqual({"model._linear", "model._quadratic"},
+        self.assertSetEqual({"model.linear", "model.quadratic"},
                             {k for k in sampler.state_dict() if "idx" not in k and "adjacency" not in k})
         self.assertEqual(len(list(self.model.parameters())), len(list(sampler.parameters())))
 

@@ -100,13 +100,13 @@ class TestBlockSampler(unittest.TestCase):
         bss = BlockSampler(grbm, crayon, 10, [1.0], seed=5)
         # Check every block is indeed coloured correctly
         for block in bss.partition:
-            self.assertEqual(1, len({crayon(grbm.idx_to_node[bidx]) for bidx in block.tolist()}))
+            self.assertEqual(1, len({crayon(grbm.nodes[bidx]) for bidx in block.tolist()}))
         # Check every node has been included exactly once
         indices = [idx for block in bss.partition for idx in block.tolist()]
         self.assertEqual(len(indices), len(set(indices)))
         self.assertSetEqual(set(indices), set(range(grbm.n_nodes)))
         # Blocks are ordered by colour
-        colours = [crayon(grbm.idx_to_node[block[0].item()]) for block in bss.partition]
+        colours = [crayon(grbm.nodes[block[0].item()]) for block in bss.partition]
         self.assertListEqual(colours, sorted(colours))
 
     @parameterized.expand(GRBM_CRAYON_TEST_CASES)
@@ -359,8 +359,8 @@ class TestBlockSampler(unittest.TestCase):
         bss = BlockSampler(grbm, self.crayon_veqa, 4, [1.0], seed=2)
         state_dict = bss.state_dict()
         self.assertIn("_x", state_dict)
-        self.assertIn("model._linear", state_dict)
-        self.assertIn("model._quadratic", state_dict)
+        self.assertIn("model.linear", state_dict)
+        self.assertIn("model.quadratic", state_dict)
         self.assertEqual(0, len(list(bss.parameters())) - len(list(grbm.parameters())))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
