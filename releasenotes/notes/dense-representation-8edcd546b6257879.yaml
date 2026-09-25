@@ -8,13 +8,17 @@ features:
   - |
     ``GraphRestrictedBoltzmannMachine.quadratic`` is a dense, strictly upper-triangular
     ``(n_nodes, n_nodes)`` parameter whose off-graph entries are structurally zero (masked by the new
-    ``adjacency`` buffer). New methods ``coupling``, ``symmetric_coupling``, ``effective_field``,
-    ``moments`` and ``pad_visible``; new properties ``adjacency``, ``visible_nodes``, ``n_visible``,
-    ``n_hidden`` and ``connected_hidden``. All methods accept arbitrary leading batch dimensions.
+    ``adjacency`` buffer). New methods ``coupling``, ``symmetric_coupling``, ``edge_biases``,
+    ``effective_field``, ``sufficient_statistics``, ``conditional_expectation`` and
+    ``pad_visible``; new properties ``adjacency``, ``visible_nodes``, ``n_visible``, ``n_hidden``
+    and ``connected_hidden``. All methods accept arbitrary leading batch dimensions.
   - |
-    ``quasi_objective(..., kind="sampling", sampler=...)`` accepts any ``TorchSampler`` (for
-    example ``DimodSampler`` or ``BlockSampler``) to sample hidden units conditioned on the data,
-    and keeps the objective differentiable with respect to the observations.
+    ``quasi_objective`` takes complete spin configurations of data and model. For models with
+    hidden units, ``conditional_expectation`` fills in the exact conditional expectations of the
+    hidden units (or of any set of pairwise non-adjacent unknown spins), and
+    ``TorchSampler.complete`` fills in samples drawn conditioned on the data by any sampler (for
+    example ``DimodSampler`` or ``BlockSampler``). Both keep the objective differentiable with
+    respect to the observations.
   - |
     Samplers are ``torch.nn.Module`` subclasses holding the model as the submodule ``model``:
     ``sampler.to(device)``, ``state_dict()`` and friends act on model and sampler state together.
@@ -25,8 +29,10 @@ features:
   - |
     ``DimodSampler`` builds conditional binary quadratic models from the model's dense effective
     fields (no per-row ``fix_variables``), applies ``prefactor`` and clipping consistently, and
-    expands aggregated sample sets. ``dwave.plugins.torch.utils.spread`` replaces the dependency on
-    ``dwave-hybrid``; ``dwave.plugins.torch.utils.GraphIndex`` provides shared graph indexing.
+    expands aggregated sample sets. ``DimodSampler.to_ising`` returns the model as it is submitted
+    to the wrapped sampler. ``dwave.plugins.torch.utils.to_ising`` converts biases to dimod's Ising
+    dictionaries, ``dwave.plugins.torch.utils.spread`` replaces the dependency on ``dwave-hybrid``
+    and ``dwave.plugins.torch.utils.GraphIndex`` provides shared graph indexing.
   - |
     The ``Ising`` layer takes dense ``(B, n_nodes, n_nodes)`` quadratic biases and returns dense
     gradients (nonzero only at edges); ``edge_biases`` and ``dense_quadratic`` convert between
@@ -37,15 +43,20 @@ features:
 upgrade:
   - |
     ``GraphRestrictedBoltzmannMachine.quadratic`` has shape ``(n_nodes, n_nodes)``; per-edge biases
-    are ``quadratic[edge_idx_i, edge_idx_j]``. ``theta``, ``sufficient_statistics``, ``interactions``
-    and the deprecated ``sample``/``sampleset_to_tensor`` methods are removed. ``edge_idx_i``/
+    are ``quadratic[edge_idx_i, edge_idx_j]`` (``edge_biases()``). ``sufficient_statistics`` returns
+    batch-averaged statistics in the layout of the parameters instead of per-sample statistics.
+    ``theta``, ``interactions``, ``to_ising`` (use ``dwave.plugins.torch.utils.to_ising`` or
+    ``DimodSampler.to_ising``) and the deprecated ``sample``/``sampleset_to_tensor`` methods are
+    removed. ``edge_idx_i``/
     ``edge_idx_j`` hold the smaller/larger node index of each edge irrespective of the orientation
     given at construction. Duplicate nodes or edges, unknown edge endpoints and unknown hidden nodes
     raise ``ValueError``.
   - |
-    ``quasi_objective`` takes a ``TorchSampler`` via ``sampler`` for ``kind="sampling"``; the
-    ``prefactor``, ``linear_range``, ``quadratic_range`` and ``sample_kwargs`` arguments moved to
-    ``DimodSampler``. ``to_ising`` defaults to ``prefactor=1``. The objective is a 0-d tensor.
+    ``quasi_objective(s_data, s_model)`` no longer takes ``kind``, ``sampler``, ``prefactor``,
+    ``linear_range``, ``quadratic_range`` or ``sample_kwargs``: data of a model with hidden units
+    is completed beforehand with ``conditional_expectation`` (formerly ``kind="exact-disc"``) or
+    ``sampler.complete`` (formerly ``kind="sampling"``), and the sampling arguments moved to
+    ``DimodSampler``. The objective is a 0-d tensor.
   - |
     Samplers take the model as their first argument (``model``), hold it as a submodule and are
     moved in place by ``to()``. ``BlockSampler`` exposes ``state``, ``partition``, ``schedule`` and
@@ -66,8 +77,8 @@ fixes:
     were ``NaN`` for models with connected hidden units.
   - |
     Conditional sampling of hidden units did not scale the effective fields by ``prefactor`` and
-    ignored ``num_occurrences``; ``quasi_objective(kind="sampling")`` failed with its default
-    arguments.
+    ignored ``num_occurrences``; sampling the hidden units for the quasi-objective failed with the
+    default arguments.
   - |
     ``pseudo_kl_divergence_loss`` averaged the encoder entropy over spins instead of summing it,
     under-weighting the entropy by the number of spins.

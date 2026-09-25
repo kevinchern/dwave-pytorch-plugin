@@ -14,13 +14,12 @@
 
 import unittest
 
-import numpy as np
 import torch
 from dimod import BinaryQuadraticModel, ExactSolver
-from parameterized import parameterized
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers import BlockSampler, TorchSampler
+from dwave.plugins.torch.utils import to_ising
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
 
 
@@ -33,9 +32,11 @@ def set_weights(bm: GRBM, linear, quadratic) -> None:
         )
 
 
-def edge_weights(bm: GRBM) -> torch.Tensor:
-    """Per-edge quadratic biases of a model, in edge order."""
-    return bm.quadratic[bm.edge_idx_i, bm.edge_idx_j]
+def to_bqm(bm: GRBM) -> BinaryQuadraticModel:
+    """The model as a dimod binary quadratic model."""
+    return BinaryQuadraticModel.from_ising(
+        *to_ising(bm.nodes, bm.edges, bm.linear, bm.edge_biases())
+    )
 
 
 def randspins(*shape, seed=0) -> torch.Tensor:
@@ -123,7 +124,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             expected[[1, 2, 0, 1], [2, 3, 2, 3]] = True
             self.assertTrue(torch.equal(bm.adjacency, expected))
             self.assertTrue(torch.equal(bm.adjacency, bm.adjacency.triu(1)))
-            torch.testing.assert_close(edge_weights(bm), torch.tensor([1.0, 2.0, 3.0, 6.0]))
+            torch.testing.assert_close(bm.edge_biases(), torch.tensor([1.0, 2.0, 3.0, 6.0]))
             self.assertEqual(3.0, bm.quadratic[0, 2].item())
             self.assertTrue(torch.all(bm.quadratic[~bm.adjacency] == 0))
 
@@ -148,7 +149,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         bm = GRBM(nodes, edges)
 
         torch.testing.assert_close(bm.linear, torch.zeros(len(nodes)))
-        torch.testing.assert_close(edge_weights(bm), expected_quadratic)
+        torch.testing.assert_close(bm.edge_biases(), expected_quadratic)
         self.assertTrue(torch.all(bm.quadratic[~bm.adjacency] == 0))
 
     def test_default_quadratic_initialization_edgeless(self):
@@ -180,7 +181,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         self.bm.set_quadratic({("b", "a"): 999})
         self.assertEqual(999, self.bm.quadratic[1, 2].item())
         self.assertEqual(0, self.bm.quadratic[2, 1].item())
-        self.assertEqual(999, edge_weights(self.bm)[0].item())
+        self.assertEqual(999, self.bm.edge_biases()[0].item())
         self.bm.set_quadratic({})
 
     def test_set_quadratic_unknown_edge(self):
@@ -220,14 +221,14 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
 
         with self.subTest("Arbitrary-valued weights and spins should match dimod.BQM energy"):
             set_weights(self.bm, torch.linspace(-412, 23, 4), torch.linspace(-0.4, 4, 16)[:4])
-            bqm = BinaryQuadraticModel.from_ising(*self.bm.to_ising())
+            bqm = to_bqm(self.bm)
             fake_spins = 1.0 * torch.arange(1, 5).unsqueeze(0)
             en_bqm = bqm.energies((fake_spins.numpy(), "dbac")).item()
             self.assertAlmostEqual(en_bqm, self.bm(fake_spins).item(), 4)
 
     def test_forward_matches_dimod_random_graph(self):
         model = random_model(30, 0.3, seed=7)
-        bqm = BinaryQuadraticModel.from_ising(*model.to_ising())
+        bqm = to_bqm(model)
         x = randspins(17, 30, seed=1)
         expected = torch.tensor(bqm.energies((x.numpy(), model.nodes)), dtype=torch.float32)
         torch.testing.assert_close(model(x), expected)
@@ -238,15 +239,14 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         symmetric = bm.symmetric_coupling()
         torch.testing.assert_close(symmetric, symmetric.T)
         torch.testing.assert_close(symmetric.diagonal(), torch.zeros(4))
-        torch.testing.assert_close(symmetric[bm.edge_idx_i, bm.edge_idx_j], edge_weights(bm))
+        torch.testing.assert_close(symmetric[bm.edge_idx_i, bm.edge_idx_j], bm.edge_biases())
 
         with self.subTest("Entries outside the adjacency are ignored"):
             energies = bm(self.pmones)
             with torch.no_grad():
                 bm.quadratic[~bm.adjacency] = 123.0
             torch.testing.assert_close(bm(self.pmones), energies)
-            self.assertEqual(bm.to_ising()[1], {("a", "b"): 1.0, ("a", "c"): 2.0,
-                                                 ("a", "d"): 3.0, ("b", "c"): 6.0})
+            torch.testing.assert_close(bm.edge_biases(), torch.tensor([1.0, 2.0, 3.0, 6.0]))
 
     def test_effective_field(self):
         # nodes d b a c; fields h_k + sum_l J_kl s_l
@@ -283,45 +283,33 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         grad, = torch.autograd.grad(model(x).sum(), x)
         torch.testing.assert_close(grad, model.effective_field(x.detach()))
 
-    def test_moments(self):
+    def test_sufficient_statistics(self):
         x = torch.vstack([self.ones, self.pmones, self.mpones])
-        mean, second = self.bm.moments(x)
+        mean, second = self.bm.sufficient_statistics(x)
         torch.testing.assert_close(mean, x.mean(0))
-        torch.testing.assert_close(second, x.T @ x / 3)
-        average_energy = mean @ self.bm.linear + (self.bm.coupling() * second).sum()
+        torch.testing.assert_close(second, (x.T @ x / 3) * self.bm.adjacency)
+        self.assertTrue(torch.all(second[~self.bm.adjacency] == 0))
+        # Average products along the edges ab, ac, ad, bc (node order d b a c)
+        torch.testing.assert_close(
+            second[self.bm.edge_idx_i, self.bm.edge_idx_j],
+            (x[:, [2, 2, 2, 1]] * x[:, [1, 3, 0, 3]]).mean(0),
+        )
+        average_energy = mean @ self.bm.linear + (self.bm.quadratic * second).sum()
         torch.testing.assert_close(average_energy, self.bm(x).mean())
+
+        with self.subTest("Arbitrary leading dimensions"):
+            mean_3d, second_3d = self.bm.sufficient_statistics(x.reshape(3, 1, 4))
+            torch.testing.assert_close(mean_3d, mean)
+            torch.testing.assert_close(second_3d, second)
+
         with self.assertRaisesRegex(ValueError, "trailing dimension"):
-            self.bm.moments(torch.ones(3, 5))
+            self.bm.sufficient_statistics(torch.ones(3, 5))
 
-    # ------------------------------------------------------------------ dimod interop ---------
-
-    def test_to_ising(self):
-        h_true = torch.tensor([-3, 0, 1, 3.0])
-        J_true = torch.tensor([-1, 1, 2.0, 0])
-        set_weights(self.bm, h_true, J_true)
-
-        with self.subTest("Ising dictionaries without bounded bias ranges"):
-            h, J = self.bm.to_ising()
-            self.assertListEqual(list(h), self.nodes)
-            self.assertListEqual(list(h.values()), h_true.tolist())
-            self.assertListEqual(list(J), [tuple(e) for e in self.edges])
-            self.assertListEqual([J[a, b] for a, b in self.edges], J_true.tolist())
-
-        with self.subTest("Prefactor"):
-            h, J = self.bm.to_ising(2.0)
-            self.assertListEqual(list(h.values()), (2 * h_true).tolist())
-            self.assertListEqual(list(J.values()), (2 * J_true).tolist())
-
-        with self.subTest("Ising dictionaries with bounded bias ranges"):
-            h, J = self.bm.to_ising(1, [-0.1, 1.5], [-0.05, 3])
-            for x_true, x_observed in zip([-0.1, 0, 1, 1.5], h.values()):
-                self.assertAlmostEqual(x_true, x_observed)
-            for x_true, x_observed in zip([-0.05, 1, 2, 0], [J[a, b] for a, b in self.edges]):
-                self.assertAlmostEqual(x_true, x_observed)
+    # ------------------------------------------------------------------ temperature -----------
 
     def test_estimate_beta(self):
         spins = torch.tensor([[1, -1, 1, 1], [-1, -1, 1, 1], [1, -1, -1, 1], [1, 1, 1, -1]])
-        bqm = BinaryQuadraticModel.from_ising(*self.bm.to_ising())
+        bqm = to_bqm(self.bm)
         beta = self.bm.estimate_beta(spins)
         self.assertIsInstance(beta, float)
         self.assertEqual(1.0 / mple(bqm, (spins.numpy(), "dbac"))[0], beta)
@@ -353,12 +341,10 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         s_model = randspins(7, 25, seed=2)
         model.quasi_objective(s_observed, s_model).backward()
 
-        mean_obs, second_obs = model.moments(s_observed)
-        mean_model, second_model = model.moments(s_model)
+        mean_obs, second_obs = model.sufficient_statistics(s_observed)
+        mean_model, second_model = model.sufficient_statistics(s_model)
         torch.testing.assert_close(model.linear.grad, mean_obs - mean_model)
-        torch.testing.assert_close(
-            model.quadratic.grad, (second_obs - second_model) * model.adjacency
-        )
+        torch.testing.assert_close(model.quadratic.grad, second_obs - second_model)
         self.assertTrue(torch.all(model.quadratic.grad[~model.adjacency] == 0))
 
     def test_quasi_objective_gradient_wrt_observations(self):
@@ -384,24 +370,14 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
                 optimizer.step()
             self.assertTrue(torch.all(self.bm.quadratic[~self.bm.adjacency] == 0))
 
-    def test_quasi_objective_kind_validation(self):
-        s_model = torch.ones(1, 4)
-        with self.assertRaisesRegex(ValueError, "should not be specified"):
-            self.bm.quasi_objective(torch.ones(1, 4), s_model, kind="exact-disc")
-
+    def test_quasi_objective_requires_complete_spins(self):
+        # Data of a model with hidden units is completed (conditional_expectation or
+        # TorchSampler.complete) before it is passed to the objective.
         bm = GRBM(self.nodes, self.edges, hidden_nodes=["d"])
-        with self.assertRaisesRegex(ValueError, "Invalid kind"):
-            bm.quasi_objective(torch.ones(1, 3), s_model)
-        with self.assertRaisesRegex(ValueError, "`sampler` is required"):
-            bm.quasi_objective(torch.ones(1, 3), s_model, kind="sampling")
-        with self.assertWarnsRegex(UserWarning, "not used"):
-            bm.quasi_objective(torch.ones(1, 3), s_model, kind="exact-disc",
-                               sampler=FixedHiddenSampler(bm, [[1.0]]))
-
-        bm = GRBM(self.nodes, self.edges, hidden_nodes=["a", "b"])
-        self.assertTrue(bm.connected_hidden)
-        with self.assertRaisesRegex(ValueError, "disconnected"):
-            bm.quasi_objective(torch.ones(1, 2), s_model, kind="exact-disc")
+        with self.assertRaisesRegex(ValueError, "trailing dimension 4"):
+            bm.quasi_objective(torch.ones(1, 3), torch.ones(1, 4))
+        with self.assertRaisesRegex(ValueError, "trailing dimension 4"):
+            bm.quasi_objective(torch.ones(1, 4), torch.ones(1, 3))
 
     # ------------------------------------------------------------------ hidden units ----------
 
@@ -423,7 +399,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         # effective field = quadratic(0,2) * [-1] + quadratic(1,2) * [1] + linear(2)
         #                 = 0.13 * [-1] - 0.17 * [1] + 0.4 = 0.1
         set_weights(bm, [-0.1, -0.2, 0.4], [-0.7, 0.13, -0.17])
-        expected = bm._conditional_expectation(torch.tensor([[-1.0, 1.0]]))
+        expected = bm.conditional_expectation(bm.pad_visible(torch.tensor([[-1.0, 1.0]])))
         torch.testing.assert_close(
             expected, torch.tensor([[-1.0, 1.0, torch.tanh(torch.tensor(-0.1)).item()]])
         )
@@ -436,6 +412,9 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         padded = bm.pad_visible(torch.tensor([[-1.0, 1.0]]))
         h_eff = bm.effective_field(padded, bm.hidden_idx)
         torch.testing.assert_close(h_eff, torch.tensor([[-0.5, 0.1]]))
+        expected = bm.conditional_expectation(padded)
+        torch.testing.assert_close(expected[:, bm.visible_idx], torch.tensor([[-1.0, 1.0]]))
+        torch.testing.assert_close(expected[:, bm.hidden_idx], -torch.tanh(h_eff))
 
     def test_conditional_expectation_mixed_edge_orientation(self):
         # The hidden node is the second endpoint of the first edge and the first endpoint of the
@@ -458,8 +437,47 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         padded = bm.pad_visible(torch.tensor([[1.0, -1.0]]))
         h_eff = bm.effective_field(padded, bm.hidden_idx)
         torch.testing.assert_close(h_eff, torch.tensor([[0.1 + 0.3 + 0.2, -0.4 - 0.5]]))
-        with self.assertRaisesRegex(ValueError, "disconnected"):
-            bm._conditional_expectation(torch.tensor([[1.0, -1.0]]))
+        with self.assertRaisesRegex(ValueError, "no two unknown spins are adjacent"):
+            bm.conditional_expectation(padded)
+
+    def test_conditional_expectation_arbitrary_pattern(self):
+        # Any pattern of unknown spins is accepted as long as no two unknown spins are adjacent;
+        # patterns may differ between rows. Nodes d and b, as well as d and c, are not adjacent.
+        set_weights(self.bm, [0.3, -0.2, 0.5, 0.1], [0.8, -0.6, 0.4, -0.9])
+        nan = float("nan")
+        x = torch.tensor([[nan, nan, 1.0, -1.0],
+                          [nan, 1.0, -1.0, nan],
+                          [1.0, -1.0, 1.0, 1.0]], requires_grad=True)
+        out = self.bm.conditional_expectation(x)
+
+        with self.subTest("Observed spins are unchanged"):
+            self.assertFalse(out.isnan().any())
+            observed = ~x.isnan()
+            torch.testing.assert_close(out[observed], x.detach()[observed])
+
+        with self.subTest("Expectations match the enumeration of the unknown spins"):
+            for row in range(2):
+                unknown = x[row].isnan().nonzero().flatten()
+                states = x[row].detach().clone().repeat(4, 1)
+                states[:, unknown] = torch.tensor(
+                    [[1.0, 1.0], [1.0, -1.0], [-1.0, 1.0], [-1.0, -1.0]]
+                )
+                weights = torch.softmax(-self.bm(states), 0)
+                torch.testing.assert_close(out[row, unknown], weights @ states[:, unknown])
+
+        with self.subTest("Gradients flow to the observed spins but not to the parameters"):
+            grad_x, = torch.autograd.grad(out.sum(), x, retain_graph=True)
+            torch.testing.assert_close(grad_x, (~x.isnan()).float())
+            grads = torch.autograd.grad(out.sum(), list(self.bm.parameters()), allow_unused=True)
+            self.assertTrue(all(g is None for g in grads))
+
+        with self.subTest("Adjacent unknown spins are rejected"):
+            with self.assertRaisesRegex(ValueError, "no two unknown spins are adjacent"):
+                self.bm.conditional_expectation(torch.tensor([[1.0, nan, nan, 1.0]]))  # b, a
+            with self.assertRaisesRegex(ValueError, "no two unknown spins are adjacent"):
+                self.bm.conditional_expectation(
+                    torch.tensor([[1.0, 1.0, 1.0, 1.0], [nan, 1.0, nan, 1.0]])  # d, a in row 2
+                )
 
     def test_quasi_objective_gradient_hidden_units(self):
         bm = GRBM([1, 2, 3],
@@ -477,7 +495,8 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         #                v3 <0.3>
         s_observed = torch.tensor([[1.0, -1.0]])
         s_model = torch.tensor([[1.0, -1.0, 1.0]])
-        bm.quasi_objective(s_observed, s_model, "exact-disc").backward()
+        s_data = bm.conditional_expectation(bm.pad_visible(s_observed))
+        bm.quasi_objective(s_data, s_model).backward()
         # Exact conditional expectation of the sufficient statistics t = (v1 v2 v3 v1v2 v1v3 v2v3)
         q_plus = torch.exp(-torch.tensor(0.2 + 0.2 - 0.3 - 0.6 + 0.2 - 0.3))
         q_minus = torch.exp(-torch.tensor(-0.2 - 0.2 + 0.3 - 0.6 + 0.2 - 0.3))
@@ -495,7 +514,8 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         model = random_model(7, 0.6, n_hidden=3, seed=8)
         s_observed = randspins(5, 4, seed=9)
         s_model = randspins(6, 7, seed=10)
-        model.quasi_objective(s_observed, s_model, kind="exact-disc").backward()
+        s_data = model.conditional_expectation(model.pad_visible(s_observed))
+        model.quasi_objective(s_data, s_model).backward()
 
         hidden_states = 1.0 - 2.0 * torch.tensor(
             [[(k >> i) & 1 for i in range(3)] for k in range(8)], dtype=torch.float32
@@ -509,7 +529,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
                 weights = torch.softmax(-model(full), 0)
                 expected_linear += weights @ full / len(s_observed)
                 expected_second += (full.T * weights) @ full / len(s_observed)
-            mean_model, second_model = model.moments(s_model)
+            mean_model, second_model = model.sufficient_statistics(s_model)
         torch.testing.assert_close(model.linear.grad, expected_linear - mean_model)
         torch.testing.assert_close(
             model.quadratic.grad, (expected_second - second_model) * model.adjacency
@@ -525,7 +545,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         s_model = torch.tensor([[1.0, -1.0, 1.0]])
         # Hidden samples conditioned on v3=1 for (v1, v2)
         sampler = FixedHiddenSampler(bm, [[-1, -1], [-1, 1], [1, -1]])
-        bm.quasi_objective(s_observed, s_model, kind="sampling", sampler=sampler).backward()
+        bm.quasi_objective(sampler.complete(s_observed), s_model).backward()
 
         t_cond_samples = torch.tensor(
             [
@@ -540,23 +560,24 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         torch.testing.assert_close(grad, grad_auto)
 
     def test_quasi_objective_sampling_with_block_sampler(self):
-        # Sampling disconnected hidden units with a block-Gibbs sampler approximates exact-disc:
-        # every hidden unit only neighbours clamped visible units, so one sweep is exact.
+        # Sampling disconnected hidden units with a block-Gibbs sampler approximates their exact
+        # conditional expectations: every hidden unit only neighbours clamped visible units, so
+        # one sweep is exact.
         model = random_model(7, 0.6, n_hidden=3, seed=11)
         s_observed = randspins(4, 4, seed=12)
         s_model = randspins(6, 7, seed=13)
 
-        exact = model.quasi_objective(s_observed, s_model, kind="exact-disc")
+        exact = model.quasi_objective(
+            model.conditional_expectation(model.pad_visible(s_observed)), s_model
+        )
         exact.backward()
         grad_exact = model.linear.grad.clone()
         model.zero_grad()
 
-        class ManySamples(BlockSampler):
-            def sample(self, x=None):
-                return super().sample(x, num_samples=4000)
-
-        sampler = ManySamples(model, seed=0)
-        approx = model.quasi_objective(s_observed, s_model, kind="sampling", sampler=sampler)
+        sampler = BlockSampler(model, seed=0)
+        s_data = sampler.complete(s_observed, num_samples=4000)
+        self.assertEqual((4, 4000, 7), tuple(s_data.shape))
+        approx = model.quasi_objective(s_data, s_model)
         self.assertEqual((), tuple(approx.shape))
         approx.backward()
         torch.testing.assert_close(approx, exact, atol=0.05, rtol=0)
@@ -568,7 +589,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         s_observed = torch.tensor([[1.0, -1.0], [-1.0, -1.0]], requires_grad=True)
         s_model = torch.tensor([[1.0, -1.0, 1.0]])
         sampler = FixedHiddenSampler(bm, [[1.0], [-1.0], [-1.0]])
-        bm.quasi_objective(s_observed, s_model, kind="sampling", sampler=sampler).backward()
+        bm.quasi_objective(sampler.complete(s_observed), s_model).backward()
         # Average hidden spin is -1/3; d/ds1 = (h1 + J13 <s3>) / 2, d/ds2 = (h2 + J23 <s3>) / 2
         expected = torch.tensor([[0.2 - 0.3 / 3, 0.2 - 0.6 / 3]] * 2) / 2
         torch.testing.assert_close(s_observed.grad, expected)
@@ -589,7 +610,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         x = randspins(5, 10).double()
         self.assertEqual(torch.float64, model(x).dtype)
         self.assertEqual(torch.bool, model.adjacency.dtype)
-        bqm = BinaryQuadraticModel.from_ising(*model.to_ising())
+        bqm = to_bqm(model)
         torch.testing.assert_close(
             model(x), torch.tensor(bqm.energies((x.numpy(), model.nodes)))
         )
@@ -602,7 +623,8 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         x = randspins(9, 20, seed=19)
 
         energies = model(x)
-        objective = model.quasi_objective(s_observed, s_model, kind="exact-disc")
+        s_data = model.conditional_expectation(model.pad_visible(s_observed))
+        objective = model.quasi_objective(s_data, s_model)
         objective.backward()
         grads = [p.grad.clone() for p in model.parameters()]
         model.zero_grad()
@@ -610,12 +632,19 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         model = model.cuda()
         self.assertTrue(model.adjacency.is_cuda and model.hidden_idx.is_cuda)
         torch.testing.assert_close(model(x.cuda()).cpu(), energies)
-        objective_cuda = model.quasi_objective(s_observed.cuda(), s_model.cuda(), kind="exact-disc")
+        s_data_cuda = model.conditional_expectation(model.pad_visible(s_observed.cuda()))
+        self.assertTrue(s_data_cuda.is_cuda)
+        torch.testing.assert_close(s_data_cuda.cpu(), s_data)
+        objective_cuda = model.quasi_objective(s_data_cuda, s_model.cuda())
         objective_cuda.backward()
         torch.testing.assert_close(objective_cuda.cpu(), objective)
         for grad, p in zip(grads, model.parameters()):
             torch.testing.assert_close(p.grad.cpu(), grad)
-        self.assertEqual(model.to_ising(), model.cpu().to_ising())
+        ising_cuda = to_ising(model.nodes, model.edges, model.linear, model.edge_biases())
+        model.cpu()
+        self.assertEqual(
+            ising_cuda, to_ising(model.nodes, model.edges, model.linear, model.edge_biases())
+        )
 
 
 if __name__ == "__main__":

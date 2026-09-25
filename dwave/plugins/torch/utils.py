@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Hashable, Iterable, Optional
+from typing import TYPE_CHECKING, Hashable, Iterable, Optional, Sequence
 
 import numpy as np
 import torch
@@ -23,7 +23,7 @@ import torch
 if TYPE_CHECKING:
     from dimod import SampleSet
 
-__all__ = ["GraphIndex", "sampleset_to_tensor", "spread"]
+__all__ = ["GraphIndex", "sampleset_to_tensor", "spread", "to_ising"]
 
 
 @dataclass(frozen=True)
@@ -133,6 +133,63 @@ def sampleset_to_tensor(
     permutation = [var_to_sample_i[v] for v in ordered_vars]
     sample = sample_set.record.sample[:, permutation]
     return torch.tensor(sample, dtype=torch.float32, device=device)
+
+
+def to_ising(
+    nodes: Sequence[Hashable],
+    edges: Sequence[tuple[Hashable, Hashable]],
+    linear: torch.Tensor,
+    quadratic: torch.Tensor,
+    prefactor: float = 1.0,
+    linear_range: Optional[tuple[float, float]] = None,
+    quadratic_range: Optional[tuple[float, float]] = None,
+) -> tuple[dict[Hashable, float], dict[tuple[Hashable, Hashable], float]]:
+    """Converts linear and quadratic biases to the Ising dictionaries used by dimod.
+
+    The biases are scaled by ``prefactor`` and then clipped to ``linear_range`` and
+    ``quadratic_range`` (if given), which is how a Hamiltonian is prepared for a sampler that
+    operates at a fixed temperature and with bounded biases, e.g. a quantum annealer.
+
+    Args:
+        nodes (Sequence[Hashable]): Node labels, in the order of ``linear``.
+        edges (Sequence[tuple[Hashable, Hashable]]): Edge labels, in the order of ``quadratic``.
+        linear (torch.Tensor): Linear biases of shape ``(len(nodes),)``.
+        quadratic (torch.Tensor): Quadratic biases of the edges, shape ``(len(edges),)``.
+        prefactor (float): Scaling applied to all biases prior to clipping. Defaults to 1.
+        linear_range (tuple[float, float], optional): Minimum and maximum of the linear biases.
+        quadratic_range (tuple[float, float], optional): Minimum and maximum of the quadratic
+            biases.
+
+    Raises:
+        ValueError: If the number of biases does not match the number of nodes or edges.
+
+    Returns:
+        tuple[dict, dict]: Linear biases keyed by node and quadratic biases keyed by edge, as
+        accepted by :meth:`dimod.Sampler.sample_ising` and
+        :meth:`dimod.BinaryQuadraticModel.from_ising`.
+    """
+    nodes = list(nodes)
+    edges = [tuple(edge) for edge in edges]
+    linear = torch.as_tensor(linear).detach()
+    quadratic = torch.as_tensor(quadratic).detach()
+    if tuple(linear.shape) != (len(nodes),):
+        raise ValueError(
+            f"Expected {len(nodes)} linear biases (one per node), got shape {tuple(linear.shape)}."
+        )
+    if tuple(quadratic.shape) != (len(edges),):
+        raise ValueError(
+            f"Expected {len(edges)} quadratic biases (one per edge), got shape "
+            f"{tuple(quadratic.shape)}."
+        )
+    linear = prefactor * linear
+    quadratic = prefactor * quadratic
+    if linear_range is not None:
+        linear = linear.clip(*linear_range)
+    if quadratic_range is not None:
+        quadratic = quadratic.clip(*quadratic_range)
+    h = dict(zip(nodes, linear.cpu().tolist()))
+    J = dict(zip(edges, quadratic.cpu().tolist()))
+    return h, J
 
 
 def spread(sample_set: SampleSet) -> SampleSet:

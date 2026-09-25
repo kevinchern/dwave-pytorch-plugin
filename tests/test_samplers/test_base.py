@@ -23,11 +23,12 @@ from dwave.plugins.torch.samplers.base import TorchSampler
 class ConstantSampler(TorchSampler):
     """Returns the all-ones state."""
 
-    def sample(self, x=None):
+    def sample(self, x=None, num_samples=1):
         if x is None:
-            return torch.ones(1, self.model.n_nodes)
+            return torch.ones(num_samples, self.model.n_nodes)
         x, clamp_mask = self._validate_conditional_input(x)
-        return torch.where(clamp_mask, x, torch.ones_like(x)).unsqueeze(-2)
+        completed = torch.where(clamp_mask, x, torch.ones_like(x))
+        return completed.unsqueeze(-2).repeat_interleave(num_samples, -2)
 
 
 class TestTorchSampler(unittest.TestCase):
@@ -70,6 +71,29 @@ class TestTorchSampler(unittest.TestCase):
             self.assertIs(sampler, result)
             self.assertEqual(torch.device("meta"), self.model.linear.device)
             self.assertEqual(torch.device("meta"), self.model.adjacency.device)
+
+    def test_complete(self):
+        model = GRBM(list("abc"), [("a", "b"), ("b", "c")], hidden_nodes=["b"])
+        sampler = ConstantSampler(model)
+        x = torch.tensor([[1.0, -1.0], [-1.0, -1.0]], requires_grad=True)
+        completed = sampler.complete(x)
+        self.assertEqual((2, 1, 3), tuple(completed.shape))
+        torch.testing.assert_close(completed[:, 0, [0, 2]], x.detach())
+        self.assertTrue(torch.all(completed[..., 1] == 1))
+
+        with self.subTest("Gradients propagate to the observations"):
+            completed.sum().backward()
+            torch.testing.assert_close(x.grad, torch.ones(2, 2))
+
+        with self.subTest("Keyword arguments are passed on to sample"):
+            completed = sampler.complete(x.detach().reshape(2, 1, 2), num_samples=3)
+            self.assertEqual((2, 1, 3, 3), tuple(completed.shape))
+            self.assertTrue(torch.all(completed[..., [0, 2]] == x.detach().reshape(2, 1, 1, 2)))
+            self.assertTrue(torch.all(completed[..., 1] == 1))
+
+        with self.subTest("Wrong number of visible units"):
+            with self.assertRaisesRegex(ValueError, "number of visible units"):
+                sampler.complete(torch.ones(2, 3))
 
     def test_validate_conditional_input(self):
         sampler = ConstantSampler(self.model)

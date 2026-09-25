@@ -33,7 +33,10 @@ class TorchSampler(torch.nn.Module, abc.ABC):
     state (e.g. persistent Markov chains) together.
 
     Subclasses implement :meth:`sample`. Calling the sampler (``sampler(x)``) is equivalent to
-    :meth:`sample`.
+    :meth:`sample`. :meth:`complete` fills in the hidden units of observed data with conditional
+    samples, which is how the positive phase of
+    :meth:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine.quasi_objective` is
+    formed for models with hidden units that cannot be marginalized exactly.
 
     Args:
         model (GraphRestrictedBoltzmannMachine): The model to sample from.
@@ -67,6 +70,33 @@ class TorchSampler(torch.nn.Module, abc.ABC):
     def forward(self, x: torch.Tensor | None = None) -> torch.Tensor:
         """Alias of :meth:`sample`."""
         return self.sample(x)
+
+    def complete(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Complete observed visible spins with samples of the hidden units.
+
+        For every row of ``x``, the hidden units of the model are sampled conditioned on the
+        observed spins with :meth:`sample`. The result is suitable as the data argument of
+        :meth:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine.quasi_objective`: its
+        visible entries are the observations themselves, so gradients propagate to ``x``, and its
+        hidden entries are samples, which are constants.
+
+        Args:
+            x (torch.Tensor): Observed spins of shape ``(..., n_visible)`` with one column per
+                visible node, in the order of
+                :attr:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine.visible_idx`.
+            **kwargs: Keyword arguments passed on to :meth:`sample`, for example ``num_samples``
+                of :class:`~dwave.plugins.torch.samplers.BlockSampler`.
+
+        Returns:
+            torch.Tensor: Spins of shape ``(..., num_samples, n_nodes)``.
+        """
+        model = self.model
+        padded = model.pad_visible(x)
+        with torch.no_grad():
+            samples = self.sample(padded, **kwargs)
+        samples = samples.reshape(*x.shape[:-1], -1, model.n_nodes).clone()
+        samples[..., model.visible_idx] = x.unsqueeze(-2).to(samples)
+        return samples
 
     def _validate_conditional_input(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Validate partially observed spins and move them to the model's device and dtype.

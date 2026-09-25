@@ -48,9 +48,10 @@ def run(device: str = "cpu"):
         optimizer.zero_grad()
 
         # Positive phase: hidden units of a restricted Boltzmann machine are conditionally
-        # independent given the visible units, so their expectations are exact ("exact-disc").
-        # Alternatively, sample them: grbm.quasi_objective(x, s_model, "sampling", sampler=sampler)
-        loss = grbm.quasi_objective(x, s_model, kind="exact-disc")
+        # independent given the visible units, so their expectations given the data are exact.
+        # Alternatively, sample them: s_data = sampler.complete(x)
+        s_data = grbm.conditional_expectation(grbm.pad_visible(x))
+        loss = grbm.quasi_objective(s_data, s_model)
 
         loss.backward()
         optimizer.step()

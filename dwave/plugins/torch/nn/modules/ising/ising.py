@@ -22,7 +22,7 @@ from dimod import BinaryQuadraticModel
 from torch import nn
 
 from dwave.plugins.torch.nn.modules.ising.spin_statistic import IdentityStatistic
-from dwave.plugins.torch.utils import GraphIndex, sampleset_to_tensor
+from dwave.plugins.torch.utils import GraphIndex, sampleset_to_tensor, to_ising
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
 
 if TYPE_CHECKING:
@@ -328,9 +328,7 @@ class Ising(nn.Module):
         edge_biases = (self.edge_biases(quadratic.detach()) / self._beta).cpu()
         return [
             self._sampler.sample_ising(
-                dict(zip(self._nodes, h.tolist())),
-                dict(zip(self._edges, J.tolist())),
-                **self._sample_params,
+                *to_ising(self._nodes, self._edges, h, J), **self._sample_params
             )
             for h, J in zip(linear, edge_biases)
         ]
@@ -398,13 +396,12 @@ class Ising(nn.Module):
         Returns:
             Tensor of length B estimates of inverse temperature of the model where B is batch size.
         """
+        linear = linear.detach().cpu()
         edge_biases = self.edge_biases(quadratic.detach()).cpu()
         # NOTE: Notice `self.beta` is not used to scale when sampling, c.f., `_sample`.
         bqms = [
-            BinaryQuadraticModel.from_ising(
-                dict(zip(self._nodes, h.tolist())), dict(zip(self._edges, J.tolist()))
-            )
-            for h, J in zip(linear.detach().cpu(), edge_biases)
+            BinaryQuadraticModel.from_ising(*to_ising(self._nodes, self._edges, h, J))
+            for h, J in zip(linear, edge_biases)
         ]
         sample_sets = [self._sampler.sample(bqm, **self._sample_params) for bqm in bqms]
         return torch.tensor(

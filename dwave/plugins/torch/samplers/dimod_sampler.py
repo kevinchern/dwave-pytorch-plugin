@@ -21,7 +21,7 @@ import torch
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
 from dwave.plugins.torch.samplers.base import TorchSampler
-from dwave.plugins.torch.utils import sampleset_to_tensor, spread
+from dwave.plugins.torch.utils import sampleset_to_tensor, spread, to_ising
 
 __all__ = ["DimodSampler"]
 
@@ -30,10 +30,10 @@ class DimodSampler(TorchSampler):
     """PyTorch plugin wrapper for a dimod sampler.
 
     Unconditional sampling submits the model, scaled by ``prefactor`` and clipped to the given
-    ranges, to :meth:`dimod.Sampler.sample_ising`. Conditional sampling builds, for every row of
-    partially observed spins, the binary quadratic model of the unobserved variables: their
-    effective fields (linear biases plus couplings to the observed spins, scaled by
-    ``prefactor`` and clipped to ``linear_range``) and the couplings among them.
+    ranges (see :meth:`to_ising`), to :meth:`dimod.Sampler.sample_ising`. Conditional sampling
+    builds, for every row of partially observed spins, the binary quadratic model of the
+    unobserved variables: their effective fields (linear biases plus couplings to the observed
+    spins, scaled by ``prefactor`` and clipped to ``linear_range``) and the couplings among them.
 
     Args:
         model (GraphRestrictedBoltzmannMachine): The model to sample from.
@@ -109,6 +109,20 @@ class DimodSampler(TorchSampler):
             raise RuntimeError("no samples found; call 'sample()' first")
         return self._sample_set
 
+    def to_ising(self) -> tuple[dict, dict]:
+        """The model in Ising format as it is submitted to the dimod sampler: biases scaled by
+        :attr:`prefactor` and clipped to :attr:`linear_range` and :attr:`quadratic_range`.
+
+        Returns:
+            tuple[dict, dict]: Linear biases keyed by node and quadratic biases keyed by the edges
+            of the model; see :func:`~dwave.plugins.torch.utils.to_ising`.
+        """
+        model = self.model
+        return to_ising(
+            model.nodes, model.edges, model.linear, model.edge_biases(),
+            self._prefactor, self._linear_range, self._quadratic_range,
+        )
+
     def sample(self, x: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Sample from the dimod sampler and return the corresponding tensor.
 
@@ -128,7 +142,7 @@ class DimodSampler(TorchSampler):
         """
         model = self.model
         device = model.linear.device
-        h, J = model.to_ising(self._prefactor, self._linear_range, self._quadratic_range)
+        h, J = self.to_ising()
 
         if x is None:
             self._sample_set = spread(self._sampler.sample_ising(h, J, **self._sample_kwargs))

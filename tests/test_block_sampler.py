@@ -23,6 +23,7 @@ from parameterized import parameterized
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.block_spin_sampler import BlockSampler
+from dwave.plugins.torch.utils import to_ising
 
 
 def set_weights(bm: GRBM, linear, quadratic) -> None:
@@ -36,7 +37,9 @@ def set_weights(bm: GRBM, linear, quadratic) -> None:
 def total_variation(model: GRBM, samples: torch.Tensor) -> float:
     """Total variation distance between the empirical distribution of ``samples`` and the exact
     Boltzmann distribution of ``model`` at unit inverse temperature."""
-    exact = ExactSolver().sample_ising(*model.to_ising())
+    exact = ExactSolver().sample_ising(
+        *to_ising(model.nodes, model.edges, model.linear, model.edge_biases())
+    )
     states = torch.tensor(np.ascontiguousarray(exact.record.sample), dtype=torch.float32)
     energies = torch.tensor(np.ascontiguousarray(exact.record.energy), dtype=torch.float32)
     p_exact = torch.softmax(-energies, 0)

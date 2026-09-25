@@ -26,17 +26,13 @@
 
 from __future__ import annotations
 
-import warnings
-from typing import TYPE_CHECKING, Hashable, Iterable, Literal, Optional
+from typing import Hashable, Iterable, Optional
 
 import torch
 from dimod import BinaryQuadraticModel
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
 
-from dwave.plugins.torch.utils import GraphIndex
-
-if TYPE_CHECKING:
-    from dwave.plugins.torch.samplers.base import TorchSampler
+from dwave.plugins.torch.utils import GraphIndex, to_ising
 
 __all__ = ["GraphRestrictedBoltzmannMachine"]
 
@@ -74,9 +70,13 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
     configurations.
 
     Hidden units are nodes that are not observed in the data. Observed spins of a model with
-    hidden units have one column per *visible* node, in the order of :attr:`visible_idx`; use
-    :meth:`pad_visible` to embed them into the full node order with ``torch.nan`` marking the
-    hidden units.
+    hidden units have one column per *visible* node, in the order of :attr:`visible_idx`;
+    :meth:`pad_visible` embeds them into the full node order with ``torch.nan`` marking the
+    hidden units. The learning objective :meth:`quasi_objective` takes complete spin
+    configurations, so the hidden units of the data are filled in first: exactly, with
+    :meth:`conditional_expectation`, when no two hidden units are adjacent, or with conditional
+    samples drawn by the ``complete`` method of a
+    :class:`~dwave.plugins.torch.samplers.TorchSampler` otherwise.
 
     Args:
         nodes (Iterable[Hashable]): List of nodes.
@@ -250,6 +250,11 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         coupling = self.coupling()
         return coupling + coupling.mT
 
+    def edge_biases(self) -> torch.Tensor:
+        """Quadratic biases of the edges, of shape ``(n_edges,)`` and in the order of
+        :attr:`edges`; equivalent to ``quadratic[edge_idx_i, edge_idx_j]``."""
+        return self._quadratic[self._edge_idx_i, self._edge_idx_j]
+
     # ------------------------------------------------------------------ graph --------------------
 
     @property
@@ -367,22 +372,27 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
             return self._linear + spins @ coupling
         return self._linear[idx] + spins @ coupling[:, idx]
 
-    def moments(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Batch-averaged first and (uncentred) second moments of spins.
+    def sufficient_statistics(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Batch-averaged sufficient statistics of spins, in the layout of the parameters.
 
-        These are the dense sufficient statistics of the model: the average energy of the batch
-        is ``mean @ linear + (coupling() * second_moment).sum()``.
+        The sufficient statistics of the model are the spins and the products of spins along the
+        edges. Their batch averages are the derivatives of the average energy with respect to
+        :attr:`linear` and :attr:`quadratic`: the average energy of the batch is
+        ``mean @ linear + (quadratic * second).sum()``, and the gradient of the negative log
+        likelihood is the difference between the statistics of the model and those of the data.
 
         Args:
             x (torch.Tensor): Spins of shape (..., N) where N denotes the number of variables in
-                the model. All leading dimensions are averaged over.
+                the model. All leading dimensions are averaged over. Entries may be expectations of
+                spins rather than spins (see :meth:`conditional_expectation`).
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]: Tensors of shape (N,) and (N, N) holding the
-            average spins and the average pairwise products.
+            average spins and the average products of spins along the edges. The latter is in the
+            canonical orientation of :attr:`quadratic`; entries that are not edges are zero.
         """
         x = self._flatten(x)
-        return x.mean(0), (x.mT @ x) / x.shape[0]
+        return x.mean(0), (x.mT @ x) * self._adjacency / x.shape[0]
 
     def _flatten(self, x: torch.Tensor) -> torch.Tensor:
         """Flatten all leading dimensions of a (..., N) tensor into one batch dimension."""
@@ -394,79 +404,48 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
 
     # ------------------------------------------------------------------ learning -----------------
 
-    def quasi_objective(
-        self,
-        s_observed: torch.Tensor,
-        s_model: torch.Tensor,
-        kind: Optional[Literal["sampling", "exact-disc"]] = None,
-        *,
-        sampler: Optional[TorchSampler] = None,
-    ) -> torch.Tensor:
-        """A quasi-objective function with gradients equivalent to the gradients of the
-        negative log likelihood.
+    def quasi_objective(self, s_data: torch.Tensor, s_model: torch.Tensor) -> torch.Tensor:
+        """A quasi-objective function whose gradients are the gradients of the negative log
+        likelihood.
 
-        The objective is the difference between the average energy of the observed spins and the
-        average energy of the model spins. Its gradient with respect to the linear and quadratic
-        biases is the difference of the average sufficient statistics of data and model, i.e. the
-        gradient of the negative log likelihood.
+        The objective is the difference between the average energy of the data and the average
+        energy of spins drawn from the model. Its gradient with respect to the linear and
+        quadratic biases is the difference of the :meth:`sufficient_statistics` of data and
+        model, i.e. the gradient of the negative log likelihood. The objective is differentiable
+        with respect to ``s_data`` as well, which lets gradients flow into an encoder that
+        produces the data (see
+        :func:`~dwave.plugins.torch.models.losses.pseudo_kl_divergence_loss`).
+
+        Both arguments are complete spin configurations with one column per node. For a model
+        with hidden units, fill in the hidden units of the data first: exactly with
+        :meth:`conditional_expectation` when no two hidden units are adjacent, otherwise with
+        samples drawn conditioned on the data by the ``complete`` method of a
+        :class:`~dwave.plugins.torch.samplers.TorchSampler`:
+
+        .. code-block:: python
+
+            s_data = model.conditional_expectation(model.pad_visible(x))  # exact
+            s_data = sampler.complete(x)  # sampled
+            model.quasi_objective(s_data, sampler.sample()).backward()
 
         Args:
-            s_observed (torch.Tensor): Tensor of observed spins (data) with shape (..., V) where V
-                denotes the number of visible variables in the model. All leading dimensions are
-                averaged over.
-            s_model (torch.Tensor): Tensor of spins drawn from the model with shape (..., N) where
-                N denotes the total number of variables in the model. All leading dimensions are
-                averaged over.
-            kind (Literal["sampling", "exact-disc"]): Method for computing, or approximating,
-                marginal expectations of hidden units given the observations. Required if, and
-                only if, the model has hidden units. The "sampling" method samples the hidden
-                units conditionally for each observation with ``sampler``. The "exact-disc" method
-                computes exact marginals, which is possible when hidden units are disconnected,
-                i.e., no connections between hidden units.
-            sampler (TorchSampler, optional): The sampler used to sample the hidden units
-                conditioned on the observations; its :meth:`~TorchSampler.sample` method receives
-                the observations padded with ``torch.nan`` at the hidden units. Only used, and
-                required, when ``kind`` is "sampling". Defaults to None.
+            s_data (torch.Tensor): Data spins of shape (..., N) where N denotes the number of
+                variables in the model. All leading dimensions are averaged over. Entries may be
+                expectations of spins.
+            s_model (torch.Tensor): Spins drawn from the model, of shape (..., N). All leading
+                dimensions are averaged over.
 
         Returns:
-            torch.Tensor: Scalar difference of the average energy of data and model whose gradients
-            are equivalent to the gradients of the negative log likelihood.
+            torch.Tensor: Scalar difference between the average energies of data and model.
         """
-        if self._hidden_nodes:
-            if kind == "exact-disc":
-                if sampler is not None:
-                    warnings.warn(f"`sampler` is not used by kind {kind!r} ({sampler})")
-                if self._connected_hidden:
-                    raise ValueError(
-                        'The "exact-disc" method requires hidden units to be disconnected from '
-                        'each other.'
-                    )
-                obs = self._conditional_expectation(s_observed)
-            elif kind == "sampling":
-                if sampler is None:
-                    raise ValueError('`sampler` is required when `kind` is "sampling".')
-                obs = self._conditional_samples(s_observed, sampler)
-            else:
-                raise ValueError(
-                    f'Invalid kind ({kind}). Should be one of "sampling" or "exact-disc"'
-                )
-        else:
-            if kind is not None:
-                raise ValueError(
-                    f"`kind` {kind} should not be specified if the model is fully visible."
-                )
-            obs = s_observed
-
-        obs = self._flatten(obs)
-        s_model = self._flatten(s_model)
-        mean_diff = obs.mean(0) - s_model.mean(0)
-        # Second moments are accumulated from unscaled spins and combined in one fused operation.
-        moment_diff = torch.addmm(
-            obs.mT @ obs, s_model.mT, s_model,
-            beta=1.0 / obs.shape[0], alpha=-1.0 / s_model.shape[0],
+        mean_data, second_data = self.sufficient_statistics(s_data)
+        mean_model, second_model = self.sufficient_statistics(s_model)
+        return (
+            (mean_data - mean_model) @ self._linear
+            + ((second_data - second_model) * self._quadratic).sum()
         )
-        coupling = self.coupling()
-        return mean_diff @ self._linear + torch.dot(coupling.reshape(-1), moment_diff.reshape(-1))
+
+    # ------------------------------------------------------------------ hidden units -------------
 
     def pad_visible(self, x: torch.Tensor) -> torch.Tensor:
         """Embeds observed visible spins into the full node order, marking hidden units with
@@ -495,82 +474,50 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         padded[..., self._visible_idx] = x
         return padded
 
-    def _conditional_expectation(self, s_observed: torch.Tensor) -> torch.Tensor:
-        """Exact conditional expectations of the hidden units given the observations, for models
-        whose hidden units are disconnected from each other.
+    def conditional_expectation(self, x: torch.Tensor) -> torch.Tensor:
+        r"""Exact conditional expectations of unknown spins given the observed spins.
+
+        Entries of ``x`` equal to ``torch.nan`` are unknown. Provided that no two unknown spins
+        are adjacent, an unknown spin :math:`s_k` interacts with observed spins only, so its
+        conditional distribution is determined by its effective field :math:`h^{\text{eff}}_k`
+        (see :meth:`effective_field`) and its conditional expectation is
+        :math:`-\tanh(h^{\text{eff}}_k)`. For a model with hidden units,
+        ``model.conditional_expectation(model.pad_visible(observations))`` yields the
+        expectations of the hidden units given the data, which is exact when the hidden units are
+        disconnected from each other (see :attr:`connected_hidden`).
+
+        The expectations are constants to autograd, i.e. they are not differentiated with respect
+        to the parameters. This is what :meth:`quasi_objective` requires: the positive-phase
+        statistics are expectations of the sufficient statistics under the conditional
+        distribution, and the gradient of the negative log likelihood is obtained by holding these
+        expectations fixed. The observed entries of ``x`` are returned as they are and remain
+        differentiable.
 
         Args:
-            s_observed (torch.Tensor): Observed spins of shape (..., V).
+            x (torch.Tensor): Spins of shape (..., N) where N denotes the number of variables in
+                the model; ``torch.nan`` marks unknown spins.
+
+        Raises:
+            ValueError: If two unknown spins are adjacent in some row of ``x``.
 
         Returns:
-            torch.Tensor: A (..., N) tensor holding the observed spins at the visible units and
-            the conditional expectation ``-tanh(effective field)`` at the hidden units. The
-            expectations are treated as constants by autograd.
+            torch.Tensor: A tensor of shape (..., N) holding the observed spins and the
+            conditional expectations of the unknown spins.
         """
-        if self._connected_hidden:
-            raise ValueError(
-                "Exact conditional expectations require hidden units to be disconnected from "
-                "each other."
-            )
-        padded = self.pad_visible(s_observed)
+        unknown = torch.isnan(x)
         with torch.no_grad():
-            field = self.effective_field(padded, self._hidden_idx)
-        padded[..., self._hidden_idx] = -torch.tanh(field)
-        return padded
+            neighbours = (self._adjacency | self._adjacency.mT).to(x.dtype)
+            unknown_spins = unknown.to(x.dtype)
+            if ((unknown_spins @ neighbours) * unknown_spins).any():
+                raise ValueError(
+                    "Exact conditional expectations require that no two unknown spins are "
+                    "adjacent; with hidden units, the hidden units must be disconnected from "
+                    "each other."
+                )
+            field = self.effective_field(x)
+        return torch.where(unknown, -torch.tanh(field), x)
 
-    def _conditional_samples(self, s_observed: torch.Tensor, sampler: TorchSampler) -> torch.Tensor:
-        """Samples of the hidden units given the observations, drawn with ``sampler``.
-
-        Args:
-            s_observed (torch.Tensor): Observed spins of shape (..., V).
-            sampler (TorchSampler): Sampler supporting conditional sampling of ``torch.nan``
-                entries.
-
-        Returns:
-            torch.Tensor: A (..., M, N) tensor of M samples per observation. The visible entries
-            are the observed spins (and remain differentiable); the hidden entries are samples.
-        """
-        padded = self.pad_visible(s_observed)
-        with torch.no_grad():
-            samples = sampler.sample(padded)
-        samples = samples.reshape(*s_observed.shape[:-1], -1, self._n_nodes).clone()
-        samples[..., self._visible_idx] = s_observed.unsqueeze(-2).to(samples.dtype)
-        return samples
-
-    # ------------------------------------------------------------------ dimod interop ------------
-
-    def to_ising(
-        self,
-        prefactor: float = 1.0,
-        linear_range: Optional[tuple[float, float]] = None,
-        quadratic_range: Optional[tuple[float, float]] = None,
-    ) -> tuple[dict, dict]:
-        """Convert the model to Ising format.
-
-        Convert the model to Ising format with scaling (``prefactor``) followed by clipping (if
-        ``linear_range`` and/or ``quadratic_range`` are supplied).
-
-        Args:
-            prefactor (float): A scaling term applied to the linear and quadratic biases prior to,
-                if applicable, clipping. Defaults to 1.
-            linear_range (tuple[float, float], optional): The minimum and maximum values to clip
-                linear biases with.
-            quadratic_range (tuple[float, float], optional): The minimum and maximum values to
-                clip quadratic biases with.
-
-        Returns:
-            tuple[dict, dict]: The linear and quadratic biases in dictionary format compatible with
-            `dimod.Sampler.sample_ising`; the quadratic biases are keyed by :attr:`edges`.
-        """
-        linear = prefactor * self._linear.detach()
-        quadratic = prefactor * self._quadratic.detach()[self._edge_idx_i, self._edge_idx_j]
-        if linear_range is not None:
-            linear = linear.clip(*linear_range)
-        if quadratic_range is not None:
-            quadratic = quadratic.clip(*quadratic_range)
-        h = dict(zip(self._nodes, linear.cpu().tolist()))
-        J = dict(zip(self._edges, quadratic.cpu().tolist()))
-        return h, J
+    # ------------------------------------------------------------------ temperature --------------
 
     def estimate_beta(self, spins: torch.Tensor) -> float:
         """Estimate the maximum pseudolikelihood temperature using
@@ -583,5 +530,7 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         Returns:
             float: The estimated inverse temperature of the model.
         """
-        bqm = BinaryQuadraticModel.from_ising(*self.to_ising())
+        bqm = BinaryQuadraticModel.from_ising(
+            *to_ising(self._nodes, self._edges, self._linear, self.edge_biases())
+        )
         return float(1 / mple(bqm, (spins.detach().cpu().numpy(), self._nodes))[0])

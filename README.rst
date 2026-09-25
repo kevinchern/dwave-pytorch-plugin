@@ -64,8 +64,9 @@ To use a `dimod <https://github.com/dwavesystems/dimod/>`_ sampler, replace the 
 Hidden units
 ~~~~~~~~~~~~
 Nodes listed in ``hidden_nodes`` are not observed in the data, which has one column per visible
-node. When hidden units are not connected to each other, their conditional expectations given the
-data are computed exactly:
+node. The quasi-objective takes complete spin configurations, so the hidden units are filled in
+first. When no two hidden units are adjacent, their conditional expectations given the data are
+exact:
 
 .. code-block:: python
 
@@ -76,12 +77,15 @@ data are computed exactly:
                hidden_nodes=["h1", "h2"])
     sampler = BipartiteGibbsSampler(rbm, num_chains=3, schedule=[1] * 10)
     x_data = torch.tensor([[1, -1], [-1, 1]], dtype=torch.float32)
-    rbm.quasi_objective(x_data, sampler.sample(), kind="exact-disc").backward()
+    s_data = rbm.conditional_expectation(rbm.pad_visible(x_data))
+    rbm.quasi_objective(s_data, sampler.sample()).backward()
 
-Otherwise, sample the hidden units conditioned on the data with any sampler, for example
-``rbm.quasi_objective(x_data, x_model, kind="sampling", sampler=sampler)``. Conditional sampling is
-also available directly: ``sampler.sample(rbm.pad_visible(x_data))`` samples the ``torch.nan``
-entries of its argument while keeping the observed spins fixed.
+Otherwise, sample the hidden units conditioned on the data with any sampler:
+``sampler.complete(x_data)`` returns, for every data point, samples of the hidden units alongside
+the observed spins, and ``rbm.quasi_objective(sampler.complete(x_data), x_model)`` is the
+corresponding objective. Conditional sampling of arbitrary partially observed spins is also
+available: ``sampler.sample(rbm.pad_visible(x_data))`` samples the ``torch.nan`` entries of its
+argument while keeping the observed spins fixed.
 
 
 License

@@ -69,16 +69,14 @@ def run(use_qpu: bool, num_reads: int, batch_size: int, n_iterations: int, fully
     if fully_visible:
         hidden_nodes = None
         n_vis = G.number_of_nodes()
-        kind = None
     else:
         # Use a four-colouring of the Zephyr graph to determine a set of conditionally-independent
         # nodes to define as hidden units. Because hidden units are then not connected to each
-        # other, their conditional expectations given the data are exact ("exact-disc").
+        # other, their conditional expectations given the data are exact.
         linear_to_zephyr = zephyr_coordinates(zephyr_grid_size).linear_to_zephyr
         qubit_colour = {g: zephyr_four_color(linear_to_zephyr(g)) for g in G}
         hidden_nodes = [q for q, c in qubit_colour.items() if c == 0]
         n_vis = G.number_of_nodes() - len(hidden_nodes)
-        kind = "exact-disc"
 
     # Generate fake data to fit the Boltzmann machine to (one column per visible unit)
     X = 1 - 2.0 * torch.randint(0, 2, (n_iterations, batch_size, n_vis))
@@ -103,9 +101,13 @@ def run(use_qpu: bool, num_reads: int, batch_size: int, n_iterations: int, fully
         # Reset the gradients of the model weights
         opt_grbm.zero_grad()
 
+        # Positive phase: the objective takes complete spin configurations, so fill in the hidden
+        # units (if any) with their exact conditional expectations given the data
+        s_data = x if fully_visible else grbm.conditional_expectation(grbm.pad_visible(x))
+
         # Compute a quasi-objective---this quasi-objective yields the same gradient as the negative
         # log likelihood of the model
-        quasi = grbm.quasi_objective(x, s, kind=kind)
+        quasi = grbm.quasi_objective(s_data, s)
 
         # Backpropagate gradients
         quasi.backward()

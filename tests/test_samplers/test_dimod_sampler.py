@@ -54,6 +54,25 @@ class TestDimodSampler(unittest.TestCase):
         self.assertIsNone(sampler.quadratic_range)
         self.assertDictEqual(dict(num_reads=3), sampler.sample_kwargs)
 
+    def test_to_ising(self):
+        set_weights(self.bm, [-3, 0, 1, 3.0], [-1, 1, 2.0, 0])
+
+        with self.subTest("Unscaled and unclipped"):
+            h, J = DimodSampler(self.bm, IdentitySampler()).to_ising()
+            self.assertDictEqual(h, {"d": -3.0, "b": 0.0, "a": 1.0, "c": 3.0})
+            self.assertDictEqual(
+                J, {("a", "b"): -1.0, ("a", "c"): 1.0, ("a", "d"): 2.0, ("b", "c"): 0.0}
+            )
+
+        with self.subTest("Scaled by the prefactor, then clipped"):
+            sampler = DimodSampler(self.bm, IdentitySampler(), prefactor=2,
+                                   linear_range=(-1, 5), quadratic_range=(-0.5, 3))
+            h, J = sampler.to_ising()
+            self.assertDictEqual(h, {"d": -1.0, "b": 0.0, "a": 2.0, "c": 5.0})
+            self.assertDictEqual(
+                J, {("a", "b"): -0.5, ("a", "c"): 2.0, ("a", "d"): 3.0, ("b", "c"): 0.0}
+            )
+
     def test_sample(self):
         grbm = GRBM(list("abcd"), [("a", "b"), ("a", "c"), ("a", "d"), ("b", "c")])
 

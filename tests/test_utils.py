@@ -17,7 +17,7 @@ import torch
 from dimod import SPIN, SampleSet
 from torch import Tensor
 
-from dwave.plugins.torch.utils import GraphIndex, sampleset_to_tensor, spread
+from dwave.plugins.torch.utils import GraphIndex, sampleset_to_tensor, spread, to_ising
 
 
 class TestUtils(unittest.TestCase):
@@ -48,6 +48,45 @@ class TestUtils(unittest.TestCase):
         with self.subTest("Sample sets without aggregation are returned as is"):
             ss = SampleSet.from_samples(([[1, -1], [-1, 1]], "ab"), SPIN, [0, 0])
             self.assertIs(ss, spread(ss))
+
+
+class TestToIsing(unittest.TestCase):
+    def test_to_ising(self):
+        nodes = list("dbac")
+        edges = [["a", "b"], ("a", "c"), ("a", "d"), ("b", "c")]
+        linear = torch.tensor([-3.0, 0.0, 1.0, 3.0], requires_grad=True)
+        quadratic = torch.tensor([-1.0, 1.0, 2.0, 0.0], requires_grad=True)
+
+        with self.subTest("Dictionaries keyed by nodes and edges, in order"):
+            h, J = to_ising(nodes, edges, linear, quadratic)
+            self.assertListEqual(list(h), nodes)
+            self.assertListEqual(list(h.values()), linear.detach().tolist())
+            self.assertListEqual(list(J), [tuple(e) for e in edges])
+            self.assertListEqual(list(J.values()), quadratic.detach().tolist())
+            self.assertIsInstance(h["d"], float)
+
+        with self.subTest("Prefactor"):
+            h, J = to_ising(nodes, edges, linear, quadratic, prefactor=2.0)
+            self.assertListEqual(list(h.values()), (2 * linear).detach().tolist())
+            self.assertListEqual(list(J.values()), (2 * quadratic).detach().tolist())
+
+        with self.subTest("Clipping after scaling"):
+            h, J = to_ising(nodes, edges, linear, quadratic, 1, [-0.1, 1.5], [-0.05, 3])
+            for expected, observed in zip([-0.1, 0, 1, 1.5], h.values()):
+                self.assertAlmostEqual(expected, observed)
+            for expected, observed in zip([-0.05, 1, 2, 0], J.values()):
+                self.assertAlmostEqual(expected, observed)
+
+        with self.subTest("Edgeless"):
+            h, J = to_ising([0, 1], [], torch.zeros(2), torch.zeros(0))
+            self.assertDictEqual(h, {0: 0.0, 1: 0.0})
+            self.assertDictEqual(J, {})
+
+        with self.subTest("Shape validation"):
+            with self.assertRaisesRegex(ValueError, "Expected 4 linear biases"):
+                to_ising(nodes, edges, torch.zeros(3), quadratic)
+            with self.assertRaisesRegex(ValueError, "Expected 4 quadratic biases"):
+                to_ising(nodes, edges, linear, torch.zeros(4, 4))
 
 
 class TestGraphIndex(unittest.TestCase):
