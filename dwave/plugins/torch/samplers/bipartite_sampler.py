@@ -57,7 +57,8 @@ class BipartiteGibbsSampler(BlockSampler):
         seed: Optional[int] = None,
     ) -> None:
         hidden = set(model.hidden_nodes)
-        offending = [(u, v) for u, v in model.edges if (u in hidden) == (v in hidden)]
+        is_hidden = torch.tensor([node in hidden for node in model.nodes], dtype=torch.long)
+        offending = BlockSampler._monochromatic_edges(model, is_hidden)
         if offending:
             raise ValueError(
                 "BipartiteGibbsSampler requires a bipartite model in which every edge connects "

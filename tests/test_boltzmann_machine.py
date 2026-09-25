@@ -12,36 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+import pickle
 import unittest
 
 import torch
-from dimod import BinaryQuadraticModel, ExactSolver
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers import BlockSampler, TorchSampler
 from dwave.plugins.torch.utils import to_ising
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
-
-
-def set_weights(bm: GRBM, linear, quadratic) -> None:
-    """Set the linear biases and the per-edge quadratic biases (in edge order) of a model."""
-    with torch.no_grad():
-        bm.linear.copy_(torch.as_tensor(linear, dtype=bm.linear.dtype))
-        bm.quadratic[bm.edge_idx_i, bm.edge_idx_j] = torch.as_tensor(
-            quadratic, dtype=bm.quadratic.dtype
-        )
-
-
-def to_bqm(bm: GRBM) -> BinaryQuadraticModel:
-    """The model as a dimod binary quadratic model."""
-    return BinaryQuadraticModel.from_ising(
-        *to_ising(bm.nodes, bm.edges, bm.linear, bm.edge_biases())
-    )
-
-
-def randspins(*shape, seed=0) -> torch.Tensor:
-    generator = torch.Generator().manual_seed(seed)
-    return 1.0 - 2.0 * torch.randint(0, 2, shape, generator=generator)
+from tests.helper_functions import model_to_bqm, randspins, set_weights
 
 
 def random_model(n: int, p: float, n_hidden: int = 0, seed: int = 0, connect_hidden=False) -> GRBM:
@@ -70,10 +51,10 @@ class FixedHiddenSampler(TorchSampler):
         self.hidden_samples = torch.as_tensor(hidden_samples, dtype=torch.float32)
 
     def sample(self, x=None):
-        x, _ = self._validate_conditional_input(x)
+        x, _, batch_shape = self._validate_conditional_input(x)
         out = x.unsqueeze(-2).repeat_interleave(len(self.hidden_samples), -2)
         out[..., self.model.hidden_idx] = self.hidden_samples
-        return out
+        return out.reshape(*batch_shape, -1, self.model.n_nodes)
 
 
 class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
@@ -149,15 +130,26 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         with self.assertRaises(TypeError):
             bm.linear = torch.zeros(3)  # torch refuses to replace a parameter by a tensor
 
-    def test_graph_attributes_are_immutable(self):
+    def test_graph_attributes(self):
         bm = GRBM([0, 1, 2], [(0, 1), (1, 2)], hidden_nodes=[2])
         for name in ("nodes", "edges", "hidden_nodes", "visible_nodes"):
             with self.subTest(name):
                 self.assertIsInstance(getattr(bm, name), tuple)
-        self.assertEqual(2, bm.node_to_idx[2])
-        with self.assertRaises(TypeError):
-            bm.node_to_idx[3] = 3
+        self.assertDictEqual({0: 0, 1: 1, 2: 2}, bm.node_to_idx)
         self.assertFalse(hasattr(bm, "idx_to_node"))
+
+    def test_deepcopy_and_pickle(self):
+        # Common PyTorch workflows (e.g. averaged models) deep-copy or pickle whole modules
+        bm = GRBM([0, 1, 2], [(0, 1), (1, 2)], hidden_nodes=[2], linear={1: 0.5})
+        for label, clone in (("deepcopy", copy.deepcopy(bm)),
+                             ("pickle", pickle.loads(pickle.dumps(bm)))):
+            with self.subTest(label):
+                self.assertTupleEqual(bm.nodes, clone.nodes)
+                self.assertTupleEqual(bm.hidden_nodes, clone.hidden_nodes)
+                self.assertDictEqual(bm.node_to_idx, clone.node_to_idx)
+                torch.testing.assert_close(bm.linear, clone.linear)
+                torch.testing.assert_close(bm.quadratic, clone.quadratic)
+                self.assertTrue(torch.equal(bm.adjacency, clone.adjacency))
 
     def test_default_quadratic_initialization_uses_connectivity(self):
         nodes = list("abcd")
@@ -258,14 +250,14 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
 
         with self.subTest("Arbitrary-valued weights and spins should match dimod.BQM energy"):
             set_weights(self.bm, torch.linspace(-412, 23, 4), torch.linspace(-0.4, 4, 16)[:4])
-            bqm = to_bqm(self.bm)
+            bqm = model_to_bqm(self.bm)
             fake_spins = 1.0 * torch.arange(1, 5).unsqueeze(0)
             en_bqm = bqm.energies((fake_spins.numpy(), "dbac")).item()
             self.assertAlmostEqual(en_bqm, self.bm(fake_spins).item(), 4)
 
     def test_forward_matches_dimod_random_graph(self):
         model = random_model(30, 0.3, seed=7)
-        bqm = to_bqm(model)
+        bqm = model_to_bqm(model)
         x = randspins(17, 30, seed=1)
         expected = torch.tensor(bqm.energies((x.numpy(), model.nodes)), dtype=torch.float32)
         torch.testing.assert_close(model(x), expected)
@@ -277,6 +269,9 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         torch.testing.assert_close(symmetric, symmetric.T)
         torch.testing.assert_close(symmetric.diagonal(), torch.zeros(4))
         torch.testing.assert_close(symmetric[bm.edge_idx_i, bm.edge_idx_j], bm.edge_biases())
+
+        with self.subTest("Edge biases of another dense tensor"):
+            torch.testing.assert_close(bm.edge_biases(2 * bm.quadratic), 2 * bm.edge_biases())
 
         with self.subTest("Entries outside the adjacency are ignored"):
             energies = bm(self.pmones)
@@ -299,6 +294,13 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         with self.subTest("Subset of nodes"):
             idx = torch.tensor([2, 0])
             torch.testing.assert_close(self.bm.effective_field(spins, idx), expected[:, [2, 0]])
+
+        with self.subTest("Precomputed coupling matrix"):
+            coupling = self.bm.symmetric_coupling()
+            torch.testing.assert_close(self.bm.effective_field(spins, coupling=coupling), expected)
+            torch.testing.assert_close(
+                self.bm.effective_field(spins, idx, coupling), expected[:, [2, 0]]
+            )
 
         with self.subTest("NaN spins contribute nothing"):
             padded = spins.clone()
@@ -346,7 +348,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
 
     def test_estimate_beta(self):
         spins = torch.tensor([[1, -1, 1, 1], [-1, -1, 1, 1], [1, -1, -1, 1], [1, 1, 1, -1]])
-        bqm = to_bqm(self.bm)
+        bqm = model_to_bqm(self.bm)
         beta = self.bm.estimate_beta(spins)
         self.assertIsInstance(beta, float)
         self.assertEqual(1.0 / mple(bqm, (spins.numpy(), "dbac"))[0], beta)
@@ -647,7 +649,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         x = randspins(5, 10).double()
         self.assertEqual(torch.float64, model(x).dtype)
         self.assertEqual(torch.bool, model.adjacency.dtype)
-        bqm = to_bqm(model)
+        bqm = model_to_bqm(model)
         torch.testing.assert_close(
             model(x), torch.tensor(bqm.energies((x.numpy(), model.nodes)))
         )

@@ -26,19 +26,17 @@
 
 from __future__ import annotations
 
-from types import MappingProxyType
 from typing import Hashable, Iterable, Optional
 
 import torch
-from dimod import BinaryQuadraticModel
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
 
-from dwave.plugins.torch.utils import GraphIndex, to_ising
+from dwave.plugins.torch.utils import GraphIndex, to_bqm
 
 __all__ = ["GraphRestrictedBoltzmannMachine"]
 
 
-class GraphRestrictedBoltzmannMachine(torch.nn.Module):
+class GraphRestrictedBoltzmannMachine(GraphIndex):
     r"""Creates a graph-restricted Boltzmann machine.
 
     A graph-restricted Boltzmann machine (GRBM) is an Ising model on the nodes and edges of a
@@ -79,9 +77,9 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
     samples drawn by the ``complete`` method of a
     :class:`~dwave.plugins.torch.samplers.TorchSampler` otherwise.
 
+    The graph attributes and buffers are those of :class:`~dwave.plugins.torch.utils.GraphIndex`.
     The parameters and buffers of the module are registered under the attribute names listed
-    below, which are therefore the keys of :meth:`~torch.nn.Module.state_dict`. The graph
-    attributes ``nodes``, ``edges``, ``hidden_nodes`` and ``node_to_idx`` are immutable.
+    below, which are therefore the keys of :meth:`~torch.nn.Module.state_dict`.
 
     Args:
         nodes (Iterable[Hashable]): List of nodes.
@@ -119,7 +117,8 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         edges (tuple[tuple[Hashable, Hashable], ...]): The edges of the model, in the
             orientation given at construction.
         hidden_nodes (tuple[Hashable, ...]): The hidden nodes.
-        node_to_idx (Mapping[Hashable, int]): Read-only mapping from node to index.
+        node_to_idx (dict[Hashable, int]): Mapping from node to index; derived from ``nodes``
+            and not to be modified.
     """
     # QPU beta has been measured to be 5-8 (in inverse units of programmed J)
     # Considering the higher temperature within this range, to sample from a beta=1
@@ -137,27 +136,18 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         linear: Optional[dict[Hashable, float]] = None,
         quadratic: Optional[dict[tuple[Hashable, Hashable], float]] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(nodes, edges)
 
-        graph = GraphIndex.from_graph(nodes, edges)
-        self.nodes = tuple(graph.nodes)
-        self.edges = tuple(graph.edges)
-        self.node_to_idx = MappingProxyType(dict(graph.node_to_idx))
-
-        self.register_buffer("edge_idx_i", graph.edge_idx_i)
-        self.register_buffer("edge_idx_j", graph.edge_idx_j)
-        self.register_buffer("adjacency", graph.adjacency())
-
-        quadratic_init = torch.zeros(graph.n_nodes, graph.n_nodes)
-        if graph.n_edges:
-            degrees = graph.degrees().to(quadratic_init.dtype)
+        quadratic_init = torch.zeros(self.n_nodes, self.n_nodes)
+        if self.n_edges:
+            degrees = self.degrees().to(quadratic_init.dtype)
             quadratic_std = self._INIT_INVERSE_TEMP / (
                 degrees[self.edge_idx_i] * degrees[self.edge_idx_j]
             )**0.25
             quadratic_init[self.edge_idx_i, self.edge_idx_j] = (
-                torch.randn(graph.n_edges) * quadratic_std
+                torch.randn(self.n_edges) * quadratic_std
             )
-        self.linear = torch.nn.Parameter(torch.zeros(graph.n_nodes))
+        self.linear = torch.nn.Parameter(torch.zeros(self.n_nodes))
         self.quadratic = torch.nn.Parameter(quadratic_init)
 
         self.hidden_nodes = () if hidden_nodes is None else tuple(hidden_nodes)
@@ -177,10 +167,7 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
             self.set_quadratic(quadratic)
 
     def extra_repr(self) -> str:
-        return (
-            f"n_nodes={self.n_nodes}, n_edges={self.n_edges}, "
-            f"n_hidden={len(self.hidden_nodes)}"
-        )
+        return f"{super().extra_repr()}, n_hidden={self.n_hidden}"
 
     # ------------------------------------------------------------------ parameters --------------
 
@@ -260,10 +247,19 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         coupling = self.coupling()
         return coupling + coupling.mT
 
-    def edge_biases(self) -> torch.Tensor:
-        """Quadratic biases of the edges, of shape ``(n_edges,)`` and in the order of
-        :attr:`edges`; equivalent to ``quadratic[edge_idx_i, edge_idx_j]``."""
-        return self.quadratic[self.edge_idx_i, self.edge_idx_j]
+    def edge_biases(self, quadratic: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Quadratic biases of the edges, of shape ``(..., n_edges)`` and in the order of
+        :attr:`edges`.
+
+        Args:
+            quadratic (torch.Tensor, optional): Dense quadratic biases of shape
+                ``(..., n_nodes, n_nodes)`` in canonical orientation. Defaults to the model's
+                :attr:`quadratic`.
+
+        Returns:
+            torch.Tensor: The entries of ``quadratic`` at ``[edge_idx_i, edge_idx_j]``.
+        """
+        return super().edge_biases(self.quadratic if quadratic is None else quadratic)
 
     # ------------------------------------------------------------------ graph --------------------
 
@@ -271,16 +267,6 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
     def visible_nodes(self) -> tuple[Hashable, ...]:
         """The visible nodes, in the order of :attr:`visible_idx`."""
         return tuple(self.nodes[idx] for idx in self.visible_idx.tolist())
-
-    @property
-    def n_nodes(self) -> int:
-        """Total number of nodes, visible and hidden."""
-        return len(self.nodes)
-
-    @property
-    def n_edges(self) -> int:
-        """Number of edges."""
-        return len(self.edges)
 
     @property
     def n_visible(self) -> int:
@@ -314,7 +300,12 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         coupling = self.coupling()
         return x @ self.linear + ((x @ coupling) * x).sum(-1)
 
-    def effective_field(self, x: torch.Tensor, idx: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def effective_field(
+        self,
+        x: torch.Tensor,
+        idx: Optional[torch.Tensor] = None,
+        coupling: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         r"""Effective fields :math:`h_k + \sum_{l} J_{kl} s_l` acting on nodes.
 
         The effective field of node :math:`k` is the derivative of the energy with respect to
@@ -329,12 +320,16 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
                 the model; ``torch.nan`` marks unknown spins.
             idx (torch.Tensor, optional): Indices of the nodes whose fields are returned. If
                 ``None``, the fields of all nodes are returned. Defaults to ``None``.
+            coupling (torch.Tensor, optional): The :meth:`symmetric_coupling` matrix, which a
+                caller evaluating the fields of several blocks of nodes can pass to avoid
+                recomputing it. Defaults to ``None``, i.e. it is computed.
 
         Returns:
             torch.Tensor: Effective fields of shape (..., N) or (..., ``len(idx)``).
         """
         spins = torch.nan_to_num(x, nan=0.0)
-        coupling = self.symmetric_coupling()
+        if coupling is None:
+            coupling = self.symmetric_coupling()
         if idx is None:
             return self.linear + spins @ coupling
         return self.linear[idx] + spins @ coupling[:, idx]
@@ -376,11 +371,11 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         likelihood.
 
         The objective is the difference between the average energy of the data and the average
-        energy of spins drawn from the model. Its gradient with respect to the linear and
-        quadratic biases is the difference of the :meth:`sufficient_statistics` of data and
-        model, i.e. the gradient of the negative log likelihood. The objective is differentiable
-        with respect to ``s_data`` as well, which lets gradients flow into an encoder that
-        produces the data (see
+        energy of spins drawn from the model, ``self(s_data).mean() - self(s_model).mean()``.
+        Its gradient with respect to the linear and quadratic biases is the difference of the
+        :meth:`sufficient_statistics` of data and model, i.e. the gradient of the negative log
+        likelihood. The objective is differentiable with respect to ``s_data`` as well, which
+        lets gradients flow into an encoder that produces the data (see
         :func:`~dwave.plugins.torch.models.losses.pseudo_kl_divergence_loss`).
 
         Both arguments are complete spin configurations with one column per node. For a model
@@ -405,12 +400,7 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         Returns:
             torch.Tensor: Scalar difference between the average energies of data and model.
         """
-        mean_data, second_data = self.sufficient_statistics(s_data)
-        mean_model, second_model = self.sufficient_statistics(s_model)
-        return (
-            (mean_data - mean_model) @ self.linear
-            + ((second_data - second_model) * self.quadratic).sum()
-        )
+        return self(self._flatten(s_data)).mean() - self(self._flatten(s_model)).mean()
 
     # ------------------------------------------------------------------ hidden units -------------
 
@@ -497,7 +487,5 @@ class GraphRestrictedBoltzmannMachine(torch.nn.Module):
         Returns:
             float: The estimated inverse temperature of the model.
         """
-        bqm = BinaryQuadraticModel.from_ising(
-            *to_ising(self.nodes, self.edges, self.linear, self.edge_biases())
-        )
+        bqm = to_bqm(self.nodes, self.edges, self.linear, self.edge_biases())
         return float(1 / mple(bqm, (spins.detach().cpu().numpy(), list(self.nodes)))[0])

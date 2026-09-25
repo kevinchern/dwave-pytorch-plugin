@@ -89,7 +89,8 @@ Examples
 ========
 
 Complete scripts are in the repository's
-`examples directory <https://github.com/dwavesystems/dwave-pytorch-plugin/tree/main/examples>`_.
+`examples directory <https://github.com/dwavesystems/dwave-pytorch-plugin/tree/main/examples>`_;
+the Boltzmann machine example additionally requires the ``dwave-graphs`` package.
 
 Training a Boltzmann machine
 ----------------------------

@@ -28,15 +28,23 @@ features:
     modifying its persistent chains. ``BipartiteGibbsSampler`` is a two-block ``BlockSampler``.
   - |
     ``DimodSampler`` builds conditional binary quadratic models from the model's dense effective
-    fields (no per-row ``fix_variables``), applies ``prefactor`` and clipping consistently, and
-    expands aggregated sample sets. ``DimodSampler.to_ising`` returns the model as it is submitted
-    to the wrapped sampler. ``dwave.plugins.torch.utils.to_ising`` converts biases to dimod's Ising
-    dictionaries, ``dwave.plugins.torch.utils.spread`` replaces the dependency on ``dwave-hybrid``
-    and ``dwave.plugins.torch.utils.GraphIndex`` provides shared graph indexing.
+    fields (no per-row ``fix_variables``) and applies ``prefactor`` and clipping consistently.
+    ``DimodSampler.to_ising`` returns the model as it is submitted to the wrapped sampler.
+    ``dwave.plugins.torch.utils.to_ising`` and ``dwave.plugins.torch.utils.to_bqm`` convert
+    biases to dimod's Ising dictionaries and to a ``dimod.BinaryQuadraticModel``, and
+    ``dwave.plugins.torch.utils.sampleset_to_tensor`` repeats aggregated samples according to
+    ``num_occurrences``, which replaces the dependency on ``dwave-hybrid``.
+  - |
+    ``dwave.plugins.torch.utils.GraphIndex`` is the ``torch.nn.Module`` base class of
+    ``GraphRestrictedBoltzmannMachine`` and ``Ising``. It validates the graph and provides the
+    graph attributes ``nodes``, ``edges``, ``node_to_idx``, ``n_nodes`` and ``n_edges``, the
+    buffers ``edge_idx_i``, ``edge_idx_j`` and ``adjacency``, and the conversions ``edge_biases``
+    and ``dense_quadratic`` between per-edge and dense quadratic biases.
   - |
     The ``Ising`` layer takes dense ``(B, n_nodes, n_nodes)`` quadratic biases and returns dense
     gradients (nonzero only at edges); ``edge_biases`` and ``dense_quadratic`` convert between
-    per-edge and dense biases.
+    per-edge and dense biases. ``SpinStatistic`` is a ``torch.nn.Module``, so the statistic of a
+    layer moves to the device of the layer.
   - |
     ``dwave.plugins.torch.nn`` exports the kernels, losses and Ising modules;
     ``dwave.plugins.torch.samplers`` exports ``BipartiteGibbsSampler``.
@@ -56,8 +64,7 @@ upgrade:
     public names, so the keys of ``state_dict()`` are ``linear``, ``quadratic``, ``adjacency``,
     ``edge_idx_i``, ``edge_idx_j``, ``visible_idx`` and ``hidden_idx`` instead of
     underscore-prefixed names; checkpoints saved with earlier versions cannot be loaded.
-    ``nodes``, ``edges``, ``hidden_nodes`` and ``visible_nodes`` are tuples and ``node_to_idx``
-    is a read-only mapping.
+    ``nodes``, ``edges``, ``hidden_nodes`` and ``visible_nodes`` are tuples.
   - |
     ``quasi_objective(s_data, s_model)`` no longer takes ``kind``, ``sampler``, ``prefactor``,
     ``linear_range``, ``quadratic_range`` or ``sample_kwargs``: data of a model with hidden units
@@ -66,17 +73,27 @@ upgrade:
     ``DimodSampler``. The objective is a 0-d tensor.
   - |
     Samplers take the model as their first argument (``model``), hold it as a submodule and are
-    moved in place by ``to()``. ``BlockSampler`` exposes ``state``, ``partition``, ``schedule`` and
-    ``seed`` instead of parameters; conditional ``sample(x)`` returns ``(..., num_samples, n_nodes)``
-    and requires ``x`` to have shape ``(..., n_nodes)`` (the batch size no longer has to equal the
-    number of chains). ``BipartiteGibbsSampler`` rejects hidden-hidden as well as visible-visible
-    edges. Unseeded samplers draw from the global PyTorch generator.
+    moved in place by ``to()``. Their configuration is exposed as plain attributes:
+    ``BlockSampler.schedule``, ``BlockSampler.proposal_acceptance_criteria``,
+    ``DimodSampler.sampler``, ``DimodSampler.prefactor``, ``DimodSampler.linear_range``,
+    ``DimodSampler.quadratic_range`` and ``DimodSampler.sample_kwargs``. ``BlockSampler`` exposes
+    ``state`` (the buffer holding the persistent chains, a key of ``state_dict()``),
+    ``partition`` and ``seed`` instead of parameters; conditional ``sample(x)`` returns
+    ``(..., num_samples, n_nodes)`` and requires ``x`` to have shape ``(..., n_nodes)`` (the batch
+    size no longer has to equal the number of chains). ``BipartiteGibbsSampler`` rejects
+    hidden-hidden as well as visible-visible edges. Unseeded samplers draw from the global PyTorch
+    generator. ``DimodSampler.sample_set`` is the sample set as returned by the wrapped sampler.
   - |
-    ``Ising.forward`` and ``Ising.estimate_betas`` take dense quadratic biases; ``node_idx_of_edges_1``/
-    ``node_idx_of_edges_2`` are renamed ``edge_idx_i``/``edge_idx_j`` and ``beta`` is a buffer.
+    ``Ising.forward`` and ``Ising.estimate_betas`` take dense quadratic biases and both sample
+    through ``sampler.sample``. ``node_idx_of_edges_1``/``node_idx_of_edges_2`` are renamed
+    ``edge_idx_i``/``edge_idx_j``, ``num_nodes``/``num_edges`` are renamed ``n_nodes``/``n_edges``,
+    ``nodes`` and ``edges`` are tuples, ``beta`` is a buffer that is set with ``set_beta``, and
+    ``sampler`` and ``sample_params`` are plain attributes (``set_sampler`` and
+    ``set_sample_params`` are removed). ``IdentityStatistic`` takes ``dim_out`` and
+    ``IsingStatistic`` stores its indices as buffers.
   - |
-    ``dwave-hybrid`` and ``einops`` are no longer dependencies. Package discovery is restricted to the
-    ``dwave`` namespace.
+    ``dwave-hybrid`` and ``einops`` are no longer dependencies, and ``dwave-graphs`` is required only
+    by the tests and examples. Package discovery is restricted to the ``dwave`` namespace.
 fixes:
   - |
     Effective fields of hidden units were wrong whenever a hidden node was the first endpoint of
@@ -90,6 +107,10 @@ fixes:
     ``pseudo_kl_divergence_loss`` averaged the encoder entropy over spins instead of summing it,
     under-weighting the entropy by the number of spins.
   - |
+    The ``Ising`` layer ignored ``num_occurrences`` of aggregated sample sets, which a QPU returns
+    by default, so repeated reads counted once in its outputs and gradients, and it failed when
+    the numbers of distinct samples differed between batch elements.
+  - |
     ``TorchSampler.to()`` no longer leaves the original sampler half-moved; ``GaussianKernel`` no
-    longer produces zero bandwidths for integer ``factor``; ``tests/test_samplers`` is now collected
-    by test discovery.
+    longer produces zero bandwidths for integer ``factor``; ``store_config`` no longer raises for
+    array-valued arguments; ``tests/test_samplers`` is now collected by test discovery.

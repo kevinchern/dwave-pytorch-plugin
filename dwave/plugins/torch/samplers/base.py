@@ -98,8 +98,11 @@ class TorchSampler(torch.nn.Module, abc.ABC):
         samples[..., model.visible_idx] = x.unsqueeze(-2).to(samples)
         return samples
 
-    def _validate_conditional_input(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Validate partially observed spins and move them to the model's device and dtype.
+    def _validate_conditional_input(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Size]:
+        """Validate partially observed spins, move them to the model's device and dtype, and
+        flatten their batch dimensions.
 
         Args:
             x (torch.Tensor): Tensor of shape ``(..., n_nodes)`` with ``±1`` (observed) and
@@ -110,8 +113,10 @@ class TorchSampler(torch.nn.Module, abc.ABC):
                 ``±1`` and ``torch.nan``.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: The validated spins and a boolean mask of the same
-            shape that is ``True`` where spins are observed (clamped).
+            tuple[torch.Tensor, torch.Tensor, torch.Size]: The validated spins flattened to shape
+            ``(batch, n_nodes)``, a boolean mask of the same shape that is ``True`` where spins
+            are observed (clamped), and the batch shape ``(...)`` of ``x`` with which to restore
+            the leading dimensions of the result.
         """
         n_nodes = self.model.n_nodes
         x = torch.as_tensor(x)
@@ -119,8 +124,10 @@ class TorchSampler(torch.nn.Module, abc.ABC):
             raise ValueError(
                 f"x must have shape (..., {n_nodes}), got {tuple(x.shape)}."
             )
+        batch_shape = x.shape[:-1]
         x = x.to(device=self.model.linear.device, dtype=self.model.linear.dtype)
+        x = x.reshape(-1, n_nodes)
         clamp_mask = ~torch.isnan(x)
         if not torch.all(x[clamp_mask].abs() == 1):
             raise ValueError("x must contain only ±1 or NaN values.")
-        return x, clamp_mask
+        return x, clamp_mask, batch_shape

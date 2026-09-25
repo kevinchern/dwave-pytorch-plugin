@@ -21,7 +21,7 @@ import torch
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
 from dwave.plugins.torch.samplers.base import TorchSampler
-from dwave.plugins.torch.utils import sampleset_to_tensor, spread, to_ising
+from dwave.plugins.torch.utils import _scale_and_clip, sampleset_to_tensor, to_ising
 
 __all__ = ["DimodSampler"]
 
@@ -52,6 +52,13 @@ class DimodSampler(TorchSampler):
             ``quadratic_range`` prior to sampling. This clipping occurs after the ``prefactor``
             scaling has been applied. When None, no clipping is applied. Defaults to None.
         sample_kwargs (dict[str, Any], optional): Keyword arguments for the dimod sampler.
+
+    Attributes:
+        sampler (dimod.Sampler): The wrapped dimod sampler.
+        prefactor (float): The scaling applied to the Hamiltonian prior to sampling.
+        linear_range (tuple[float, float] | None): The range linear biases are clipped to.
+        quadratic_range (tuple[float, float] | None): The range quadratic biases are clipped to.
+        sample_kwargs (dict[str, Any]): Keyword arguments passed to the dimod sampler.
     """
 
     def __init__(
@@ -64,37 +71,12 @@ class DimodSampler(TorchSampler):
         sample_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__(model)
-        self._sampler = sampler
-        self._prefactor = float(prefactor)
-        self._linear_range = None if linear_range is None else tuple(linear_range)
-        self._quadratic_range = None if quadratic_range is None else tuple(quadratic_range)
-        self._sample_kwargs = dict(sample_kwargs or {})
+        self.sampler = sampler
+        self.prefactor = float(prefactor)
+        self.linear_range = None if linear_range is None else tuple(linear_range)
+        self.quadratic_range = None if quadratic_range is None else tuple(quadratic_range)
+        self.sample_kwargs = dict(sample_kwargs or {})
         self._sample_set: Optional[dimod.SampleSet] = None
-
-    @property
-    def sampler(self) -> dimod.Sampler:
-        """The wrapped dimod sampler."""
-        return self._sampler
-
-    @property
-    def prefactor(self) -> float:
-        """The scaling applied to the Hamiltonian prior to sampling."""
-        return self._prefactor
-
-    @property
-    def linear_range(self) -> Optional[tuple[float, float]]:
-        """The range linear biases are clipped to, or ``None``."""
-        return self._linear_range
-
-    @property
-    def quadratic_range(self) -> Optional[tuple[float, float]]:
-        """The range quadratic biases are clipped to, or ``None``."""
-        return self._quadratic_range
-
-    @property
-    def sample_kwargs(self) -> dict[str, Any]:
-        """Keyword arguments passed to the dimod sampler."""
-        return dict(self._sample_kwargs)
 
     @property
     def sample_set(self) -> dimod.SampleSet:
@@ -120,7 +102,7 @@ class DimodSampler(TorchSampler):
         model = self.model
         return to_ising(
             model.nodes, model.edges, model.linear, model.edge_biases(),
-            self._prefactor, self._linear_range, self._quadratic_range,
+            self.prefactor, self.linear_range, self.quadratic_range,
         )
 
     def sample(self, x: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -142,24 +124,20 @@ class DimodSampler(TorchSampler):
         """
         model = self.model
         device = model.linear.device
-        h, J = self.to_ising()
 
         if x is None:
-            self._sample_set = spread(self._sampler.sample_ising(h, J, **self._sample_kwargs))
+            h, J = self.to_ising()
+            self._sample_set = self.sampler.sample_ising(h, J, **self.sample_kwargs)
             return sampleset_to_tensor(model.nodes, self._sample_set, device)
 
-        x, clamp_mask = self._validate_conditional_input(x)
-        batch_shape = x.shape[:-1]
+        x, clamp_mask, batch_shape = self._validate_conditional_input(x)
         n_nodes = model.n_nodes
-        x = x.reshape(-1, n_nodes)
-        clamp_mask = clamp_mask.reshape(-1, n_nodes)
 
         # Linear biases of the free variables conditioned on the observed spins, for all rows at
         # once (observed entries only contribute; NaN entries contribute nothing).
         with torch.no_grad():
-            fields = self._prefactor * model.effective_field(x)
-        if self._linear_range is not None:
-            fields = fields.clip(*self._linear_range)
+            fields = _scale_and_clip(model.effective_field(x), self.prefactor, self.linear_range)
+        _, J = self.to_ising()
 
         x_cpu, fields_cpu, free_cpu = x.cpu(), fields.cpu(), (~clamp_mask).cpu()
         nodes = model.nodes
@@ -177,13 +155,13 @@ class DimodSampler(TorchSampler):
             free_idx, free_nodes, J_free = reduced_models[key]
 
             if not free_nodes:
-                num_reads = int(self._sample_kwargs.get("num_reads", 1))
+                num_reads = int(self.sample_kwargs.get("num_reads", 1))
                 results.append(x_cpu[row].expand(num_reads, n_nodes).clone())
                 continue
 
             h_free = dict(zip(free_nodes, fields_cpu[row, free_idx].tolist()))
             bqm = dimod.BinaryQuadraticModel.from_ising(h_free, J_free)
-            self._sample_set = spread(self._sampler.sample(bqm, **self._sample_kwargs))
+            self._sample_set = self.sampler.sample(bqm, **self.sample_kwargs)
             free_samples = sampleset_to_tensor(free_nodes, self._sample_set)
             full = x_cpu[row].expand(free_samples.shape[0], n_nodes).clone()
             full[:, free_idx] = free_samples.to(full.dtype)

@@ -26,9 +26,10 @@ class ConstantSampler(TorchSampler):
     def sample(self, x=None, num_samples=1):
         if x is None:
             return torch.ones(num_samples, self.model.n_nodes)
-        x, clamp_mask = self._validate_conditional_input(x)
+        x, clamp_mask, batch_shape = self._validate_conditional_input(x)
         completed = torch.where(clamp_mask, x, torch.ones_like(x))
-        return completed.unsqueeze(-2).repeat_interleave(num_samples, -2)
+        completed = completed.unsqueeze(-2).repeat_interleave(num_samples, -2)
+        return completed.reshape(*batch_shape, num_samples, -1)
 
 
 class TestTorchSampler(unittest.TestCase):
@@ -100,13 +101,17 @@ class TestTorchSampler(unittest.TestCase):
 
         with self.subTest("Valid input"):
             x = torch.tensor([[1.0, float("nan"), -1.0], [float("nan"), float("nan"), 1.0]])
-            out, clamp_mask = sampler._validate_conditional_input(x)
+            out, clamp_mask, batch_shape = sampler._validate_conditional_input(x)
             torch.testing.assert_close(out, x, equal_nan=True)
             self.assertListEqual(clamp_mask.tolist(), [[True, False, True], [False, False, True]])
+            self.assertEqual((2,), tuple(batch_shape))
 
-        with self.subTest("Batch dimensions and integer inputs are accepted"):
-            out, clamp_mask = sampler._validate_conditional_input(torch.ones(2, 5, 3, dtype=torch.int64))
-            self.assertEqual((2, 5, 3), tuple(out.shape))
+        with self.subTest("Batch dimensions are flattened and integer inputs are accepted"):
+            out, clamp_mask, batch_shape = sampler._validate_conditional_input(
+                torch.ones(2, 5, 3, dtype=torch.int64)
+            )
+            self.assertEqual((10, 3), tuple(out.shape))
+            self.assertEqual((2, 5), tuple(batch_shape))
             self.assertEqual(self.model.linear.dtype, out.dtype)
             self.assertTrue(clamp_mask.all())
 

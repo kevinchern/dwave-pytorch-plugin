@@ -18,6 +18,7 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 
+from dwave.plugins.torch.nn.functional import _validate_sample_pair
 from dwave.plugins.torch.nn.modules.utils import store_config
 
 __all__ = ["Kernel", "GaussianKernel"]
@@ -66,16 +67,7 @@ class Kernel(ABC, nn.Module):
         Returns:
             torch.Tensor: A (n_x + n_y, n_x + n_y) tensor.
         """
-        if x.shape[1:] != y.shape[1:]:
-            raise ValueError(
-                "Input dimensions must match. You are trying to compute "
-                f"the kernel between tensors of shape {x.shape} and {y.shape}."
-            )
-        if x.shape[0] < 2 or y.shape[0] < 2:
-            raise ValueError(
-                "Sample size of ``x`` and ``y`` must be at least two. "
-                f"Got, respectively, {x.shape} and {y.shape}."
-            )
+        _validate_sample_pair(x, y)
         return self._kernel(x, y)
 
 

@@ -19,7 +19,7 @@ from parameterized import parameterized
 from dwave.plugins.torch.nn.functional import bit2spin_soft
 from dwave.plugins.torch.nn.functional import maximum_mean_discrepancy_loss as mmd_loss
 from dwave.plugins.torch.nn.functional import spin2bit_soft
-from dwave.plugins.torch.nn.modules.kernels import Kernel
+from tests.helper_functions import ConstantKernel
 
 
 class TestMaximumMeanDiscrepancyLoss(unittest.TestCase):
@@ -27,18 +27,8 @@ class TestMaximumMeanDiscrepancyLoss(unittest.TestCase):
         x = torch.tensor([[1.2], [4.1]])
         y = torch.tensor([[0.3], [0.5]])
 
-        class Constant(Kernel):
-            def __init__(self):
-                super().__init__()
-                self.k = torch.tensor([[10, 4, 0, 1],
-                                       [4, 10, 4, 2],
-                                       [0, 4, 10, 3],
-                                       [1, 2, 3, 10]]).float()
-
-            def _kernel(self, x, y):
-                return self.k
         # The resulting kernel matrix will be constant, so (averages) KXX = KYY = 2KXY
-        kernel = Constant()
+        kernel = ConstantKernel()
         # kxx = (4 + 4)/2
         # kyy = (3 + 3)/2
         # kxy = (0 + 1 + 4 + 2)/4
@@ -62,22 +52,18 @@ class TestMaximumMeanDiscrepancyLoss(unittest.TestCase):
         x = torch.tensor([[1.0], [4.0], [5.0]])
         y = torch.tensor([[0.3], [0.4]])
 
-        class Constant(Kernel):
-            def _kernel(self, x, y):
-                return torch.tensor([[150, 22, 39, 34, 28],
-                                     [22, 630, 98, 56, 44],
-                                     [39, 98, 560, 78, 33],
-                                     [-99, -99, -99, 299, 13],
-                                     [-99, -99, -99, 13, 970]], dtype=torch.float32)
-
-        mmd_loss(x, y, Constant())
+        kernel = ConstantKernel([[150, 22, 39, 34, 28],
+                                 [22, 630, 98, 56, 44],
+                                 [39, 98, 560, 78, 33],
+                                 [-99, -99, -99, 299, 13],
+                                 [-99, -99, -99, 13, 970]])
         # NOTE: calculation takes kxy = upper-right corner; no PSD assumption
         # kxx = (22+39+98)/3
         # kyy = 13
         # kxy = (34+28+56+44+78+33)/6
         # kxx + kyy - 2*kxy
         # kxx + kyy - 2*kxy = -25.0
-        self.assertEqual(-25, mmd_loss(x, y, Constant()))
+        self.assertEqual(-25, mmd_loss(x, y, kernel))
 
 
 class TestFunctional(unittest.TestCase):

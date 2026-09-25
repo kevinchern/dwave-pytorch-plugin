@@ -13,22 +13,19 @@
 # limitations under the License.
 #
 from __future__ import annotations
+
 import inspect
-from typing import TYPE_CHECKING, Callable
-
-if TYPE_CHECKING:
-    from functools import partial
-
 from functools import wraps
 from types import MappingProxyType
+from typing import Callable
 
 __all__ = ["store_config"]
 
 
-def store_config(fn: Callable) -> partial:
+def store_config(fn: Callable) -> Callable:
     """A decorator that tracks and stores arguments of methods (excluding ``self``).
 
-    .. note:: 
+    .. note::
         If an argument of the function also has a config attribute, then the argument's entry in
         the dictionary will be replaced by the argument's config. For example, an argument ``foo`` has
         a ``config`` attribute, i.e., ``foo.config`` exists, then ``self.config`` will contain the entry
@@ -39,7 +36,7 @@ def store_config(fn: Callable) -> partial:
         fn (Callable[object, ...]): A method whose arguments will be stored in ``self.config``.
 
     Returns:
-        partial: Wrapper function that stores argument of method.
+        Callable: Wrapper function that stores argument of method.
     """
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
@@ -49,11 +46,10 @@ def store_config(fn: Callable) -> partial:
         bound = sig.bind(self, *args, **kwargs)
         bound.apply_defaults()
 
-        config = {k: v for k, v in bound.arguments.items() if v != self}
-        config['module_name'] = self.__class__.__name__
-        for k, v in config.items():
-            if hasattr(v, "config"):
-                config[k] = v.config
+        arguments = iter(bound.arguments.items())
+        next(arguments)  # the first argument is the module itself
+        config = {name: getattr(value, "config", value) for name, value in arguments}
+        config["module_name"] = self.__class__.__name__
         self.config = MappingProxyType(config)
 
         return fn(self, *args, **kwargs)

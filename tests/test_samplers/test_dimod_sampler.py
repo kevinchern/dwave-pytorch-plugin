@@ -20,14 +20,7 @@ from dimod import SPIN, ExactSolver, IdentitySampler, SampleSet, TrackingComposi
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.dimod_sampler import DimodSampler
 from dwave.samplers import SimulatedAnnealingSampler, SteepestDescentSampler
-
-
-def set_weights(bm: GRBM, linear, quadratic) -> None:
-    with torch.no_grad():
-        bm.linear.copy_(torch.as_tensor(linear, dtype=bm.linear.dtype))
-        bm.quadratic[bm.edge_idx_i, bm.edge_idx_j] = torch.as_tensor(
-            quadratic, dtype=bm.quadratic.dtype
-        )
+from tests.helper_functions import set_weights
 
 
 class TestDimodSampler(unittest.TestCase):
@@ -134,7 +127,7 @@ class TestDimodSampler(unittest.TestCase):
                 torch.tensor([0, 0, 0, 0.0])
             )
 
-    def test_aggregated_samples_are_spread(self):
+    def test_aggregated_samples_are_expanded(self):
         class AggregatingSampler:
             def sample_ising(self, h, J, **kwargs):
                 return SampleSet.from_samples(
@@ -152,7 +145,8 @@ class TestDimodSampler(unittest.TestCase):
         spins = sampler.sample()
         self.assertEqual((4, 4), tuple(spins.shape))
         self.assertEqual(3, int((spins[:, 0] == 1).sum()))
-        self.assertTrue((sampler.sample_set.record.num_occurrences == 1).all())
+        with self.subTest("The sample set is kept as returned by the sampler"):
+            self.assertListEqual([3, 1], sampler.sample_set.record.num_occurrences.tolist())
 
         conditional = sampler.sample(torch.tensor([[1.0, float("nan"), -1.0, float("nan")]]))
         self.assertEqual((1, 4, 4), tuple(conditional.shape))

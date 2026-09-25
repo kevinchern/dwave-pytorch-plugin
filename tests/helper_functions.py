@@ -1,7 +1,72 @@
+# Copyright 2025 D-Wave
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from inspect import signature
+from typing import Optional
 
 import torch
+from dimod import BinaryQuadraticModel
 
+from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
+from dwave.plugins.torch.nn.modules.kernels import Kernel
+from dwave.plugins.torch.tensor import randspin
+from dwave.plugins.torch.utils import to_bqm
+
+
+# ---------------------------------------------------------------- Boltzmann machines ------------
+
+def set_weights(bm: GRBM, linear, quadratic) -> None:
+    """Set the linear biases and the per-edge quadratic biases (in edge order) of a model."""
+    with torch.no_grad():
+        bm.linear.copy_(torch.as_tensor(linear, dtype=bm.linear.dtype))
+        bm.quadratic[bm.edge_idx_i, bm.edge_idx_j] = torch.as_tensor(
+            quadratic, dtype=bm.quadratic.dtype
+        )
+
+
+def model_to_bqm(bm: GRBM) -> BinaryQuadraticModel:
+    """The model as a dimod binary quadratic model."""
+    return to_bqm(bm.nodes, bm.edges, bm.linear, bm.edge_biases())
+
+
+def randspins(*shape, seed: int = 0) -> torch.Tensor:
+    """Random spins of the given shape, drawn from a generator seeded with ``seed``."""
+    return randspin(shape, generator=torch.Generator().manual_seed(seed)).float()
+
+
+# ---------------------------------------------------------------- kernels -----------------------
+
+class ConstantKernel(Kernel):
+    """A kernel whose matrix is a fixed constant irrespective of its inputs.
+
+    Args:
+        matrix: The kernel matrix. Defaults to a 4-by-4 matrix.
+    """
+
+    def __init__(self, matrix: Optional[list[list[float]]] = None) -> None:
+        super().__init__()
+        if matrix is None:
+            matrix = [[10, 4, 0, 1],
+                      [4, 10, 4, 2],
+                      [0, 4, 10, 3],
+                      [1, 2, 3, 10]]
+        self.matrix = torch.as_tensor(matrix, dtype=torch.float32)
+
+    def _kernel(self, x, y):
+        return self.matrix
+
+
+# ---------------------------------------------------------------- neural network modules --------
 
 def model_probably_good(
         model: torch.nn.Module, shape_in: tuple[int, ...], shape_out: tuple[int, ...]

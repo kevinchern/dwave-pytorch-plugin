@@ -24,6 +24,30 @@ import torch
 __all__ = ["maximum_mean_discrepancy_loss", "bit2spin_soft", "spin2bit_soft"]
 
 
+def _validate_sample_pair(x: torch.Tensor, y: torch.Tensor) -> None:
+    """Checks that ``x`` and ``y`` are two samples of at least two items each with equal feature
+    shapes, as required by kernels and the maximum mean discrepancy.
+
+    Args:
+        x (torch.Tensor): A (n_x, f1, f2, ..., fk) tensor.
+        y (torch.Tensor): A (n_y, f1, f2, ..., fk) tensor.
+
+    Raises:
+        ValueError: If shape of ``x`` and ``y`` mismatch (excluding batch size).
+        ValueError: If the sample size of ``x`` or ``y`` is less than two.
+    """
+    if x.shape[1:] != y.shape[1:]:
+        raise ValueError(
+            "Input dimensions must match. You are trying to compute "
+            f"the kernel between tensors of shape {x.shape} and {y.shape}."
+        )
+    if x.shape[0] < 2 or y.shape[0] < 2:
+        raise ValueError(
+            "Sample size of ``x`` and ``y`` must be at least two. "
+            f"Got, respectively, {x.shape} and {y.shape}."
+        )
+
+
 def maximum_mean_discrepancy_loss(x: torch.Tensor, y: torch.Tensor, kernel: Kernel) -> torch.Tensor:
     r"""Estimates the squared maximum mean discrepancy (MMD) given two samples ``x`` and ``y``.
 
@@ -59,18 +83,9 @@ def maximum_mean_discrepancy_loss(x: torch.Tensor, y: torch.Tensor, kernel: Kern
     Returns:
         torch.Tensor: The squared maximum mean discrepancy estimate.
     """
+    _validate_sample_pair(x, y)
     num_x = x.shape[0]
     num_y = y.shape[0]
-    if num_x < 2 or num_y < 2:
-        raise ValueError(
-            "Sample size of ``x`` and ``y`` must be at least two. "
-            f"Got, respectively, {x.shape} and {y.shape}."
-        )
-    if x.shape[1:] != y.shape[1:]:
-        raise ValueError(
-            "Input dimensions must match. You are trying to compute "
-            f"the kernel between tensors of shape {x.shape} and {y.shape}."
-        )
     xy = torch.cat([x, y], dim=0)
     kernel_matrix = kernel(xy, xy)
     kernel_xx = kernel_matrix[:num_x, :num_x]

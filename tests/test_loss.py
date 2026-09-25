@@ -17,8 +17,8 @@ import torch
 from parameterized import parameterized
 
 from dwave.plugins.torch.nn.functional import maximum_mean_discrepancy_loss as mmd_loss
-from dwave.plugins.torch.nn.modules.kernels import Kernel
 from dwave.plugins.torch.nn.modules.loss import MaximumMeanDiscrepancyLoss as MMDLoss
+from tests.helper_functions import ConstantKernel
 
 
 class TestMaximumMeanDiscrepancyLoss(unittest.TestCase):
@@ -27,18 +27,8 @@ class TestMaximumMeanDiscrepancyLoss(unittest.TestCase):
         (torch.randn((123, 4, 3, 2)), torch.rand(100, 4, 3, 2)),
     ])
     def test_mmd_loss(self, x, y):
-        class Constant(Kernel):
-            def __init__(self):
-                super().__init__()
-                self.k = torch.tensor([[10, 4, 0, 1],
-                                       [4, 10, 4, 2],
-                                       [0, 4, 10, 3],
-                                       [1, 2, 3, 10]]).float()
-
-            def _kernel(self, x, y):
-                return self.k
         # The resulting kernel matrix will be constant, so (averages) KXX = KYY = 2KXY
-        kernel = Constant()
+        kernel = ConstantKernel()
         compute_mmd = MMDLoss(kernel)
         torch.testing.assert_close(mmd_loss(x, y, kernel), compute_mmd(x, y))
 

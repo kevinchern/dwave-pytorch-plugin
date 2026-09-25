@@ -14,65 +14,59 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Hashable, Iterable, Optional, Sequence
+from typing import Hashable, Iterable, Optional, Sequence
 
 import numpy as np
 import torch
+from dimod import BinaryQuadraticModel, SampleSet
 
-if TYPE_CHECKING:
-    from dimod import SampleSet
-
-__all__ = ["GraphIndex", "sampleset_to_tensor", "spread", "to_ising"]
+__all__ = ["GraphIndex", "sampleset_to_tensor", "to_bqm", "to_ising"]
 
 
-@dataclass(frozen=True)
-class GraphIndex:
+class GraphIndex(torch.nn.Module):
     """Integer indexing of the nodes and edges of a simple graph.
 
     Nodes are indexed by their position in ``nodes``. Every edge is stored in *canonical
     orientation*, i.e. with the smaller node index first, so that a dense ``(n_nodes, n_nodes)``
-    matrix indexed by ``edge_idx_i, edge_idx_j`` is strictly upper triangular.
+    matrix indexed by ``edge_idx_i, edge_idx_j`` is strictly upper triangular. The index tensors
+    are registered as buffers, so they move with :meth:`~torch.nn.Module.to` and are part of
+    :meth:`~torch.nn.Module.state_dict`. Modules defined on a graph, such as
+    :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine` and
+    :class:`~dwave.plugins.torch.nn.Ising`, subclass it.
 
     Args:
-        nodes (list[Hashable]): The nodes.
-        edges (list[tuple[Hashable, Hashable]]): The edges, in the orientation given by the user.
-        node_to_idx (dict[Hashable, int]): Map from node to index.
+        nodes (Iterable[Hashable]): Nodes of the graph.
+        edges (Iterable[tuple[Hashable, Hashable]]): Edges of the graph.
+
+    Raises:
+        ValueError: If ``nodes`` contains duplicates, an edge references an unknown node, an
+            edge is a self-loop, or an edge is duplicated (in either orientation).
+
+    Attributes:
+        nodes (tuple[Hashable, ...]): The nodes, in index order.
+        edges (tuple[tuple[Hashable, Hashable], ...]): The edges, in the orientation given.
+        node_to_idx (dict[Hashable, int]): Mapping from node to index. It is derived from
+            ``nodes`` and should not be modified.
         edge_idx_i (torch.Tensor): Smaller node index of each edge, shape ``(n_edges,)``.
         edge_idx_j (torch.Tensor): Larger node index of each edge, shape ``(n_edges,)``.
+        adjacency (torch.Tensor): Strictly upper-triangular boolean tensor of shape
+            ``(n_nodes, n_nodes)`` that is ``True`` at ``[edge_idx_i[k], edge_idx_j[k]]`` for
+            every edge ``k``.
     """
 
-    nodes: list
-    edges: list
-    node_to_idx: dict
-    edge_idx_i: torch.Tensor
-    edge_idx_j: torch.Tensor
-
-    @classmethod
-    def from_graph(
-        cls, nodes: Iterable[Hashable], edges: Iterable[tuple[Hashable, Hashable]]
-    ) -> GraphIndex:
-        """Index a graph given as node and edge lists.
-
-        Args:
-            nodes (Iterable[Hashable]): Nodes of the graph.
-            edges (Iterable[tuple[Hashable, Hashable]]): Edges of the graph.
-
-        Raises:
-            ValueError: If ``nodes`` contains duplicates, an edge references an unknown node, an
-                edge is a self-loop, or an edge is duplicated (in either orientation).
-
-        Returns:
-            GraphIndex: The indexed graph.
-        """
-        nodes = list(nodes)
-        edges = [tuple(edge) for edge in edges]
-        node_to_idx = {node: idx for idx, node in enumerate(nodes)}
-        if len(node_to_idx) != len(nodes):
+    def __init__(
+        self, nodes: Iterable[Hashable], edges: Iterable[tuple[Hashable, Hashable]]
+    ) -> None:
+        super().__init__()
+        self.nodes = tuple(nodes)
+        self.edges = tuple(tuple(edge) for edge in edges)
+        self.node_to_idx = {node: idx for idx, node in enumerate(self.nodes)}
+        if len(self.node_to_idx) != self.n_nodes:
             raise ValueError("`nodes` contains duplicate entries.")
         try:
             endpoints = torch.tensor(
-                [[node_to_idx[u], node_to_idx[v]] for u, v in edges], dtype=torch.long
+                [[self.node_to_idx[u], self.node_to_idx[v]] for u, v in self.edges],
+                dtype=torch.long,
             ).reshape(-1, 2)
         except KeyError as err:
             raise ValueError(f"Edge endpoint {err.args[0]!r} is not a node.") from None
@@ -81,13 +75,21 @@ class GraphIndex:
         if loops.any():
             raise ValueError(
                 f"Self-loops are not allowed. Edges with self-loops: "
-                f"{[edges[k] for k in loops.nonzero().flatten().tolist()]}"
+                f"{[self.edges[k] for k in loops.nonzero().flatten().tolist()]}"
             )
         edge_idx_i = endpoints.min(1).values
         edge_idx_j = endpoints.max(1).values
-        if torch.unique(edge_idx_i * len(nodes) + edge_idx_j).numel() != len(edges):
+        if torch.unique(edge_idx_i * self.n_nodes + edge_idx_j).numel() != self.n_edges:
             raise ValueError("Duplicate edges are not allowed.")
-        return cls(nodes, edges, node_to_idx, edge_idx_i, edge_idx_j)
+        adjacency = torch.zeros(self.n_nodes, self.n_nodes, dtype=torch.bool)
+        adjacency[edge_idx_i, edge_idx_j] = True
+
+        self.register_buffer("edge_idx_i", edge_idx_i)
+        self.register_buffer("edge_idx_j", edge_idx_j)
+        self.register_buffer("adjacency", adjacency)
+
+    def extra_repr(self) -> str:
+        return f"n_nodes={self.n_nodes}, n_edges={self.n_edges}"
 
     @property
     def n_nodes(self) -> int:
@@ -99,40 +101,80 @@ class GraphIndex:
         """Number of edges."""
         return len(self.edges)
 
-    def adjacency(self) -> torch.Tensor:
-        """Strictly upper-triangular boolean adjacency matrix of shape ``(n_nodes, n_nodes)``,
-        ``True`` at ``[edge_idx_i[k], edge_idx_j[k]]`` for every edge ``k``."""
-        adjacency = torch.zeros(self.n_nodes, self.n_nodes, dtype=torch.bool)
-        adjacency[self.edge_idx_i, self.edge_idx_j] = True
-        return adjacency
-
     def degrees(self) -> torch.Tensor:
         """Degree of every node, shape ``(n_nodes,)``."""
         return torch.bincount(
             torch.cat([self.edge_idx_i, self.edge_idx_j]), minlength=self.n_nodes
         )
 
+    def edge_biases(self, quadratic: torch.Tensor) -> torch.Tensor:
+        """Extract the per-edge biases from dense quadratic biases.
+
+        Args:
+            quadratic (torch.Tensor): Dense quadratic biases of shape ``(..., n_nodes, n_nodes)``
+                in canonical orientation.
+
+        Returns:
+            torch.Tensor: Per-edge biases of shape ``(..., n_edges)`` in the order of
+            :attr:`edges`.
+        """
+        return quadratic[..., self.edge_idx_i, self.edge_idx_j]
+
+    def dense_quadratic(self, edge_biases: torch.Tensor) -> torch.Tensor:
+        """Build dense quadratic biases from per-edge biases.
+
+        Args:
+            edge_biases (torch.Tensor): Per-edge biases of shape ``(..., n_edges)`` in the order
+                of :attr:`edges`.
+
+        Raises:
+            ValueError: If the trailing dimension of ``edge_biases`` is not the number of edges.
+
+        Returns:
+            torch.Tensor: Dense quadratic biases of shape ``(..., n_nodes, n_nodes)`` with
+            ``edge_biases`` at the canonical edge positions and zeros elsewhere.
+        """
+        if edge_biases.shape[-1] != self.n_edges:
+            raise ValueError(
+                f"Expected {self.n_edges} edge biases, got {edge_biases.shape[-1]}."
+            )
+        quadratic = edge_biases.new_zeros(*edge_biases.shape[:-1], self.n_nodes, self.n_nodes)
+        quadratic[..., self.edge_idx_i, self.edge_idx_j] = edge_biases
+        return quadratic
+
 
 def sampleset_to_tensor(
-    ordered_vars: list, sample_set: SampleSet, device: Optional[torch.device] = None
+    ordered_vars: Sequence[Hashable], sample_set: SampleSet, device: Optional[torch.device] = None
 ) -> torch.Tensor:
-    """Converts a ``dimod.SampleSet`` to a ``torch.Tensor``.
+    """Converts a ``dimod.SampleSet`` to a ``torch.Tensor`` with one row per read.
+
+    Aggregated samples, i.e. those with ``num_occurrences > 1``, are repeated accordingly, so
+    that every row of the result has equal weight and statistics of the rows are statistics of
+    the reads.
 
     Args:
-        ordered_vars: list[Literal]: The desired order of sample set variables.
+        ordered_vars (Sequence[Hashable]): The desired order of the columns.
         sample_set (dimod.SampleSet): A sample set.
-        device (torch.device, optional): The device of the constructed tensor.
-            If ``None`` and data is a tensor then the device of data is used.
-            If ``None`` and data is not a tensor then the result tensor is constructed
-            on the current device.
+        device (torch.device, optional): The device of the constructed tensor. If ``None``, the
+            tensor is constructed on the current device.
 
     Returns:
-        torch.Tensor: The sample set as a ``torch.Tensor``.
+        torch.Tensor: The samples as a ``(num_reads, len(ordered_vars))`` tensor of
+        ``torch.float32``.
     """
     var_to_sample_i = {v: i for i, v in enumerate(sample_set.variables)}
     permutation = [var_to_sample_i[v] for v in ordered_vars]
-    sample = sample_set.record.sample[:, permutation]
+    record = sample_set.record
+    sample = np.repeat(record.sample[:, permutation], record.num_occurrences, axis=0)
     return torch.tensor(sample, dtype=torch.float32, device=device)
+
+
+def _scale_and_clip(
+    biases: torch.Tensor, prefactor: float, bounds: Optional[tuple[float, float]]
+) -> torch.Tensor:
+    """Scales ``biases`` by ``prefactor`` and then clips them to ``bounds``, if given."""
+    biases = prefactor * biases
+    return biases if bounds is None else biases.clip(*bounds)
 
 
 def to_ising(
@@ -181,34 +223,30 @@ def to_ising(
             f"Expected {len(edges)} quadratic biases (one per edge), got shape "
             f"{tuple(quadratic.shape)}."
         )
-    linear = prefactor * linear
-    quadratic = prefactor * quadratic
-    if linear_range is not None:
-        linear = linear.clip(*linear_range)
-    if quadratic_range is not None:
-        quadratic = quadratic.clip(*quadratic_range)
+    linear = _scale_and_clip(linear, prefactor, linear_range)
+    quadratic = _scale_and_clip(quadratic, prefactor, quadratic_range)
     h = dict(zip(nodes, linear.cpu().tolist()))
     J = dict(zip(edges, quadratic.cpu().tolist()))
     return h, J
 
 
-def spread(sample_set: SampleSet) -> SampleSet:
-    """Expands aggregated samples so that every sample occurs exactly once.
+def to_bqm(
+    nodes: Sequence[Hashable],
+    edges: Sequence[tuple[Hashable, Hashable]],
+    linear: torch.Tensor,
+    quadratic: torch.Tensor,
+    prefactor: float = 1.0,
+    linear_range: Optional[tuple[float, float]] = None,
+    quadratic_range: Optional[tuple[float, float]] = None,
+) -> BinaryQuadraticModel:
+    """Converts linear and quadratic biases to a ``dimod.BinaryQuadraticModel``.
 
-    Samples with ``num_occurrences > 1`` are repeated accordingly; all other record fields are
-    copied along. Sample sets whose occurrences are all one are returned unchanged.
-
-    Args:
-        sample_set (dimod.SampleSet): A (possibly aggregated) sample set.
+    The arguments are those of :func:`to_ising`, whose dictionaries are passed on to
+    :meth:`dimod.BinaryQuadraticModel.from_ising`.
 
     Returns:
-        dimod.SampleSet: A sample set with ``num_occurrences`` equal to one for every sample.
+        dimod.BinaryQuadraticModel: The (scaled and clipped) model in the ``SPIN`` vartype.
     """
-    from dimod import SampleSet
-
-    record = sample_set.record
-    if len(record) == 0 or (record.num_occurrences == 1).all():
-        return sample_set
-    expanded = record[np.repeat(np.arange(len(record)), record.num_occurrences)].copy()
-    expanded.num_occurrences = 1
-    return SampleSet(expanded, sample_set.variables, sample_set.info, sample_set.vartype)
+    return BinaryQuadraticModel.from_ising(
+        *to_ising(nodes, edges, linear, quadratic, prefactor, linear_range, quadratic_range)
+    )

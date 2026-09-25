@@ -88,18 +88,18 @@ class TestStatistic(unittest.TestCase):
 class TestIdentityStatistic(unittest.TestCase):
     """Verify IdentityStatistic passes input through unchanged."""
 
-    def test_dim_out_matches_dim_in(self):
-        stat = IdentityStatistic(dim_in=5)
+    def test_dim_out(self):
+        stat = IdentityStatistic(5)
         self.assertEqual(stat.dim_out, 5)
 
     def test_output_equals_input(self):
-        stat = IdentityStatistic(dim_in=4)
+        stat = IdentityStatistic(4)
         x = torch.randn(2, 3, 4)
         result = stat(x)
         torch.testing.assert_close(result, x)
 
     def test_output_shape(self):
-        stat = IdentityStatistic(dim_in=7)
+        stat = IdentityStatistic(7)
         x = torch.randn(5, 10, 7)
         result = stat(x)
         self.assertEqual(result.shape, (5, 10, 7))
@@ -237,15 +237,18 @@ class TestIsing(unittest.TestCase):
             sample_params=dict(a=1),
         )
         self.assertEqual(1.0, ising.beta)
-        self.assertListEqual(["a", "b", "c"], ising.nodes)
-        self.assertListEqual([("a", "b"), ("a", "c"), ("b", "c")], ising.edges)
-        self.assertEqual(3, ising.num_nodes)
-        self.assertEqual(3, ising.num_edges)
+        self.assertTupleEqual(("a", "b", "c"), ising.nodes)
+        self.assertTupleEqual((("a", "b"), ("a", "c"), ("b", "c")), ising.edges)
+        self.assertDictEqual({"a": 0, "b": 1, "c": 2}, ising.node_to_idx)
+        self.assertEqual(3, ising.n_nodes)
+        self.assertEqual(3, ising.n_edges)
         self.assertEqual(NullSampler, ising.sampler.__class__)
         self.assertDictEqual(dict(a=1), ising.sample_params)
         self.assertEqual(3, ising.dim_out)
-        self.assertNotIn("_beta", dict(ising.named_parameters()))
-        self.assertIn("_beta", dict(ising.named_buffers()))
+        self.assertNotIn("beta", dict(ising.named_parameters()))
+        self.assertIn("beta", dict(ising.named_buffers()))
+        self.assertIs(ising.statistic, dict(ising.named_children())["statistic"])
+        self.assertIn("n_nodes=3, n_edges=3", repr(ising))
 
     def test_setters(self):
         ising = Ising(
@@ -261,12 +264,10 @@ class TestIsing(unittest.TestCase):
             ising.set_beta(342.0)
             self.assertEqual(342.0, ising.beta)
 
-        with self.subTest("Set sampling parameters"):
-            ising.set_sample_params(dict(b=2))
+        with self.subTest("Sampling parameters and sampler are plain attributes"):
+            ising.sample_params = dict(b=2)
             self.assertDictEqual(dict(b=2), ising.sample_params)
-
-        with self.subTest("Set sampler"):
-            ising.set_sampler(Neal())
+            ising.sampler = Neal()
             self.assertEqual(Neal, ising.sampler.__class__)
 
     def test_correct_node_indices_of_edges(self):
@@ -409,7 +410,7 @@ class TestIsing(unittest.TestCase):
                     SampleSet.from_samples((s2, list("abc")), "SPIN", [-1, -2, 0])
                 ]
 
-            def sample_ising(self, *args, **kwargs):
+            def sample(self, *args, **kwargs):
                 return self.samples.pop(0)
 
         ising = Ising(
@@ -457,6 +458,23 @@ class TestIsing(unittest.TestCase):
         ising = Ising("abc", [("a", "b")], NullSampler(), {}, 1.0).to("meta")
         ising.set_beta(2.0)
         self.assertEqual("meta", ising.beta.device.type)
+
+    def test_aggregated_sample_sets(self):
+        # A QPU returns aggregated sample sets by default; every read must count once
+        class AggregatingSampler:
+            def sample(self, bqm, **kwargs):
+                return SampleSet.from_samples(([[1, 1], [-1, -1]], list(bqm.variables)), "SPIN",
+                                              [0, 0], num_occurrences=[3, 1])
+
+        ising = Ising("ab", [("a", "b")], AggregatingSampler(), {}, 1.0)
+        y = ising(torch.zeros(1, 2), torch.zeros(1, 2, 2))
+        torch.testing.assert_close(y, torch.full((1, 2), 0.5))
+
+    def test_statistic_moves_with_layer(self):
+        ising = Ising("abc", [("a", "b")], NullSampler(), {}, 1.0,
+                      statistic=IsingStatistic([1], [0], [1])).to("meta")
+        self.assertEqual("meta", ising.statistic.node_indices.device.type)
+        self.assertNotIn("statistic.node_indices", ising.state_dict())
 
 
 if __name__ == "__main__":

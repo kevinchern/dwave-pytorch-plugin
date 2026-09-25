@@ -68,6 +68,14 @@ class BlockSampler(TorchSampler):
         ValueError: If ``num_chains`` is not positive, the acceptance criterion is unknown, the
             schedule is empty, ``colouring`` is not a proper colouring, or ``initial_states`` has
             the wrong shape or non-spin values.
+
+    Attributes:
+        state (torch.Tensor): Buffer holding the current states of the persistent Markov chains,
+            of shape ``(num_chains, n_nodes)``.
+        schedule (tuple[float, ...]): The inverse temperatures of the successive sweeps of one
+            :meth:`sample` call.
+        proposal_acceptance_criteria (str): The proposal acceptance criterion, ``"Gibbs"`` or
+            ``"Metropolis"``.
     """
 
     def __init__(
@@ -89,26 +97,42 @@ class BlockSampler(TorchSampler):
             raise ValueError(
                 'Proposal acceptance criterion should be one of "Gibbs" or "Metropolis".'
             )
-        self._proposal_acceptance_criteria = criterion
-        self._schedule = tuple(float(beta) for beta in schedule)
-        if not self._schedule:
+        self.proposal_acceptance_criteria = criterion
+        self.schedule = tuple(float(beta) for beta in schedule)
+        if not self.schedule:
             raise ValueError("`schedule` should contain at least one inverse temperature.")
         self._seed = None if seed is None else int(seed)
         self._generator: Optional[torch.Generator] = None
 
-        blocks = self._partition_nodes(colouring)
-        self._num_blocks = len(blocks)
-        for k, block in enumerate(blocks):
-            self.register_buffer(f"_block_{k}", block)
+        # The blocks are consecutive slices of the node indices sorted by colour. The indices
+        # are a (non-persistent) buffer so that the blocks live on the device of the model.
+        block_idx, self._block_ptr = self._partition_nodes(colouring)
+        self.register_buffer("_block_idx", block_idx, persistent=False)
 
         initial_states = self._prepare_initial_states(num_chains, initial_states)
-        self.register_buffer("_x", initial_states.to(model.linear))
+        self.register_buffer("state", initial_states.to(model.linear))
 
     # ------------------------------------------------------------------ setup --------------------
 
+    @staticmethod
+    def _monochromatic_edges(
+        model: GraphRestrictedBoltzmannMachine, colour_idx: torch.Tensor
+    ) -> list[tuple[Hashable, Hashable]]:
+        """The edges of ``model`` whose endpoints have the same colour.
+
+        Args:
+            model (GraphRestrictedBoltzmannMachine): The model.
+            colour_idx (torch.Tensor): The colour of every node, shape ``(n_nodes,)``, on the CPU.
+
+        Returns:
+            list[tuple[Hashable, Hashable]]: The offending edges, in the order of ``model.edges``.
+        """
+        same = colour_idx[model.edge_idx_i.cpu()] == colour_idx[model.edge_idx_j.cpu()]
+        return [model.edges[k] for k in same.nonzero().flatten().tolist()]
+
     def _partition_nodes(
         self, colouring: Optional[Callable[[Hashable], Hashable]]
-    ) -> list[torch.Tensor]:
+    ) -> tuple[torch.Tensor, tuple[int, ...]]:
         """Partition the node indices into blocks of equal colour, ordered by colour.
 
         Args:
@@ -118,7 +142,8 @@ class BlockSampler(TorchSampler):
             ValueError: If two adjacent nodes have the same colour.
 
         Returns:
-            list[torch.Tensor]: One tensor of node indices per colour.
+            tuple[torch.Tensor, tuple[int, ...]]: The node indices sorted by colour, and the
+            offsets at which the blocks start and end (one more than the number of blocks).
         """
         model = self.model
         if colouring is None:
@@ -138,13 +163,16 @@ class BlockSampler(TorchSampler):
         colour_index = {colour: k for k, colour in enumerate(keys)}
         colour_idx = torch.tensor([colour_index[c] for c in colours], dtype=torch.long)
 
-        edge_idx_i, edge_idx_j = model.edge_idx_i.cpu(), model.edge_idx_j.cpu()
-        if (colour_idx[edge_idx_i] == colour_idx[edge_idx_j]).any():
+        offending = self._monochromatic_edges(model, colour_idx)
+        if offending:
             raise ValueError(
-                "`colouring` is not a valid colouring of the model: at least one edge has "
-                "endpoints of the same colour."
+                "`colouring` is not a valid colouring of the model: the endpoints of the edges "
+                f"{offending[:5]}{' ...' if len(offending) > 5 else ''} have the same colour."
             )
-        return [torch.nonzero(colour_idx == k).flatten() for k in range(len(keys))]
+        block_idx = torch.argsort(colour_idx, stable=True)
+        counts = torch.bincount(colour_idx, minlength=len(keys))
+        block_ptr = (0, *torch.cumsum(counts, 0).tolist())
+        return block_idx, block_ptr
 
     def _prepare_initial_states(
         self, num_chains: int, initial_states: Optional[torch.Tensor] = None
@@ -182,27 +210,13 @@ class BlockSampler(TorchSampler):
     @property
     def partition(self) -> list[torch.Tensor]:
         """The blocks of node indices, one tensor per colour (in sorted colour order)."""
-        return [getattr(self, f"_block_{k}") for k in range(self._num_blocks)]
-
-    @property
-    def schedule(self) -> tuple[float, ...]:
-        """The inverse temperatures of the successive sweeps of one :meth:`sample` call."""
-        return self._schedule
-
-    @property
-    def proposal_acceptance_criteria(self) -> str:
-        """The proposal acceptance criterion, "Gibbs" or "Metropolis"."""
-        return self._proposal_acceptance_criteria
+        ptr = self._block_ptr
+        return [self._block_idx[start:stop] for start, stop in zip(ptr[:-1], ptr[1:])]
 
     @property
     def num_chains(self) -> int:
         """Number of persistent Markov chains."""
-        return self._x.shape[0]
-
-    @property
-    def state(self) -> torch.Tensor:
-        """The current states of the persistent Markov chains, shape ``(num_chains, n_nodes)``."""
-        return self._x
+        return self.state.shape[0]
 
     @property
     def seed(self) -> Optional[int]:
@@ -214,7 +228,7 @@ class BlockSampler(TorchSampler):
         the global generator is used. The generator is re-seeded when the device changes."""
         if self._seed is None:
             return None
-        device = self._x.device
+        device = self.state.device
         if self._generator is None or self._generator.device != device:
             self._generator = torch.Generator(device=device)
             self._generator.manual_seed(self._seed)
@@ -223,35 +237,12 @@ class BlockSampler(TorchSampler):
     # ------------------------------------------------------------------ updates ------------------
 
     @torch.no_grad()
-    def _compute_effective_field(
-        self,
-        block: torch.Tensor,
-        x: Optional[torch.Tensor] = None,
-        coupling: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Effective fields of the nodes in ``block`` given the spins ``x``.
-
-        Args:
-            block (torch.Tensor): Indices of the nodes of one block.
-            x (torch.Tensor, optional): Spins of shape ``(batch, n_nodes)``. Defaults to the
-                persistent chains.
-            coupling (torch.Tensor, optional): The model's symmetric coupling matrix, passed to
-                avoid recomputing it for every block. Defaults to ``model.symmetric_coupling()``.
-
-        Returns:
-            torch.Tensor: Effective fields of shape ``(batch, len(block))``.
-        """
-        x = self._x if x is None else x
-        coupling = self.model.symmetric_coupling() if coupling is None else coupling
-        return self.model.linear[block] + x @ coupling[:, block]
-
-    @torch.no_grad()
     def _gibbs_update(
         self,
         beta: float | torch.Tensor,
         block: torch.Tensor,
         effective_field: torch.Tensor,
-        x: Optional[torch.Tensor] = None,
+        x: torch.Tensor,
     ) -> None:
         """Performs a Gibbs update of ``block`` in-place.
 
@@ -260,9 +251,8 @@ class BlockSampler(TorchSampler):
             block (torch.Tensor): Indices of the nodes of one block.
             effective_field (torch.Tensor): Effective fields of the block, shape
                 ``(batch, len(block))``.
-            x (torch.Tensor, optional): Spins to update. Defaults to the persistent chains.
+            x (torch.Tensor): Spins to update, shape ``(batch, n_nodes)``.
         """
-        x = self._x if x is None else x
         prob = torch.sigmoid(-2.0 * beta * effective_field)
         x[:, block] = 2.0 * torch.bernoulli(prob, generator=self._rng()) - 1.0
 
@@ -272,7 +262,7 @@ class BlockSampler(TorchSampler):
         beta: float | torch.Tensor,
         block: torch.Tensor,
         effective_field: torch.Tensor,
-        x: Optional[torch.Tensor] = None,
+        x: torch.Tensor,
     ) -> None:
         """Performs a Metropolis update of ``block`` in-place.
 
@@ -284,9 +274,8 @@ class BlockSampler(TorchSampler):
             block (torch.Tensor): Indices of the nodes of one block.
             effective_field (torch.Tensor): Effective fields of the block, shape
                 ``(batch, len(block))``.
-            x (torch.Tensor, optional): Spins to update. Defaults to the persistent chains.
+            x (torch.Tensor): Spins to update, shape ``(batch, n_nodes)``.
         """
-        x = self._x if x is None else x
         current = x[:, block]
         delta_energy = -2.0 * current * effective_field
         prob = torch.exp(-beta * delta_energy).clamp_(max=1.0)
@@ -297,7 +286,7 @@ class BlockSampler(TorchSampler):
     def _step(
         self,
         beta: float | torch.Tensor,
-        x: Optional[torch.Tensor] = None,
+        x: torch.Tensor,
         clamp_mask: Optional[torch.Tensor] = None,
         clamped_values: Optional[torch.Tensor] = None,
         coupling: Optional[torch.Tensor] = None,
@@ -306,8 +295,7 @@ class BlockSampler(TorchSampler):
 
         Args:
             beta (float | torch.Tensor): Inverse temperature to sample at.
-            x (torch.Tensor, optional): Spins to update, shape ``(batch, n_nodes)``. Defaults
-                to the persistent chains.
+            x (torch.Tensor): Spins to update, shape ``(batch, n_nodes)``.
             clamp_mask (torch.Tensor, optional): Boolean tensor of the shape of ``x`` that is
                 ``True`` where spins are clamped to ``clamped_values``.
             clamped_values (torch.Tensor, optional): Values of the clamped spins; only read where
@@ -315,11 +303,12 @@ class BlockSampler(TorchSampler):
             coupling (torch.Tensor, optional): The model's symmetric coupling matrix. Defaults to
                 ``model.symmetric_coupling()``.
         """
-        x = self._x if x is None else x
-        coupling = self.model.symmetric_coupling() if coupling is None else coupling
+        if coupling is None:
+            coupling = self.model.symmetric_coupling()
+        gibbs = self.proposal_acceptance_criteria == "Gibbs"
         for block in self.partition:
-            effective_field = self._compute_effective_field(block, x, coupling)
-            if self._proposal_acceptance_criteria == "Gibbs":
+            effective_field = self.model.effective_field(x, block, coupling)
+            if gibbs:
                 self._gibbs_update(beta, block, effective_field, x)
             else:
                 self._metropolis_update(beta, block, effective_field, x)
@@ -351,20 +340,18 @@ class BlockSampler(TorchSampler):
         """
         coupling = self.model.symmetric_coupling()
         if x is None:
-            for beta in self._schedule:
-                self._step(beta, self._x, coupling=coupling)
-            return self._x.clone()
+            for beta in self.schedule:
+                self._step(beta, self.state, coupling=coupling)
+            return self.state.clone()
 
         if num_samples < 1:
             raise ValueError("`num_samples` should be a positive integer.")
-        x, clamp_mask = self._validate_conditional_input(x)
-        batch_shape = x.shape[:-1]
-        n_nodes = self.model.n_nodes
-        x = x.reshape(-1, n_nodes).repeat_interleave(num_samples, 0)
-        clamp_mask = clamp_mask.reshape(-1, n_nodes).repeat_interleave(num_samples, 0)
+        x, clamp_mask, batch_shape = self._validate_conditional_input(x)
+        x = x.repeat_interleave(num_samples, 0)
+        clamp_mask = clamp_mask.repeat_interleave(num_samples, 0)
 
         random_spins = randspin(x.shape, generator=self._rng(), device=x.device).to(x.dtype)
         state = torch.where(clamp_mask, x, random_spins)
-        for beta in self._schedule:
+        for beta in self.schedule:
             self._step(beta, state, clamp_mask, x, coupling)
-        return state.reshape(*batch_shape, num_samples, n_nodes)
+        return state.reshape(*batch_shape, num_samples, self.model.n_nodes)

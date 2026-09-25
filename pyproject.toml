@@ -31,7 +31,6 @@ dependencies = [
     "networkx",
     "dimod",
     "dwave-system",
-    "dwave-graphs",
 ]
 
 [project.readme]

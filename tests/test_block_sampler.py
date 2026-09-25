@@ -23,24 +23,15 @@ from parameterized import parameterized
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.block_spin_sampler import BlockSampler
-from dwave.plugins.torch.utils import to_ising
-
-
-def set_weights(bm: GRBM, linear, quadratic) -> None:
-    with torch.no_grad():
-        bm.linear.copy_(torch.as_tensor(linear, dtype=bm.linear.dtype))
-        bm.quadratic[bm.edge_idx_i, bm.edge_idx_j] = torch.as_tensor(
-            quadratic, dtype=bm.quadratic.dtype
-        )
+from dwave.plugins.torch.utils import sampleset_to_tensor
+from tests.helper_functions import model_to_bqm, set_weights
 
 
 def total_variation(model: GRBM, samples: torch.Tensor) -> float:
     """Total variation distance between the empirical distribution of ``samples`` and the exact
     Boltzmann distribution of ``model`` at unit inverse temperature."""
-    exact = ExactSolver().sample_ising(
-        *to_ising(model.nodes, model.edges, model.linear, model.edge_biases())
-    )
-    states = torch.tensor(np.ascontiguousarray(exact.record.sample), dtype=torch.float32)
+    exact = ExactSolver().sample(model_to_bqm(model))
+    states = sampleset_to_tensor(model.nodes, exact)
     energies = torch.tensor(np.ascontiguousarray(exact.record.energy), dtype=torch.float32)
     p_exact = torch.softmax(-energies, 0)
     weights = 2 ** torch.arange(model.n_nodes, dtype=torch.float32)
@@ -90,7 +81,7 @@ class TestBlockSampler(unittest.TestCase):
 
             bss2 = BlockSampler(grbm, crayon, 10, [1.0], pac, seed=1)
             for beta in schedule:
-                bss2._step(beta)
+                bss2._step(beta, bss2.state)
 
             self.assertListEqual(bss1.state.tolist(), bss2.state.tolist())
             self.assertListEqual(samples.tolist(), bss1.state.tolist())
@@ -178,14 +169,14 @@ class TestBlockSampler(unittest.TestCase):
         bss.state[:] = 1
         zero = torch.tensor(0.0)
         ones = torch.ones((sample_size, 1))
-        bss._gibbs_update(0.0, bss.partition[0], ones*zero)
+        bss._gibbs_update(0.0, bss.partition[0], ones*zero, bss.state)
         torch.testing.assert_close(torch.tensor(0.5), bss.state.mean(), atol=1e-3, rtol=1e-3)
-        bss._gibbs_update(0.0, bss.partition[1], ones*zero)
+        bss._gibbs_update(0.0, bss.partition[1], ones*zero, bss.state)
         torch.testing.assert_close(torch.tensor(0.0), bss.state.mean(), atol=1e-3, rtol=1e-3)
 
         effective_field = torch.tensor(1.2)
-        bss._gibbs_update(1.0, bss.partition[0], effective_field*ones)
-        bss._gibbs_update(1.0, bss.partition[1], effective_field*ones)
+        bss._gibbs_update(1.0, bss.partition[0], effective_field*ones, bss.state)
+        bss._gibbs_update(1.0, bss.partition[1], effective_field*ones, bss.state)
         torch.testing.assert_close(
             torch.tanh(-effective_field),
             bss.state.mean(),
@@ -199,8 +190,8 @@ class TestBlockSampler(unittest.TestCase):
         ones = torch.ones((sample_size, 1))
         effective_field = torch.tensor(1.2)
         for i in range(10):
-            bss._metropolis_update(1.0, bss.partition[0], effective_field*ones)
-            bss._metropolis_update(1.0, bss.partition[1], effective_field*ones)
+            bss._metropolis_update(1.0, bss.partition[0], effective_field*ones, bss.state)
+            bss._metropolis_update(1.0, bss.partition[1], effective_field*ones, bss.state)
         torch.testing.assert_close(
             torch.tanh(-effective_field),
             bss.state.mean(),
@@ -212,48 +203,10 @@ class TestBlockSampler(unittest.TestCase):
         bss = BlockSampler(grbm, self.crayon_veqa, sample_size, [1.0], "Metropolis", seed=2)
         bss.state[:] = 1
         zero_effective_field = torch.zeros((sample_size, 1))
-        bss._metropolis_update(0.0, bss.partition[0], zero_effective_field)
+        bss._metropolis_update(0.0, bss.partition[0], zero_effective_field, bss.state)
         self.assertTrue((bss.state[:, 1] == -1).all())
-        bss._metropolis_update(0.0, bss.partition[1], zero_effective_field)
+        bss._metropolis_update(0.0, bss.partition[1], zero_effective_field, bss.state)
         self.assertTrue((bss.state == -1).all())
-
-    def test_effective_field(self):
-        # Create a triangle graph with an additional dangling vertex
-        #       a
-        #     / | \
-        #    b--c  d
-        grbm = GRBM(list("abcd"), [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"]])
-        set_weights(grbm, [0.0, 1.0, 2.0, 3.0], [1.1, 2.2, 3.3, 6.6])
-
-        def crayon(v):
-            return {"a": 0, "b": 1, "c": 2, "d": 1}[v]
-        bss = BlockSampler(grbm, crayon, 3, [1.0], seed=3)
-        bss.state[:] = torch.tensor([[1, 1, -1, -1],
-                                     [-1, -1, 1, -1],
-                                     [1, 1, 1, -1]])
-        # effective field for a
-        torch.testing.assert_close(
-            bss._compute_effective_field(bss.partition[0]),
-            torch.tensor([[0.0 + 1.1 - 2.2 - 3.3],
-                          [0.0 - 1.1 + 2.2 - 3.3],
-                          [0.0 + 1.1 + 2.2 - 3.3]])
-        )
-        # effective field for b, d
-        torch.testing.assert_close(bss._compute_effective_field(bss.partition[1]),
-                                   torch.tensor([[1.0 + 1.1 - 6.6, 3.0 + 3.3],
-                                                 [1.0 - 1.1 + 6.6, 3.0 - 3.3],
-                                                 [1.0 + 1.1 + 6.6, 3.0 + 3.3]]))
-        # effective field for c
-        torch.testing.assert_close(bss._compute_effective_field(bss.partition[2]),
-                                   torch.tensor([[2.0 + 2.2 + 6.6],
-                                                 [2.0 - 2.2 - 6.6],
-                                                 [2.0 + 2.2 + 6.6]]))
-        # explicit state and coupling arguments
-        x = torch.tensor([[-1.0, -1.0, -1.0, -1.0]])
-        torch.testing.assert_close(
-            bss._compute_effective_field(bss.partition[0], x, grbm.symmetric_coupling()),
-            torch.tensor([[0.0 - 1.1 - 2.2 - 3.3]]),
-        )
 
     @parameterized.expand(["Gibbs", "Metropolis"])
     def test_stationary_distribution(self, pac):
@@ -358,10 +311,16 @@ class TestBlockSampler(unittest.TestCase):
         grbm = GRBM(list("ab"), [["a", "b"]])
         bss = BlockSampler(grbm, self.crayon_veqa, 4, [1.0], seed=2)
         state_dict = bss.state_dict()
-        self.assertIn("_x", state_dict)
+        self.assertIn("state", state_dict)
         self.assertIn("model.linear", state_dict)
         self.assertIn("model.quadratic", state_dict)
+        self.assertNotIn("_block_idx", state_dict, "blocks are derived from the colouring")
         self.assertEqual(0, len(list(bss.parameters())) - len(list(grbm.parameters())))
+
+        with self.subTest("The chains are restored from the state dict"):
+            other = BlockSampler(grbm, self.crayon_veqa, 4, [1.0], seed=3)
+            other.load_state_dict(state_dict)
+            self.assertTrue(torch.equal(bss.state, other.state))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_cuda(self):

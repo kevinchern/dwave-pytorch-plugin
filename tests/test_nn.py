@@ -13,6 +13,7 @@
 # limitations under the License.
 import unittest
 
+import numpy as np
 import torch
 from parameterized import parameterized
 
@@ -54,6 +55,17 @@ class TestUtils(unittest.TestCase):
 
             model = MyModel()
             self.assertDictEqual(dict(model.config), {"module_name": "MyModel"})
+
+        with self.subTest("Array-valued arguments are stored as they are"):
+            class MyModel(torch.nn.Module):
+                @store_config
+                def __init__(self, a):
+                    super().__init__()
+
+            a = torch.tensor([1.0, 2.0])
+            self.assertIs(a, MyModel(a).config["a"])
+            a = np.array([1.0, 2.0])
+            self.assertIs(a, MyModel(a).config["a"])
 
     def test_store_config_nested(self):
         class InnerModel(torch.nn.Module):
