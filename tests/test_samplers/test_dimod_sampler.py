@@ -293,7 +293,7 @@ class TestDimodSampler(unittest.TestCase):
         sampler = DimodSampler(graph, tracker, prefactor=2.0, linear_range=(-1, 5),
                                quadratic_range=(-0.5, 3), sample_kwargs=dict(num_reads=3))
         linear = torch.tensor([[-3.0, 0.0, 1.0, 3.0], [1.0, 1.0, 1.0, 1.0]])
-        quadratic = graph.dense_quadratic(torch.tensor([[-1.0, 1.0, 2.0, 0.0], [0.5, 0.5, 0.5, 0.5]]))
+        quadratic = torch.tensor([[-1.0, 1.0, 2.0, 0.0], [0.5, 0.5, 0.5, 0.5]])
 
         spins = sampler.sample_biases(linear, quadratic)
         self.assertEqual((2, 3, 4), tuple(spins.shape))

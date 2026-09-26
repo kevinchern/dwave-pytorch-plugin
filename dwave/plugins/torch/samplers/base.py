@@ -87,9 +87,8 @@ class TorchSampler(torch.nn.Module, abc.ABC):
         Args:
             linear (torch.Tensor): Linear biases of shape ``(*batch, n_nodes)``, one model per
                 batch element; ``(n_nodes,)`` for a single model.
-            quadratic (torch.Tensor): Dense quadratic biases of shape
-                ``(*batch, n_nodes, n_nodes)`` in canonical orientation; entries outside the
-                adjacency of the graph are ignored.
+            quadratic (torch.Tensor): Quadratic biases of the edges of shape
+                ``(*batch, n_edges)``, in the order of the graph's edges.
 
         Returns:
             torch.Tensor: Spins with entries in ``{-1, +1}`` of shape
@@ -183,8 +182,8 @@ class TorchSampler(torch.nn.Module, abc.ABC):
 
         Args:
             linear (torch.Tensor): Linear biases of shape ``(*batch, n_nodes)``.
-            quadratic (torch.Tensor): Dense quadratic biases of shape
-                ``(*batch, n_nodes, n_nodes)``.
+            quadratic (torch.Tensor): Quadratic biases of the edges of shape
+                ``(*batch, n_edges)``.
 
         Raises:
             ValueError: If the shapes do not match each other or the graph.
@@ -192,15 +191,15 @@ class TorchSampler(torch.nn.Module, abc.ABC):
         Returns:
             torch.Size: The batch shape ``(*batch)``.
         """
-        n_nodes = self.model.n_nodes
+        n_nodes, n_edges = self.model.n_nodes, self.model.n_edges
         if linear.ndim < 1 or linear.shape[-1] != n_nodes:
             raise ValueError(
                 f"linear must have shape (..., {n_nodes}), got {tuple(linear.shape)}."
             )
         batch_shape = linear.shape[:-1]
-        if tuple(quadratic.shape) != (*batch_shape, n_nodes, n_nodes):
+        if tuple(quadratic.shape) != (*batch_shape, n_edges):
             raise ValueError(
-                f"quadratic must have shape (..., {n_nodes}, {n_nodes}) = "
-                f"{(*batch_shape, n_nodes, n_nodes)}, got {tuple(quadratic.shape)}."
+                f"quadratic must have shape (..., {n_edges}) = {(*batch_shape, n_edges)}, got "
+                f"{tuple(quadratic.shape)}."
             )
         return batch_shape

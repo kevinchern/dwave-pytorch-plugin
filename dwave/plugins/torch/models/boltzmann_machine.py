@@ -46,14 +46,14 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         E(s) = \sum_{i} h_i s_i + \sum_{(i, j) \in \mathcal{E}} J_{ij} s_i s_j,
         \qquad s \in \{-1, +1\}^N.
 
-    The quadratic biases are stored in a dense ``(n_nodes, n_nodes)`` matrix :attr:`quadratic`
-    in *canonical orientation*: the bias of edge ``(u, v)`` lives at ``[i, j]`` with
-    ``i = min(idx(u), idx(v))`` and ``j = max(idx(u), idx(v))``, so the matrix is strictly upper
-    triangular. Entries that do not correspond to an edge are structurally zero: a fixed boolean
-    :attr:`adjacency` mask is applied whenever the matrix is used, so those entries never
-    contribute to the energy and receive exactly zero gradient. All computations---energies,
-    batch statistics for learning and effective fields for sampling---are dense matrix products,
-    which makes them fast on GPUs and independent of the orientation and order of the edge list.
+    The parameters are one linear bias per node, :attr:`linear`, and one quadratic bias per edge,
+    :attr:`quadratic`, in the order of :attr:`edges`. Whenever a computation is a matrix
+    product---energies, effective fields for sampling and batch statistics for learning---the
+    coupling matrix is built on the fly from the per-edge biases (see
+    :meth:`~dwave.plugins.torch.utils.GraphIndex.dense_quadratic`) and discarded afterwards. The
+    computations are therefore dense and fast on GPUs, while the parameters, their gradients and
+    the state of optimizers have exactly one entry per node and per edge, independent of the
+    orientation and order of the edge list.
 
     The initialization strategy is grounded in `Hinton's practical guide for RBM training
     <https://www.cs.toronto.edu/~hinton/absps/guideTR.pdf>`_, which recommends sampling weights
@@ -76,11 +76,11 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
     samples drawn by the ``complete`` method of a
     :class:`~dwave.plugins.torch.samplers.TorchSampler` otherwise.
 
-    The graph attributes and buffers---``nodes``, ``edges``, ``node_to_idx``, ``edge_idx_i``,
-    ``edge_idx_j`` and ``adjacency``---are those of :class:`~dwave.plugins.torch.utils.GraphIndex`.
-    The parameters and buffers of the module are registered under the attribute names listed
-    below and in the base class, which are therefore the keys of
-    :meth:`~torch.nn.Module.state_dict`.
+    The graph attributes and buffers---``nodes``, ``edges``, ``node_to_idx``, ``edge_to_idx``,
+    ``edge_idx_i`` and ``edge_idx_j``---are those of
+    :class:`~dwave.plugins.torch.utils.GraphIndex`. The parameters and buffers of the module are
+    registered under the attribute names listed below and in the base class, which are therefore
+    the keys of :meth:`~torch.nn.Module.state_dict`.
 
     Args:
         nodes (Iterable[Hashable]): List of nodes.
@@ -99,10 +99,8 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
 
     Attributes:
         linear (torch.nn.Parameter): The linear biases, of shape ``(n_nodes,)``.
-        quadratic (torch.nn.Parameter): The quadratic biases as a dense ``(n_nodes, n_nodes)``
-            tensor. The bias of the edge between the nodes with indices ``i < j`` is stored at
-            ``[i, j]``; entries outside :attr:`adjacency` are ignored by every computation. The
-            per-edge biases, in the order of :attr:`edges`, are returned by :meth:`edge_biases`.
+        quadratic (torch.nn.Parameter): The quadratic biases of the edges, of shape
+            ``(n_edges,)`` and in the order of :attr:`edges`.
         visible_idx (torch.Tensor): Indices of the visible units, in the order of the columns
             of observations.
         hidden_idx (torch.Tensor): Indices of the hidden units.
@@ -126,17 +124,12 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
     ) -> None:
         super().__init__(nodes, edges)
 
-        quadratic_init = torch.zeros(self.n_nodes, self.n_nodes)
-        if self.n_edges:
-            degrees = self.degrees().to(quadratic_init.dtype)
-            quadratic_std = self._INIT_INVERSE_TEMP / (
-                degrees[self.edge_idx_i] * degrees[self.edge_idx_j]
-            )**0.25
-            quadratic_init[self.edge_idx_i, self.edge_idx_j] = (
-                torch.randn(self.n_edges) * quadratic_std
-            )
+        degrees = self.degrees().to(torch.get_default_dtype())
+        quadratic_std = self._INIT_INVERSE_TEMP / (
+            degrees[self.edge_idx_i] * degrees[self.edge_idx_j]
+        )**0.25
         self.linear = torch.nn.Parameter(torch.zeros(self.n_nodes))
-        self.quadratic = torch.nn.Parameter(quadratic_init)
+        self.quadratic = torch.nn.Parameter(torch.randn(self.n_edges) * quadratic_std)
 
         self.hidden_nodes = () if hidden_nodes is None else tuple(hidden_nodes)
         hidden_set = set(self.hidden_nodes)
@@ -195,66 +188,16 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         """
         if not quadratic:
             return
-        # The bias of edge (u, v) lives at the canonical position [min(i, j), max(i, j)]
-        rows, cols = [], []
-        for u, v in quadratic:
-            try:
-                i, j = sorted((self.node_to_idx[u], self.node_to_idx[v]))
-            except KeyError:
-                raise ValueError(f"Edge {(u, v)!r} is not in the model.") from None
-            rows.append(i)
-            cols.append(j)
+        try:
+            edge_idx = [self.edge_to_idx[tuple(edge)] for edge in quadratic]
+        except KeyError as err:
+            raise ValueError(f"Edge {err.args[0]!r} is not in the model.") from None
         device = self.quadratic.device
-        rows = torch.tensor(rows, device=device)
-        cols = torch.tensor(cols, device=device)
-        is_edge = self.adjacency[rows, cols]
-        if not is_edge.all():
-            offending = next(edge for edge, ok in zip(quadratic, is_edge.tolist()) if not ok)
-            raise ValueError(f"Edge {offending!r} is not in the model.")
         values = torch.tensor(
             list(quadratic.values()), dtype=self.quadratic.dtype, device=device
         )
         with torch.no_grad():
-            self.quadratic[rows, cols] = values
-
-    def coupling(self, quadratic: torch.Tensor | None = None) -> torch.Tensor:
-        """The coupling matrix :math:`J` with off-graph entries forced to zero.
-
-        Args:
-            quadratic (torch.Tensor, optional): Dense quadratic biases of shape
-                ``(..., n_nodes, n_nodes)``. Defaults to the model's :attr:`quadratic`.
-
-        Returns:
-            torch.Tensor: A strictly upper-triangular tensor of the shape of ``quadratic``.
-        """
-        return super().coupling(self.quadratic if quadratic is None else quadratic)
-
-    def symmetric_coupling(self, quadratic: torch.Tensor | None = None) -> torch.Tensor:
-        """The symmetrized coupling matrix :math:`J + J^T`, whose row ``k`` holds the couplings
-        of node ``k`` to every other node.
-
-        Args:
-            quadratic (torch.Tensor, optional): Dense quadratic biases of shape
-                ``(..., n_nodes, n_nodes)``. Defaults to the model's :attr:`quadratic`.
-
-        Returns:
-            torch.Tensor: A symmetric tensor of the shape of ``quadratic`` with zero diagonal.
-        """
-        return super().symmetric_coupling(self.quadratic if quadratic is None else quadratic)
-
-    def edge_biases(self, quadratic: torch.Tensor | None = None) -> torch.Tensor:
-        """Quadratic biases of the edges, of shape ``(..., n_edges)`` and in the order of
-        :attr:`edges`.
-
-        Args:
-            quadratic (torch.Tensor, optional): Dense quadratic biases of shape
-                ``(..., n_nodes, n_nodes)`` in canonical orientation. Defaults to the model's
-                :attr:`quadratic`.
-
-        Returns:
-            torch.Tensor: The entries of ``quadratic`` at ``[edge_idx_i, edge_idx_j]``.
-        """
-        return super().edge_biases(self.quadratic if quadratic is None else quadratic)
+            self.quadratic[torch.tensor(edge_idx, device=device)] = values
 
     # ------------------------------------------------------------------ graph --------------------
 
@@ -317,14 +260,15 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
                 the model; ``torch.nan`` marks unknown spins.
             idx (torch.Tensor, optional): Indices of the nodes whose fields are returned. If
                 ``None``, the fields of all nodes are returned. Defaults to ``None``.
-            coupling (torch.Tensor, optional): The :meth:`symmetric_coupling` matrix, which a
-                caller evaluating the fields of several blocks of nodes can pass to avoid
-                recomputing it. Defaults to ``None``, i.e. it is computed.
+            coupling (torch.Tensor, optional): The
+                :meth:`~dwave.plugins.torch.utils.GraphIndex.symmetric_coupling` matrix of the
+                quadratic biases, which a caller evaluating the fields of several blocks of nodes
+                can pass to avoid rebuilding it. Defaults to ``None``, i.e. it is built.
             linear (torch.Tensor, optional): Linear biases to use instead of the model's
                 :attr:`linear`, possibly a batch of them (see
                 :meth:`~dwave.plugins.torch.utils.GraphIndex.effective_field`).
-            quadratic (torch.Tensor, optional): Dense quadratic biases to use instead of the
-                model's :attr:`quadratic`.
+            quadratic (torch.Tensor, optional): Quadratic biases of the edges to use instead of
+                the model's :attr:`quadratic`, possibly a batch of them.
 
         Returns:
             torch.Tensor: Effective fields of shape (..., N) or (..., ``len(idx)``).
@@ -343,8 +287,8 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         The sufficient statistics of the model are the spins and the products of spins along the
         edges. Their batch averages are the derivatives of the average energy with respect to
         :attr:`linear` and :attr:`quadratic`: the average energy of the batch is
-        ``mean @ linear + (quadratic * second).sum()``, and the gradient of the negative log
-        likelihood is the difference between the statistics of the model and those of the data.
+        ``mean @ linear + second @ quadratic``, and the gradient of the negative log likelihood is
+        the difference between the statistics of the model and those of the data.
 
         Args:
             x (torch.Tensor): Spins of shape (..., N) where N denotes the number of variables in
@@ -352,12 +296,13 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
                 spins rather than spins (see :meth:`conditional_expectation`).
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: Tensors of shape (N,) and (N, N) holding the
-            average spins and the average products of spins along the edges. The latter is in the
-            canonical orientation of :attr:`quadratic`; entries that are not edges are zero.
+            tuple[torch.Tensor, torch.Tensor]: Tensors of shape ``(n_nodes,)`` and ``(n_edges,)``
+            holding the average spins and the average products of spins along the edges, in the
+            order of :attr:`edges`.
         """
         x = self._flatten(x)
-        return x.mean(0), (x.mT @ x) * self.adjacency / x.shape[0]
+        second = (x.mT @ x)[self.edge_idx_i, self.edge_idx_j] / x.shape[0]
+        return x.mean(0), second
 
     def _flatten(self, x: torch.Tensor) -> torch.Tensor:
         """Flatten all leading dimensions of a (..., N) tensor into one batch dimension."""
@@ -466,9 +411,7 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         """
         unknown = torch.isnan(x)
         with torch.no_grad():
-            neighbours = (self.adjacency | self.adjacency.mT).to(x.dtype)
-            unknown_spins = unknown.to(x.dtype)
-            if ((unknown_spins @ neighbours) * unknown_spins).any():
+            if (unknown[..., self.edge_idx_i] & unknown[..., self.edge_idx_j]).any():
                 raise ValueError(
                     "Exact conditional expectations require that no two unknown spins are "
                     "adjacent; with hidden units, the hidden units must be disconnected from "
@@ -490,4 +433,4 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         Returns:
             float: The estimated inverse temperature of the model.
         """
-        return estimate_beta(self.nodes, self.edges, self.linear, self.edge_biases(), spins)
+        return estimate_beta(self.nodes, self.edges, self.linear, self.quadratic, spins)

@@ -90,7 +90,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         self.assertTupleEqual(bm.edges, tuple(tuple(e) for e in self.edges))
         self.assertDictEqual(dict(bm.node_to_idx), {"d": 0, "b": 1, "a": 2, "c": 3})
         self.assertListEqual([bm.nodes[bm.node_to_idx[v]] for v in self.nodes], self.nodes)
-        self.assertEqual((4, 4), tuple(bm.quadratic.shape))
+        self.assertEqual((4,), tuple(bm.quadratic.shape))
         self.assertEqual((4,), tuple(bm.linear.shape))
         self.assertEqual(4, bm.n_nodes)
         self.assertEqual(4, bm.n_edges)
@@ -100,34 +100,33 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         self.assertFalse(bm.connected_hidden)
         self.assertIn("n_nodes=4, n_edges=4, n_hidden=0", repr(bm))
 
-        with self.subTest("Edges are stored in canonical (upper-triangular) orientation"):
-            # ("a", "d") has indices (2, 0) and is stored at [0, 2]
+        with self.subTest("Quadratic biases are stored per edge, in the order of the edges"):
+            torch.testing.assert_close(bm.quadratic, torch.tensor([1.0, 2.0, 3.0, 6.0]))
+            # ("a", "d") has indices (2, 0); its endpoints are indexed in canonical order
             self.assertListEqual(bm.edge_idx_i.tolist(), [1, 2, 0, 1])
             self.assertListEqual(bm.edge_idx_j.tolist(), [2, 3, 2, 3])
-            expected = torch.zeros(4, 4, dtype=torch.bool)
-            expected[[1, 2, 0, 1], [2, 3, 2, 3]] = True
-            self.assertTrue(torch.equal(bm.adjacency, expected))
-            self.assertTrue(torch.equal(bm.adjacency, bm.adjacency.triu(1)))
-            torch.testing.assert_close(bm.edge_biases(), torch.tensor([1.0, 2.0, 3.0, 6.0]))
-            self.assertEqual(3.0, bm.quadratic[0, 2].item())
-            self.assertTrue(torch.all(bm.quadratic[~bm.adjacency] == 0))
+            self.assertEqual(2, bm.edge_to_idx[("a", "d")])
+            self.assertEqual(2, bm.edge_to_idx[("d", "a")])
+            dense = bm.dense_quadratic(bm.quadratic)
+            self.assertEqual((4, 4), tuple(dense.shape))
+            self.assertEqual(3.0, dense[0, 2].item())
+            self.assertTrue(torch.equal(dense, dense.triu(1)))
 
         with self.subTest("Constructor weights"):
             w1, w2 = 13337.14, 4812.23
             bm = GRBM(self.nodes, self.edges, None, {"a": w1}, {("c", "b"): w2})
             self.assertAlmostEqual(bm.linear[2].item(), w1, 2)
-            self.assertAlmostEqual(bm.quadratic[1, 3].item(), w2, 2)
+            self.assertAlmostEqual(bm.quadratic[3].item(), w2, 2)
 
     def test_public_parameters_and_buffers(self):
         bm = GRBM([0, 1, 2], [(0, 1), (1, 2)], hidden_nodes=[2])
         self.assertListEqual(["linear", "quadratic"], [name for name, _ in bm.named_parameters()])
         self.assertListEqual(
-            ["edge_idx_i", "edge_idx_j", "adjacency", "visible_idx", "hidden_idx"],
+            ["edge_idx_i", "edge_idx_j", "visible_idx", "hidden_idx"],
             [name for name, _ in bm.named_buffers()],
         )
         self.assertSetEqual(
-            {"linear", "quadratic", "edge_idx_i", "edge_idx_j", "adjacency", "visible_idx",
-             "hidden_idx"},
+            {"linear", "quadratic", "edge_idx_i", "edge_idx_j", "visible_idx", "hidden_idx"},
             set(bm.state_dict()),
         )
         with self.assertRaises(TypeError):
@@ -139,7 +138,9 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             with self.subTest(name):
                 self.assertIsInstance(getattr(bm, name), tuple)
         self.assertDictEqual({0: 0, 1: 1, 2: 2}, bm.node_to_idx)
+        self.assertDictEqual({(0, 1): 0, (1, 0): 0, (1, 2): 1, (2, 1): 1}, bm.edge_to_idx)
         self.assertFalse(hasattr(bm, "idx_to_node"))
+        self.assertFalse(hasattr(bm, "adjacency"))
 
     def test_deepcopy_and_pickle(self):
         # Common PyTorch workflows (e.g. averaged models) deep-copy or pickle whole modules
@@ -152,7 +153,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
                 self.assertDictEqual(bm.node_to_idx, clone.node_to_idx)
                 torch.testing.assert_close(bm.linear, clone.linear)
                 torch.testing.assert_close(bm.quadratic, clone.quadratic)
-                self.assertTrue(torch.equal(bm.adjacency, clone.adjacency))
+                self.assertTrue(torch.equal(bm.edge_idx_i, clone.edge_idx_i))
 
     def test_default_quadratic_initialization_uses_connectivity(self):
         nodes = list("abcd")
@@ -169,14 +170,12 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         bm = GRBM(nodes, edges)
 
         torch.testing.assert_close(bm.linear, torch.zeros(len(nodes)))
-        torch.testing.assert_close(bm.edge_biases(), expected_quadratic)
-        self.assertTrue(torch.all(bm.quadratic[~bm.adjacency] == 0))
+        torch.testing.assert_close(bm.quadratic, expected_quadratic)
 
     def test_default_quadratic_initialization_edgeless(self):
         bm = GRBM([0, 1, 2], [])
         torch.testing.assert_close(bm.linear, torch.zeros(3))
-        torch.testing.assert_close(bm.quadratic, torch.zeros(3, 3))
-        self.assertFalse(bm.adjacency.any())
+        torch.testing.assert_close(bm.quadratic, torch.zeros(0))
         self.assertEqual(0, bm.n_edges)
         torch.testing.assert_close(bm(torch.ones(2, 3)), torch.zeros(2))
 
@@ -199,14 +198,11 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
     def test_set_quadratic(self):
         # Reversed orientation of edge ("a", "b"); stored at [idx(b), idx(a)] = [1, 2]
         self.bm.set_quadratic({("b", "a"): 999})
-        self.assertEqual(999, self.bm.quadratic[1, 2].item())
-        self.assertEqual(0, self.bm.quadratic[2, 1].item())
-        self.assertEqual(999, self.bm.edge_biases()[0].item())
+        self.assertEqual(999, self.bm.quadratic[0].item())
         self.bm.set_quadratic({})
         with self.subTest("Several edges in mixed orientations"):
             self.bm.set_quadratic({("c", "a"): 7, ("a", "d"): 8, ("b", "c"): 9})
-            torch.testing.assert_close(self.bm.edge_biases(), torch.tensor([999.0, 7.0, 8.0, 9.0]))
-            self.assertTrue(torch.all(self.bm.quadratic[~self.bm.adjacency] == 0))
+            torch.testing.assert_close(self.bm.quadratic, torch.tensor([999.0, 7.0, 8.0, 9.0]))
 
     def test_set_quadratic_unknown_edge(self):
         quadratic = self.bm.quadratic.detach().clone()
@@ -267,27 +263,22 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
 
     def test_coupling(self):
         bm = self.bm
-        torch.testing.assert_close(bm.coupling(), bm.quadratic * bm.adjacency)
-        symmetric = bm.symmetric_coupling()
+        dense = bm.dense_quadratic(bm.quadratic)
+        torch.testing.assert_close(dense[bm.edge_idx_i, bm.edge_idx_j], bm.quadratic)
+        self.assertEqual(4, int((dense != 0).sum()))
+        symmetric = bm.symmetric_coupling(bm.quadratic)
         torch.testing.assert_close(symmetric, symmetric.T)
         torch.testing.assert_close(symmetric.diagonal(), torch.zeros(4))
-        torch.testing.assert_close(symmetric[bm.edge_idx_i, bm.edge_idx_j], bm.edge_biases())
-
-        with self.subTest("Edge biases of another dense tensor"):
-            torch.testing.assert_close(bm.edge_biases(2 * bm.quadratic), 2 * bm.edge_biases())
+        torch.testing.assert_close(symmetric[bm.edge_idx_i, bm.edge_idx_j], bm.quadratic)
+        torch.testing.assert_close(symmetric, dense + dense.T)
 
         with self.subTest("Couplings of other quadratic biases"):
-            torch.testing.assert_close(bm.coupling(2 * bm.quadratic), 2 * bm.coupling())
-            torch.testing.assert_close(
-                bm.symmetric_coupling(2 * bm.quadratic), 2 * bm.symmetric_coupling()
-            )
+            torch.testing.assert_close(bm.dense_quadratic(2 * bm.quadratic), 2 * dense)
+            torch.testing.assert_close(bm.symmetric_coupling(2 * bm.quadratic), 2 * symmetric)
 
-        with self.subTest("Entries outside the adjacency are ignored"):
-            energies = bm(self.pmones)
-            with torch.no_grad():
-                bm.quadratic[~bm.adjacency] = 123.0
-            torch.testing.assert_close(bm(self.pmones), energies)
-            torch.testing.assert_close(bm.edge_biases(), torch.tensor([1.0, 2.0, 3.0, 6.0]))
+        with self.subTest("Only the per-edge biases are stored"):
+            self.assertEqual(bm.n_nodes + bm.n_edges, sum(p.numel() for p in bm.parameters()))
+            self.assertFalse(hasattr(bm, "coupling"))
 
     def test_effective_field(self):
         # nodes d b a c; fields h_k + sum_l J_kl s_l
@@ -305,7 +296,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             torch.testing.assert_close(self.bm.effective_field(spins, idx), expected[:, [2, 0]])
 
         with self.subTest("Precomputed coupling matrix"):
-            coupling = self.bm.symmetric_coupling()
+            coupling = self.bm.symmetric_coupling(self.bm.quadratic)
             torch.testing.assert_close(self.bm.effective_field(spins, coupling=coupling), expected)
             torch.testing.assert_close(
                 self.bm.effective_field(spins, idx, coupling), expected[:, [2, 0]]
@@ -316,7 +307,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
                 self.bm.effective_field(spins, linear=torch.zeros(4)), expected - self.bm.linear
             )
             torch.testing.assert_close(
-                self.bm.effective_field(spins, quadratic=torch.zeros(4, 4)),
+                self.bm.effective_field(spins, quadratic=torch.zeros(4)),
                 self.bm.linear.expand_as(expected),
             )
 
@@ -344,14 +335,10 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         x = torch.vstack([self.ones, self.pmones, self.mpones])
         mean, second = self.bm.sufficient_statistics(x)
         torch.testing.assert_close(mean, x.mean(0))
-        torch.testing.assert_close(second, (x.T @ x / 3) * self.bm.adjacency)
-        self.assertTrue(torch.all(second[~self.bm.adjacency] == 0))
+        self.assertEqual((4,), tuple(second.shape))
         # Average products along the edges ab, ac, ad, bc (node order d b a c)
-        torch.testing.assert_close(
-            second[self.bm.edge_idx_i, self.bm.edge_idx_j],
-            (x[:, [2, 2, 2, 1]] * x[:, [1, 3, 0, 3]]).mean(0),
-        )
-        average_energy = mean @ self.bm.linear + (self.bm.quadratic * second).sum()
+        torch.testing.assert_close(second, (x[:, [2, 2, 2, 1]] * x[:, [1, 3, 0, 3]]).mean(0))
+        average_energy = mean @ self.bm.linear + second @ self.bm.quadratic
         torch.testing.assert_close(average_energy, self.bm(x).mean())
 
         with self.subTest("Arbitrary leading dimensions"):
@@ -382,7 +369,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             objective.backward()
             # d/dh = <s>_data - <s>_model = 2; d/dJ = <s_i s_j>_data - <s_i s_j>_model = 0
             torch.testing.assert_close(self.bm.linear.grad, torch.full((4,), 2.0))
-            torch.testing.assert_close(self.bm.quadratic.grad, torch.zeros(4, 4))
+            torch.testing.assert_close(self.bm.quadratic.grad, torch.zeros(4))
 
         with self.subTest("Test objective value matches"):
             s1 = torch.vstack([ones, ones, ones, self.pmones])
@@ -402,7 +389,6 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         mean_model, second_model = model.sufficient_statistics(s_model)
         torch.testing.assert_close(model.linear.grad, mean_obs - mean_model)
         torch.testing.assert_close(model.quadratic.grad, second_obs - second_model)
-        self.assertTrue(torch.all(model.quadratic.grad[~model.adjacency] == 0))
 
     def test_quasi_objective_gradient_wrt_observations(self):
         # DVAE-style usage: three-dimensional observations that require gradients
@@ -412,20 +398,6 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         model.quasi_objective(s_observed, s_model).backward()
         # d/ds of the average energy is the effective field divided by the number of observations
         torch.testing.assert_close(s_observed.grad, model.effective_field(s_observed.detach()) / 15)
-
-    def test_off_graph_entries_stay_zero_after_optimizer_steps(self):
-        s_observed = randspins(8, 4, seed=9)
-        s_model = randspins(8, 4, seed=10)
-        for optimizer in (
-            torch.optim.SGD(self.bm.parameters(), lr=0.1, momentum=0.9, weight_decay=0.01),
-            torch.optim.Adam(self.bm.parameters(), lr=0.1, weight_decay=0.1),
-        ):
-            for _ in range(3):
-                optimizer.zero_grad()
-                self.bm.quasi_objective(s_observed, s_model).backward()
-                self.assertTrue(torch.all(self.bm.quadratic.grad[~self.bm.adjacency] == 0))
-                optimizer.step()
-            self.assertTrue(torch.all(self.bm.quadratic[~self.bm.adjacency] == 0))
 
     def test_quasi_objective_requires_complete_spins(self):
         # Data of a model with hidden units is completed (conditional_expectation or
@@ -563,7 +535,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         t_minus = torch.tensor([-1, 1, -1, -1, 1, -1]).float()
         t_model = torch.tensor([1, -1, 1, -1, 1, -1]).float()
         grad = t_plus * p_plus + t_minus * p_minus - t_model
-        grad_auto = torch.cat([bm.linear.grad, bm.quadratic.grad[bm.edge_idx_i, bm.edge_idx_j]])
+        grad_auto = torch.cat([bm.linear.grad, bm.quadratic.grad])
         torch.testing.assert_close(grad, grad_auto)
 
     def test_quasi_objective_exact_disc_matches_enumeration(self):
@@ -589,7 +561,8 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             mean_model, second_model = model.sufficient_statistics(s_model)
         torch.testing.assert_close(model.linear.grad, expected_linear - mean_model)
         torch.testing.assert_close(
-            model.quadratic.grad, (expected_second - second_model) * model.adjacency
+            model.quadratic.grad,
+            expected_second[model.edge_idx_i, model.edge_idx_j] - second_model,
         )
 
     def test_quasi_objective_gradient_connected_hidden_units(self):
@@ -613,7 +586,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         )
         t_model = torch.tensor([1.0, -1.0, 1.0, -1.0, 1.0, -1.0])
         grad = t_cond_samples.mean(0) - t_model
-        grad_auto = torch.cat([bm.linear.grad, bm.quadratic.grad[bm.edge_idx_i, bm.edge_idx_j]])
+        grad_auto = torch.cat([bm.linear.grad, bm.quadratic.grad])
         torch.testing.assert_close(grad, grad_auto)
 
     def test_complete_draws_exact_conditional_samples(self):
@@ -658,14 +631,14 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         other.load_state_dict(model.state_dict())
         torch.testing.assert_close(other.quadratic, model.quadratic)
         torch.testing.assert_close(other.linear, model.linear)
-        self.assertTrue(torch.equal(other.adjacency, model.adjacency))
+        self.assertTrue(torch.equal(other.edge_idx_i, model.edge_idx_i))
         self.assertTrue(torch.equal(other.hidden_idx, model.hidden_idx))
 
     def test_double(self):
         model = random_model(10, 0.5, seed=15).double()
         x = randspins(5, 10).double()
         self.assertEqual(torch.float64, model(x).dtype)
-        self.assertEqual(torch.bool, model.adjacency.dtype)
+        self.assertEqual(torch.long, model.edge_idx_i.dtype)
         bqm = model_to_bqm(model)
         torch.testing.assert_close(
             model(x), torch.tensor(bqm.energies((x.numpy(), model.nodes)))
@@ -686,7 +659,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         model.zero_grad()
 
         model = model.cuda()
-        self.assertTrue(model.adjacency.is_cuda and model.hidden_idx.is_cuda)
+        self.assertTrue(model.edge_idx_i.is_cuda and model.hidden_idx.is_cuda)
         torch.testing.assert_close(model(x.cuda()).cpu(), energies)
         s_data_cuda = model.conditional_expectation(model.pad_visible(s_observed.cuda()))
         self.assertTrue(s_data_cuda.is_cuda)
@@ -696,10 +669,10 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         torch.testing.assert_close(objective_cuda.cpu(), objective)
         for grad, p in zip(grads, model.parameters()):
             torch.testing.assert_close(p.grad.cpu(), grad)
-        ising_cuda = to_ising(model.nodes, model.edges, model.linear, model.edge_biases())
+        ising_cuda = to_ising(model.nodes, model.edges, model.linear, model.quadratic)
         model.cpu()
         self.assertEqual(
-            ising_cuda, to_ising(model.nodes, model.edges, model.linear, model.edge_biases())
+            ising_cuda, to_ising(model.nodes, model.edges, model.linear, model.quadratic)
         )
 
 

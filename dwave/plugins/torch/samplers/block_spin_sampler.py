@@ -118,7 +118,7 @@ class BlockSampler(TorchSampler):
         if isinstance(model, GraphRestrictedBoltzmannMachine):
             initial_states = initial_states.to(model.linear)
         else:
-            initial_states = initial_states.to(model.adjacency.device)
+            initial_states = initial_states.to(model.edge_idx_i.device)
         self.register_buffer("state", initial_states)
 
     # ------------------------------------------------------------------ setup --------------------
@@ -356,7 +356,7 @@ class BlockSampler(TorchSampler):
             of shape ``(..., num_samples, n_nodes)``.
         """
         model = self._require_model()
-        linear, coupling = model.linear, model.symmetric_coupling()
+        linear, coupling = model.linear, model.symmetric_coupling(model.quadratic)
         if x is None:
             for beta in self.schedule:
                 self._step(beta, self.state, linear, coupling)
@@ -387,8 +387,8 @@ class BlockSampler(TorchSampler):
         Args:
             linear (torch.Tensor): Linear biases of shape ``(*batch, n_nodes)``, one model per
                 batch element; ``(n_nodes,)`` for a single model.
-            quadratic (torch.Tensor): Dense quadratic biases of shape
-                ``(*batch, n_nodes, n_nodes)`` in canonical orientation.
+            quadratic (torch.Tensor): Quadratic biases of the edges of shape
+                ``(*batch, n_edges)``, in the order of the graph's edges.
             num_samples (int): Number of chains, i.e. samples, per model. Defaults to 1.
 
         Raises:

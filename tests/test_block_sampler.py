@@ -217,7 +217,7 @@ class TestBlockSampler(unittest.TestCase):
         model = five_cycle_with_chord()
         sampler = BlockSampler(model, None, 1, [1.0], criterion)
         linear, quadratic = model.linear.detach(), model.quadratic.detach()
-        coupling = model.symmetric_coupling().detach()
+        coupling = model.symmetric_coupling(model.quadratic).detach()
 
         x = SPINS.clone()
         with RecordedBernoulli() as bernoulli:
@@ -253,7 +253,7 @@ class TestBlockSampler(unittest.TestCase):
 
             bss2 = BlockSampler(grbm, crayon, 10, [1.0], pac, seed=1)
             for beta in schedule:
-                bss2._step(beta, bss2.state, grbm.linear, grbm.symmetric_coupling())
+                bss2._step(beta, bss2.state, grbm.linear, grbm.symmetric_coupling(grbm.quadratic))
 
             self.assertListEqual(bss1.state.tolist(), bss2.state.tolist())
             self.assertListEqual(samples.tolist(), bss1.state.tolist())
@@ -369,7 +369,7 @@ class TestBlockSampler(unittest.TestCase):
             self.assertTrue(torch.all(samples.abs() == 1))
 
         with self.subTest("Arbitrary batch dimensions"):
-            samples = sampler.sample_biases(linear.reshape(2, 1, 5), quadratic.reshape(2, 1, 5, 5), 3)
+            samples = sampler.sample_biases(linear.reshape(2, 1, 5), quadratic.reshape(2, 1, 6), 3)
             self.assertEqual((2, 1, 3, 5), tuple(samples.shape))
 
         with self.subTest("Invalid inputs"):

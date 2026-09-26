@@ -1,17 +1,18 @@
 ---
 prelude: >
-    Graph-restricted Boltzmann machines and their samplers now use a dense representation
-    throughout: quadratic biases are stored in a masked ``(n_nodes, n_nodes)`` matrix and all
-    computations---energies, learning statistics, effective fields and block-Gibbs updates---are
-    dense matrix products. This release is not backward compatible; see the upgrade notes.
+    Graph-restricted Boltzmann machines and their samplers now store one quadratic bias per edge
+    and build the dense coupling matrix on the fly wherever a matrix product is the efficient
+    computation: energies, effective fields and block-Gibbs updates are dense matrix products,
+    while parameters, gradients, optimizer state and the interfaces of the samplers and of the
+    ``Ising`` layer have one entry per node and per edge. This release is not backward compatible;
+    see the upgrade notes.
 features:
   - |
-    ``GraphRestrictedBoltzmannMachine.quadratic`` is a dense, strictly upper-triangular
-    ``(n_nodes, n_nodes)`` parameter whose off-graph entries are structurally zero (masked by the new
-    ``adjacency`` buffer). New methods ``coupling``, ``symmetric_coupling``, ``edge_biases``,
-    ``effective_field``, ``sufficient_statistics``, ``conditional_expectation`` and
-    ``pad_visible``; new attributes ``adjacency``, ``visible_nodes``, ``n_visible``, ``n_hidden``
-    and ``connected_hidden``. All methods accept arbitrary leading batch dimensions.
+    ``GraphRestrictedBoltzmannMachine.quadratic`` is a per-edge ``(n_edges,)`` parameter in the
+    order of ``edges``. New methods ``effective_field``, ``sufficient_statistics``,
+    ``conditional_expectation`` and ``pad_visible``; new attributes ``visible_nodes``,
+    ``n_visible``, ``n_hidden`` and ``connected_hidden``. All methods accept arbitrary leading
+    batch dimensions.
   - |
     ``quasi_objective`` takes complete spin configurations of data and model. For models with
     hidden units, ``conditional_expectation`` fills in the exact conditional expectations of the
@@ -37,16 +38,16 @@ features:
   - |
     ``dwave.plugins.torch.utils.GraphIndex`` is the ``torch.nn.Module`` base class of
     ``GraphRestrictedBoltzmannMachine`` and ``Ising``. It validates the graph and provides the
-    graph attributes ``nodes``, ``edges``, ``node_to_idx``, ``n_nodes`` and ``n_edges``, the
-    buffers ``edge_idx_i``, ``edge_idx_j`` and ``adjacency``, the conversions ``edge_biases``
-    and ``dense_quadratic`` between per-edge and dense quadratic biases, and the Ising
-    ``energy``, ``coupling``, ``symmetric_coupling`` and ``effective_field`` of spins under
-    explicitly given biases, for a single model or a batch of models on the graph.
+    graph attributes ``nodes``, ``edges``, ``node_to_idx``, ``edge_to_idx``, ``n_nodes`` and
+    ``n_edges``, the buffers ``edge_idx_i`` and ``edge_idx_j``, the coupling matrices
+    ``dense_quadratic`` and ``symmetric_coupling`` of per-edge biases, and the Ising ``energy``
+    and ``effective_field`` of spins under explicitly given per-edge biases, for a single model or
+    a batch of models on the graph.
     ``dwave.plugins.torch.utils.estimate_beta`` estimates the inverse temperature of samples of
     such a model by maximum pseudolikelihood.
   - |
     Samplers bind to any ``GraphIndex`` and gain ``sample_biases(linear, quadratic)``, which
-    samples a batch of Ising models on the graph given by their biases. ``BlockSampler`` updates
+    samples a batch of Ising models on the graph given by their per-edge biases. ``BlockSampler`` updates
     every block for all models and chains with one batched matrix product, so batches of models
     are sampled on the GPU; ``DimodSampler`` scales, clips and submits the models one after the
     other. ``sample`` and ``complete`` keep sampling the parameters of a bound
@@ -56,9 +57,9 @@ features:
     sampled from its inputs by the ``sample_biases`` method of any sampler bound to the layer, in
     the same way that ``quasi_objective`` takes the samples of a Boltzmann machine. The layer
     therefore works with ``BlockSampler`` on the GPU as well as with ``DimodSampler``, whose
-    ``prefactor`` and clipping ranges replace the layer's ``beta``. The layer takes dense
-    ``(B, n_nodes, n_nodes)`` quadratic biases and returns dense gradients (nonzero only at edges);
-    ``edge_biases`` and ``dense_quadratic`` convert between per-edge and dense biases.
+    ``prefactor`` and clipping ranges replace the layer's ``beta``. The layer takes per-edge
+    ``(B, n_edges)`` quadratic biases and returns one gradient per edge; ``dense_quadratic``
+    builds the coupling matrices of a batch of models when they are needed.
     ``SpinStatistic`` is a ``torch.nn.Module``, so the statistic of a layer moves to the device of
     the layer, and ``IsingStatistic.from_graph`` builds the sufficient statistics of a graph's
     Ising model.
@@ -72,9 +73,10 @@ features:
     ``dwave.plugins.torch.samplers`` exports ``BipartiteGibbsSampler``.
 upgrade:
   - |
-    ``GraphRestrictedBoltzmannMachine.quadratic`` has shape ``(n_nodes, n_nodes)``; per-edge biases
-    are ``quadratic[edge_idx_i, edge_idx_j]`` (``edge_biases()``). ``sufficient_statistics`` returns
-    batch-averaged statistics in the layout of the parameters instead of per-sample statistics.
+    ``GraphRestrictedBoltzmannMachine.quadratic`` has shape ``(n_edges,)`` and holds the bias of
+    every edge in the order of ``edges``, irrespective of the orientation given at construction.
+    ``sufficient_statistics`` returns batch-averaged statistics in the layout of the parameters
+    instead of per-sample statistics.
     ``theta``, ``interactions``, ``to_ising`` (use ``dwave.plugins.torch.utils.to_ising`` or
     ``DimodSampler.to_ising``), ``idx_to_node`` (use ``nodes[idx]``) and the deprecated
     ``sample``/``sampleset_to_tensor`` methods are removed. ``edge_idx_i``/
@@ -83,8 +85,8 @@ upgrade:
     raise ``ValueError``.
   - |
     The parameters and buffers of ``GraphRestrictedBoltzmannMachine`` are registered under their
-    public names, so the keys of ``state_dict()`` are ``linear``, ``quadratic``, ``adjacency``,
-    ``edge_idx_i``, ``edge_idx_j``, ``visible_idx`` and ``hidden_idx`` instead of
+    public names, so the keys of ``state_dict()`` are ``linear``, ``quadratic``, ``edge_idx_i``,
+    ``edge_idx_j``, ``visible_idx`` and ``hidden_idx`` instead of
     underscore-prefixed names; checkpoints saved with earlier versions cannot be loaded.
     ``nodes``, ``edges``, ``hidden_nodes`` and ``visible_nodes`` are tuples.
   - |
@@ -112,8 +114,8 @@ upgrade:
     ``Ising(nodes, edges, statistic=None)`` no longer takes ``sampler``, ``sample_params`` or
     ``beta``, and ``set_sampler``, ``set_sample_params``, ``set_beta`` and the ``beta`` buffer are
     removed. ``Ising.forward(linear, quadratic, spins)`` and
-    ``Ising.estimate_betas(linear, quadratic, spins)`` take dense quadratic biases and the spins
-    sampled from the models, e.g. ``BlockSampler(ising).sample_biases(linear, quadratic)`` or
+    ``Ising.estimate_betas(linear, quadratic, spins)`` take per-edge quadratic biases of shape
+    ``(B, n_edges)`` and the spins sampled from the models, e.g. ``BlockSampler(ising).sample_biases(linear, quadratic)`` or
     ``DimodSampler(ising, sampler, prefactor=1 / beta).sample_biases(linear, quadratic)``.
     ``node_idx_of_edges_1``/``node_idx_of_edges_2`` are renamed ``edge_idx_i``/``edge_idx_j``,
     ``num_nodes``/``num_edges`` are renamed ``n_nodes``/``n_edges``, and ``nodes`` and ``edges``

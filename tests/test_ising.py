@@ -193,8 +193,7 @@ class TestIsingExpectation(unittest.TestCase):
                                [-1, -1,  1],
                                [-1, -1,  1]]]).float()
         # Edges are (0, 1) and (1, 2); interaction terms are col0*col1, col1*col2
-        adjacency = torch.zeros(3, 3, dtype=torch.bool)
-        adjacency[[0, 1], [1, 2]] = True
+        edge_idx_i, edge_idx_j = torch.tensor([0, 1]), torch.tensor([1, 2])
         interactions = spins[..., [0, 1]] * spins[..., [1, 2]]
         sufficient_stats = torch.cat([spins, interactions], dim=-1)
 
@@ -204,9 +203,9 @@ class TestIsingExpectation(unittest.TestCase):
                                  dim=-1)
 
         linear = torch.tensor([[-0.1, -0.2, -0.3]] * 2, requires_grad=True)
-        quadratic = torch.zeros(2, 3, 3, requires_grad=True)
+        quadratic = torch.zeros(2, 2, requires_grad=True)
 
-        y = IsingExpectation.apply(spins, output_stats, adjacency, linear, quadratic)
+        y = IsingExpectation.apply(spins, output_stats, edge_idx_i, edge_idx_j, linear, quadratic)
 
         with self.subTest("Ising aggregation layer produced unexpected output values"):
             with torch.no_grad():
@@ -226,15 +225,14 @@ class TestIsingExpectation(unittest.TestCase):
         with self.subTest("Linear gradients should match"):
             torch.testing.assert_close(dloss_dhJ[:, :3], linear.grad)
 
-        with self.subTest("Quadratic gradients should match at the edges and vanish elsewhere"):
-            torch.testing.assert_close(dloss_dhJ[:, 3:], quadratic.grad[:, [0, 1], [1, 2]])
-            self.assertTrue(torch.all(quadratic.grad[:, ~adjacency] == 0))
+        with self.subTest("Quadratic gradients should match, one per edge"):
+            torch.testing.assert_close(dloss_dhJ[:, 3:], quadratic.grad)
 
     def test_rejects_non_3d_statistics(self):
         spins = torch.ones(2, 3, 3)
         with self.assertRaisesRegex(ValueError, "ndim should be 3"):
-            IsingExpectation.apply(spins, torch.ones(2, 3), torch.ones(3, 3, dtype=torch.bool),
-                                   torch.zeros(2, 3), torch.zeros(2, 3, 3))
+            IsingExpectation.apply(spins, torch.ones(2, 3), torch.tensor([0, 1]),
+                                   torch.tensor([1, 2]), torch.zeros(2, 3), torch.zeros(2, 2))
 
 
 class TestIsing(unittest.TestCase):
@@ -263,11 +261,12 @@ class TestIsing(unittest.TestCase):
         # Canonical (upper-triangular) orientation regardless of the given orientation
         self.assertListEqual([0, 0, 1], ising.edge_idx_i.tolist())
         self.assertListEqual([1, 2, 2], ising.edge_idx_j.tolist())
-        expected = torch.zeros(3, 3, dtype=torch.bool)
-        expected[[0, 0, 1], [1, 2, 2]] = True
-        self.assertTrue(torch.equal(expected, ising.adjacency))
+        self.assertDictEqual(
+            {("b", "a"): 0, ("a", "b"): 0, ("a", "c"): 1, ("c", "a"): 1, ("b", "c"): 2, ("c", "b"): 2},
+            ising.edge_to_idx,
+        )
 
-    def test_edge_biases_roundtrip(self):
+    def test_dense_quadratic(self):
         ising = Ising("abc", [("b", "a"), ("a", "c"), ("b", "c")])
         per_edge = torch.tensor([[1.0, 2.0, 3.0], [-1.0, -2.0, -3.0]])
         dense = ising.dense_quadratic(per_edge)
@@ -275,7 +274,7 @@ class TestIsing(unittest.TestCase):
         torch.testing.assert_close(dense[0], torch.tensor([[0.0, 1.0, 2.0],
                                                            [0.0, 0.0, 3.0],
                                                            [0.0, 0.0, 0.0]]))
-        torch.testing.assert_close(ising.edge_biases(dense), per_edge)
+        torch.testing.assert_close(dense[..., ising.edge_idx_i, ising.edge_idx_j], per_edge)
         with self.assertRaisesRegex(ValueError, "Expected 3 edge biases"):
             ising.dense_quadratic(torch.zeros(2, 2))
 
@@ -287,10 +286,10 @@ class TestIsing(unittest.TestCase):
 
     def test_input_validation(self):
         ising = Ising("abc", [("a", "b")])
-        linear, quadratic, spins = torch.zeros(2, 3), torch.zeros(2, 3, 3), torch.ones(2, 5, 3)
+        linear, quadratic, spins = torch.zeros(2, 3), torch.zeros(2, 1), torch.ones(2, 5, 3)
         with self.assertRaisesRegex(ValueError, r"linear should have shape \(B, 3\)"):
             ising(torch.zeros(2, 4), quadratic, spins)
-        with self.assertRaisesRegex(ValueError, r"quadratic should have shape \(B, 3, 3\)"):
+        with self.assertRaisesRegex(ValueError, r"quadratic should have shape \(B, 1\)"):
             ising(linear, torch.zeros(2, 2), spins)
         with self.assertRaisesRegex(ValueError, r"spins should have shape \(B, M, 3\)"):
             ising(linear, quadratic, torch.ones(3, 5, 3))
@@ -311,7 +310,7 @@ class TestIsing(unittest.TestCase):
 
         # The values of the biases do not affect the output; they receive the gradients
         linear = torch.zeros((2, 3), requires_grad=True)
-        quadratic = torch.zeros((2, 3, 3), requires_grad=True)
+        quadratic = torch.zeros((2, 3), requires_grad=True)
         y = ising(linear, quadratic, spins)
         with self.subTest("Ising layer produced unexpected output values"):
             torch.testing.assert_close(y, torch.tensor([[1/3, 1/3, 1],
@@ -334,8 +333,7 @@ class TestIsing(unittest.TestCase):
             torch.testing.assert_close(grad[:, :3], linear.grad)
 
         with self.subTest("Quadratic gradients should match"):
-            torch.testing.assert_close(grad[:, 3:], ising.edge_biases(quadratic.grad))
-            self.assertTrue(torch.all(quadratic.grad[:, ~ising.adjacency] == 0))
+            torch.testing.assert_close(grad[:, 3:], quadratic.grad)
 
         with self.subTest("Spins receive no gradient"):
             self.assertIsNone(spins.grad)
@@ -346,7 +344,7 @@ class TestIsing(unittest.TestCase):
         linear = torch.tensor([[0.1, 0.2, 0.4], [-0.9, -0.8, -0.6]])
         edge_biases = torch.tensor([[1.0, 9.0, 4.0], [0.9, 8.0, -12.0]])
         spins = randspins(2, 6, 3, seed=1)
-        energies = ising.energy(spins, linear, ising.dense_quadratic(edge_biases))
+        energies = ising.energy(spins, linear, edge_biases)
         self.assertEqual((2, 6), tuple(energies.shape))
         for b in range(2):
             bqm = to_bqm(ising.nodes, ising.edges, linear[b], edge_biases[b])
@@ -367,7 +365,7 @@ class TestIsing(unittest.TestCase):
         ising = Ising(self.NODES, self.EDGES)
         spins = torch.tensor([s1, s2]).float()
 
-        estimated_betas = ising.estimate_betas(linear, ising.dense_quadratic(quadratic), spins)
+        estimated_betas = ising.estimate_betas(linear, quadratic, spins)
 
         dimod_betas = []
         for h, J, s in zip(linear, quadratic, (s1, s2)):
@@ -381,7 +379,7 @@ class TestIsing(unittest.TestCase):
         ising = Ising("abc", [("a", "b"), ("a", "c")])
         sampler = BlockSampler(ising, schedule=[1.0] * 5)
         linear = torch.tensor([[10.0] * 3, [-10.0] * 3])
-        quadratic = torch.zeros(2, 3, 3)
+        quadratic = torch.zeros(2, 2)
         spins = sampler.sample_biases(linear, quadratic, num_samples=100)
         self.assertEqual((2, 100, 3), tuple(spins.shape))
         torch.testing.assert_close(
@@ -395,7 +393,7 @@ class TestIsing(unittest.TestCase):
     def test_sampling_with_dimod_sampler(self):
         ising = Ising("abc", [("a", "b"), ("a", "c")])
         bs = 4
-        quadratic = torch.zeros((bs, 3, 3))
+        quadratic = torch.zeros((bs, 2))
 
         with self.subTest("An exactly enumerated uniform prior gives exactly zero statistics"):
             # ExactSolver returns every state once, which is the Boltzmann distribution of zero

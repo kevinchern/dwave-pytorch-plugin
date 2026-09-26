@@ -117,7 +117,7 @@ class DimodSampler(TorchSampler):
             of the model; see :func:`~dwave.plugins.torch.utils.to_ising`.
         """
         model = self._require_model()
-        return self._ising(model.linear, model.edge_biases())
+        return self._ising(model.linear, model.quadratic)
 
     def _submit(self, h: dict, J: dict) -> torch.Tensor:
         """Submit Ising dictionaries to the dimod sampler and return the reads as a CPU tensor with
@@ -208,8 +208,8 @@ class DimodSampler(TorchSampler):
         Args:
             linear (torch.Tensor): Linear biases of shape ``(*batch, n_nodes)``, one model per
                 batch element; ``(n_nodes,)`` for a single model.
-            quadratic (torch.Tensor): Dense quadratic biases of shape
-                ``(*batch, n_nodes, n_nodes)`` in canonical orientation.
+            quadratic (torch.Tensor): Quadratic biases of the edges of shape
+                ``(*batch, n_edges)``, in the order of the graph's edges.
 
         Raises:
             ValueError: If the biases have inconsistent shapes or the sampler returns a different
@@ -222,7 +222,7 @@ class DimodSampler(TorchSampler):
         model = self.model
         batch_shape = self._validate_biases(linear, quadratic)
         linear_cpu = linear.detach().reshape(-1, model.n_nodes).cpu()
-        edge_biases_cpu = model.edge_biases(quadratic.detach()).reshape(-1, model.n_edges).cpu()
+        edge_biases_cpu = quadratic.detach().reshape(-1, model.n_edges).cpu()
         results = [self._submit(*self._ising(h, J)) for h, J in zip(linear_cpu, edge_biases_cpu)]
         self._check_num_reads(results)
         return torch.stack(results).reshape(*batch_shape, -1, model.n_nodes).to(linear.device)

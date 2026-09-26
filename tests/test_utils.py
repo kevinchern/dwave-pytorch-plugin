@@ -145,32 +145,32 @@ class TestGraphIndex(unittest.TestCase):
         self.assertListEqual([1, 2, 0, 1], graph.edge_idx_i.tolist())
         self.assertListEqual([2, 3, 2, 3], graph.edge_idx_j.tolist())
         self.assertListEqual([1, 2, 3, 2], graph.degrees().tolist())
-        adjacency = graph.adjacency
-        self.assertEqual(torch.bool, adjacency.dtype)
-        self.assertTrue(torch.equal(adjacency, adjacency.triu(1)))
-        self.assertListEqual(adjacency.nonzero().tolist(), [[0, 2], [1, 2], [1, 3], [2, 3]])
+        # every edge is found under both orientations
+        self.assertEqual(8, len(graph.edge_to_idx))
+        self.assertListEqual([0, 1, 2, 3], [graph.edge_to_idx[e] for e in graph.edges])
+        self.assertListEqual([0, 1, 2, 3], [graph.edge_to_idx[e[::-1]] for e in graph.edges])
         self.assertIn("n_nodes=4, n_edges=4", repr(graph))
 
     def test_module(self):
         graph = GraphIndex("abc", [("a", "b")])
         self.assertIsInstance(graph, torch.nn.Module)
         self.assertEqual(0, len(list(graph.parameters())))
-        self.assertSetEqual({"edge_idx_i", "edge_idx_j", "adjacency"}, set(graph.state_dict()))
+        self.assertSetEqual({"edge_idx_i", "edge_idx_j"}, set(graph.state_dict()))
 
         with self.subTest("Buffers move with the module"):
             graph.to("meta")
-            self.assertEqual("meta", graph.adjacency.device.type)
             self.assertEqual("meta", graph.edge_idx_i.device.type)
+            self.assertEqual("meta", graph.edge_idx_j.device.type)
 
         with self.subTest("The module can be copied and pickled"):
             graph = GraphIndex("abc", [("a", "b")])
             clone = copy.deepcopy(graph)
             self.assertTupleEqual(graph.nodes, clone.nodes)
             self.assertDictEqual(graph.node_to_idx, clone.node_to_idx)
-            self.assertTrue(torch.equal(graph.adjacency, clone.adjacency))
+            self.assertTrue(torch.equal(graph.edge_idx_i, clone.edge_idx_i))
             self.assertTupleEqual(graph.edges, pickle.loads(pickle.dumps(graph)).edges)
 
-    def test_edge_biases_roundtrip(self):
+    def test_dense_quadratic(self):
         graph = GraphIndex("abc", [("b", "a"), ("a", "c"), ("b", "c")])
         per_edge = torch.tensor([[1.0, 2.0, 3.0], [-1.0, -2.0, -3.0]])
         dense = graph.dense_quadratic(per_edge)
@@ -178,7 +178,7 @@ class TestGraphIndex(unittest.TestCase):
         torch.testing.assert_close(dense[0], torch.tensor([[0.0, 1.0, 2.0],
                                                            [0.0, 0.0, 3.0],
                                                            [0.0, 0.0, 0.0]]))
-        torch.testing.assert_close(graph.edge_biases(dense), per_edge)
+        torch.testing.assert_close(dense[..., graph.edge_idx_i, graph.edge_idx_j], per_edge)
         with self.assertRaisesRegex(ValueError, "Expected 3 edge biases"):
             graph.dense_quadratic(torch.zeros(2, 2))
 
@@ -186,7 +186,7 @@ class TestGraphIndex(unittest.TestCase):
         graph = GraphIndex("dbac", [("a", "b"), ("a", "c"), ("a", "d"), ("b", "c")])
         linear = torch.tensor([[0.0, 1.0, 2.0, 3.0], [0.5, -1.0, 0.0, 2.0]])
         edge_biases = torch.tensor([[1.0, 2.0, 3.0, 6.0], [-1.0, 0.5, 0.0, 2.0]])
-        quadratic = graph.dense_quadratic(edge_biases)
+        quadratic = edge_biases  # per-edge biases are what energy and effective_field take
         spins = randspins(2, 7, 4, seed=3)
         energies = graph.energy(spins, linear, quadratic)
         self.assertEqual((2, 7), tuple(energies.shape))
@@ -241,7 +241,7 @@ class TestGraphIndex(unittest.TestCase):
         self.assertEqual(0, graph.n_edges)
         self.assertEqual((0,), tuple(graph.edge_idx_i.shape))
         self.assertListEqual([0, 0], graph.degrees().tolist())
-        self.assertFalse(graph.adjacency.any())
+        self.assertDictEqual({}, graph.edge_to_idx)
 
     def test_validation(self):
         with self.assertRaisesRegex(ValueError, "duplicate entries"):

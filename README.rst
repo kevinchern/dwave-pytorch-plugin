@@ -28,9 +28,11 @@ on their own or as priors and layers of larger neural networks.
 The package provides the following components.
 
 * **Models** (``dwave.plugins.torch.models``). ``GraphRestrictedBoltzmannMachine`` is an Ising
-  model on the nodes and edges of a graph, such as the working graph of a QPU. Its quadratic
-  biases are stored as a dense, masked matrix, so energies, learning statistics, and effective
-  fields are dense matrix products that run efficiently on GPUs. The model supports hidden units,
+  model on the nodes and edges of a graph, such as the working graph of a QPU. Its parameters
+  are one linear bias per node and one quadratic bias per edge; the coupling matrix is built on
+  the fly, so energies and effective fields are dense matrix products that run efficiently on
+  GPUs while parameters, gradients and optimizer state stay the size of the graph. The model
+  supports hidden units,
   exact conditional expectations of hidden units that are not adjacent to each other, a
   quasi-objective whose gradient is the gradient of the negative log likelihood, and estimation of
   the effective inverse temperature of a set of samples. ``DiscreteVariationalAutoencoder``,

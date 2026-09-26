@@ -117,7 +117,7 @@ def run(use_qpu: bool, num_reads: int, batch_size: int, n_iterations: int, fully
 
         # Compute the average (absolute) gradient to monitor convergence
         avg_grad = (grbm.linear.grad.abs().mean()
-                    + grbm.quadratic.grad[grbm.adjacency].abs().mean()) / 2
+                    + grbm.quadratic.grad.abs().mean()) / 2
 
         print(
             f"Iteration: {iteration}, Average |gradient|: {avg_grad.item():.2f}, Effective inverse temperature: {measured_beta:.4f}"

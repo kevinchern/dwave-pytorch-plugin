@@ -84,13 +84,13 @@ class TestTorchSampler(unittest.TestCase):
             result = sampler.to(torch.device("meta"))
             self.assertIs(sampler, result)
             self.assertEqual(torch.device("meta"), self.model.linear.device)
-            self.assertEqual(torch.device("meta"), self.model.adjacency.device)
+            self.assertEqual(torch.device("meta"), self.model.edge_idx_i.device)
 
     def test_graph_bound_sampler(self):
         graph = GraphIndex(list("abc"), [("a", "b"), ("b", "c")])
         sampler = ConstantSampler(graph)
         self.assertIs(graph, sampler.model)
-        spins = sampler.sample_biases(torch.zeros(2, 3), torch.zeros(2, 3, 3))
+        spins = sampler.sample_biases(torch.zeros(2, 3), torch.zeros(2, 2))
         self.assertEqual((2, 1, 3), tuple(spins.shape))
 
         with self.subTest("Methods that need parameters require a Boltzmann machine"):
@@ -156,13 +156,13 @@ class TestTorchSampler(unittest.TestCase):
     def test_validate_biases(self):
         sampler = ConstantSampler(self.model)
         self.assertEqual(
-            (2, 5), tuple(sampler._validate_biases(torch.zeros(2, 5, 3), torch.zeros(2, 5, 3, 3)))
+            (2, 5), tuple(sampler._validate_biases(torch.zeros(2, 5, 3), torch.zeros(2, 5, 2)))
         )
-        self.assertEqual((), tuple(sampler._validate_biases(torch.zeros(3), torch.zeros(3, 3))))
+        self.assertEqual((), tuple(sampler._validate_biases(torch.zeros(3), torch.zeros(2))))
         with self.assertRaisesRegex(ValueError, r"linear must have shape \(\.\.\., 3\)"):
-            sampler._validate_biases(torch.zeros(2, 4), torch.zeros(2, 3, 3))
-        with self.assertRaisesRegex(ValueError, r"quadratic must have shape \(\.\.\., 3, 3\)"):
-            sampler._validate_biases(torch.zeros(2, 3), torch.zeros(3, 3))
+            sampler._validate_biases(torch.zeros(2, 4), torch.zeros(2, 2))
+        with self.assertRaisesRegex(ValueError, r"quadratic must have shape \(\.\.\., 2\)"):
+            sampler._validate_biases(torch.zeros(2, 3), torch.zeros(2))
 
 
 if __name__ == "__main__":

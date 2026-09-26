@@ -57,7 +57,7 @@ def run(device: str = "cpu"):
         optimizer.step()
 
         avg_grad = (grbm.linear.grad.abs().mean()
-                    + grbm.quadratic.grad[grbm.adjacency].abs().mean()) / 2
+                    + grbm.quadratic.grad.abs().mean()) / 2
         print(f"Iteration {iteration:3d} | Average |gradient|: {avg_grad.item():.2f}")
     print("\nTraining finished.")
 

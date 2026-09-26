@@ -54,7 +54,8 @@ class IsingExpectation(torch.autograd.Function):
 
     The sufficient statistics are the spins :math:`s_i` (paired with the linear biases) and the
     pairwise products :math:`s_i s_j` (paired with the quadratic biases). The latter covariance is
-    accumulated as a dense ``(N, N)`` matrix per batch element and masked to the edges of the model.
+    accumulated as a dense ``(N, N)`` matrix per batch element, built on the fly for the backward
+    pass only, and read off at the edges of the model.
     """
 
     @staticmethod
@@ -62,7 +63,8 @@ class IsingExpectation(torch.autograd.Function):
         ctx,
         spins: torch.Tensor,
         statistics: torch.Tensor,
-        adjacency: torch.Tensor,
+        edge_idx_i: torch.Tensor,
+        edge_idx_j: torch.Tensor,
         linear: torch.Tensor,
         quadratic: torch.Tensor,
     ) -> torch.Tensor:
@@ -73,10 +75,10 @@ class IsingExpectation(torch.autograd.Function):
                 vectors per observation in batch, and N is the number of nodes in the Ising model.
             statistics: Output statistic of spins of shape (B, M, D) where D is the dimension of
                 output statistics.
-            adjacency: Boolean tensor of shape (N, N) that is ``True`` at the entries of the
-                quadratic biases that correspond to edges of the Ising model.
+            edge_idx_i: Smaller node index of every edge of the Ising model, shape (E,).
+            edge_idx_j: Larger node index of every edge of the Ising model, shape (E,).
             linear: Linear biases of the Ising model with shape (B, N).
-            quadratic: Quadratic biases of the Ising model with shape (B, N, N).
+            quadratic: Quadratic biases of the edges of the Ising model with shape (B, E).
 
         Raises:
             ValueError: If ``statistics.ndim`` != 3.
@@ -86,24 +88,23 @@ class IsingExpectation(torch.autograd.Function):
         """
         if statistics.ndim != 3:
             raise ValueError(f"statistics.ndim should be 3. statistics.ndim is {statistics.ndim}")
-        ctx.save_for_backward(spins, statistics, adjacency)
+        ctx.save_for_backward(spins, statistics, edge_idx_i, edge_idx_j)
         return statistics.mean(-2)
 
     @staticmethod
     def backward(
         ctx, grad_output: torch.Tensor
-    ) -> tuple[None, None, None, torch.Tensor, torch.Tensor]:
+    ) -> tuple[None, None, None, None, torch.Tensor, torch.Tensor]:
         """Backpropagation of gradients approximated via sample covariance.
 
         Args:
             grad_output: Gradients of the loss with respect to the outputs, shape (B, D).
 
         Returns:
-            tuple[None, None, None, torch.Tensor, torch.Tensor]: Gradients with respect to the
-            linear and quadratic biases with shapes (B, N) and (B, N, N) respectively. Entries of
-            the latter outside ``adjacency`` are zero.
+            tuple[None, None, None, None, torch.Tensor, torch.Tensor]: Gradients with respect to
+            the linear and quadratic biases with shapes (B, N) and (B, E) respectively.
         """
-        spins, statistics, adjacency = ctx.saved_tensors
+        spins, statistics, edge_idx_i, edge_idx_j = ctx.saved_tensors
         sample_size = spins.shape[-2]
         # Weight of every sample: the gradient projected onto the centred output statistics.
         # Because the weights sum to zero over samples, covariances with the sufficient statistics
@@ -111,8 +112,9 @@ class IsingExpectation(torch.autograd.Function):
         centred = statistics - statistics.mean(-2, keepdim=True)
         weights = torch.einsum("bmy,by->bm", centred, grad_output) / (sample_size - 1)
         grad_linear = -torch.einsum("bm,bmi->bi", weights, spins)
-        grad_quadratic = -torch.bmm((spins * weights.unsqueeze(-1)).mT, spins) * adjacency
-        return None, None, None, grad_linear, grad_quadratic
+        covariance = torch.bmm((spins * weights.unsqueeze(-1)).mT, spins)
+        grad_quadratic = -covariance[:, edge_idx_i, edge_idx_j]
+        return None, None, None, None, grad_linear, grad_quadratic
 
 
 class Ising(GraphIndex):
@@ -122,10 +124,9 @@ class Ising(GraphIndex):
     An Ising model is defined by a graph :math:`G = (V, E)` or, equivalently, a set of nodes and
     edges. In implementation, the model is defined by an ordered list of nodes and edges. Inputs
     ``linear`` and ``quadratic`` are interpreted as the linear biases of :math:`V` and the
-    quadratic biases of :math:`E`. The quadratic biases are given as a dense ``(B, N, N)`` tensor
-    in canonical orientation: the bias of the edge between the nodes with indices ``i < j`` is read
-    from ``quadratic[:, i, j]`` (see :attr:`adjacency`); all other entries are ignored. The output
-    of the model is the expected output statistic (``statistic`` or :math:`g` below). That is,
+    quadratic biases of :math:`E`, one per node and one per edge in the order of :attr:`nodes` and
+    :attr:`edges`. The output of the model is the expected output statistic (``statistic`` or
+    :math:`g` below). That is,
 
     .. math::
 
@@ -157,11 +158,12 @@ class Ising(GraphIndex):
         spins = sampler.sample_biases(linear, quadratic, num_samples=100)  # (B, M, N)
         y = ising(linear, quadratic, spins)  # (B, D)
 
-    Inputs ``linear`` and ``quadratic`` should have shape ``(B, |V|)`` and ``(B, |V|, |V|)``
+    Inputs ``linear`` and ``quadratic`` should have shape ``(B, |V|)`` and ``(B, |E|)``
     respectively where ``B`` indicates a batch size, and ``spins`` should have shape
     ``(B, M, |V|)`` with ``M`` samples per model. Outputs have shape ``(B, D)`` where ``D`` is
-    the output dimension of ``statistic``. Gradients with respect to ``quadratic`` are nonzero only
-    at the edges of the model; ``spins`` receive no gradient.
+    the output dimension of ``statistic``. The gradient with respect to ``quadratic`` has one
+    entry per edge; ``spins`` receive no gradient. The coupling matrices of the models, should
+    they be needed, are built by :meth:`~dwave.plugins.torch.utils.GraphIndex.dense_quadratic`.
 
     The gradient estimator assumes that the spins are Boltzmann distributed at unit inverse
     temperature under the given biases. In practice, when sampling using a quantum annealer,
@@ -212,16 +214,16 @@ class Ising(GraphIndex):
         Raises:
             ValueError: If the inputs do not have the expected shapes.
         """
-        n_nodes = self.n_nodes
+        n_nodes, n_edges = self.n_nodes, self.n_edges
         if linear.ndim != 2 or linear.shape[1] != n_nodes:
             raise ValueError(
                 f"linear should have shape (B, {n_nodes}), got {tuple(linear.shape)}."
             )
         batch_size = linear.shape[0]
-        if quadratic.shape != (batch_size, n_nodes, n_nodes):
+        if quadratic.shape != (batch_size, n_edges):
             raise ValueError(
-                f"quadratic should have shape (B, {n_nodes}, {n_nodes}) = "
-                f"{(batch_size, n_nodes, n_nodes)}, got {tuple(quadratic.shape)}."
+                f"quadratic should have shape (B, {n_edges}) = {(batch_size, n_edges)}, got "
+                f"{tuple(quadratic.shape)}."
             )
         if spins.ndim != 3 or spins.shape[0] != batch_size or spins.shape[2] != n_nodes:
             raise ValueError(
@@ -236,8 +238,8 @@ class Ising(GraphIndex):
 
         Args:
             linear: Linear biases with shape (B, N) where N is the number of nodes in the model.
-            quadratic: Dense quadratic biases with shape (B, N, N); only the entries at
-                :attr:`adjacency` are used.
+            quadratic: Quadratic biases of the edges with shape (B, E) where E is the number of
+                edges in the model, in the order of :attr:`edges`.
             spins: Spins of shape (B, M, N) sampled from the Boltzmann distributions of the B
                 models, M per model, at unit inverse temperature.
 
@@ -250,7 +252,9 @@ class Ising(GraphIndex):
         """
         self._validate_inputs(linear, quadratic, spins)
         statistics = self.statistic(spins)
-        return IsingExpectation.apply(spins, statistics, self.adjacency, linear, quadratic)
+        return IsingExpectation.apply(
+            spins, statistics, self.edge_idx_i, self.edge_idx_j, linear, quadratic
+        )
 
     def estimate_betas(
         self, linear: torch.Tensor, quadratic: torch.Tensor, spins: torch.Tensor
@@ -260,15 +264,14 @@ class Ising(GraphIndex):
 
         Args:
             linear: Linear biases of shape (B, N).
-            quadratic: Dense quadratic biases of shape (B, N, N).
+            quadratic: Quadratic biases of the edges of shape (B, E).
             spins: Spins of shape (B, M, N), M samples per model.
 
         Returns:
             Tensor of length B with the estimated inverse temperature of every model.
         """
         self._validate_inputs(linear, quadratic, spins)
-        edge_biases = self.edge_biases(quadratic.detach())
         return torch.tensor([
             estimate_beta(self.nodes, self.edges, h, J, s)
-            for h, J, s in zip(linear.detach(), edge_biases, spins)
+            for h, J, s in zip(linear.detach(), quadratic.detach(), spins)
         ])
