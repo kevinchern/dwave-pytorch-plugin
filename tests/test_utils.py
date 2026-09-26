@@ -232,6 +232,20 @@ class TestGraphIndex(unittest.TestCase):
                 graph.effective_field(zeroed, linear=linear, quadratic=quadratic),
             )
 
+        with self.subTest("Biases that are not batched alike are rejected"):
+            # Broadcasting would silently return (2, 2, 7) energies and (2, 2, 7, 4) fields
+            for h, J in ((linear[0], quadratic), (linear, quadratic[0])):
+                with self.assertRaisesRegex(ValueError, "same batch of models"):
+                    graph.energy(spins, h, J)
+                with self.assertRaisesRegex(ValueError, "same batch of models"):
+                    graph.effective_field(spins, linear=h, quadratic=J)
+            with self.assertRaisesRegex(ValueError, "same batch of models"):
+                graph.effective_field(spins, linear=linear[0], coupling=coupling)
+            with self.assertRaisesRegex(ValueError, "one per node"):
+                graph.energy(spins, torch.zeros(2, 3), quadratic)
+            with self.assertRaisesRegex(ValueError, "one per node"):
+                graph.effective_field(spins, linear=torch.zeros(3), quadratic=quadratic[0])
+
         with self.subTest("Couplings are required"):
             with self.assertRaisesRegex(ValueError, "`quadratic` or `coupling`"):
                 graph.effective_field(spins, linear=linear)

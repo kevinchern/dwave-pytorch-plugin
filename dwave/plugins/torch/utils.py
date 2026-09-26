@@ -177,9 +177,14 @@ class GraphIndex(torch.nn.Module):
             quadratic (torch.Tensor): Quadratic biases of the edges, in the order of
                 :attr:`edges`.
 
+        Raises:
+            ValueError: If ``linear`` does not hold one bias per node, ``quadratic`` does not hold
+                one bias per edge, or the two are not batched alike.
+
         Returns:
             torch.Tensor: Energies of shape ``x.shape[:-1]``.
         """
+        self._check_linear(linear, quadratic.shape[:-1])
         x, squeeze = self._align_spins(x, linear)
         coupling = self.dense_quadratic(quadratic)
         energy = (x @ linear.unsqueeze(-1)).squeeze(-1) + ((x @ coupling) * x).sum(-1)
@@ -214,7 +219,8 @@ class GraphIndex(torch.nn.Module):
                 rebuilding it. Defaults to ``None``, i.e. it is built from ``quadratic``.
 
         Raises:
-            ValueError: If neither ``quadratic`` nor ``coupling`` is given.
+            ValueError: If neither ``quadratic`` nor ``coupling`` is given, ``linear`` does not
+                hold one bias per node, or the biases are not batched alike.
 
         Returns:
             torch.Tensor: Effective fields of shape ``(..., n_nodes)`` or ``(..., len(idx))``.
@@ -223,6 +229,7 @@ class GraphIndex(torch.nn.Module):
             if quadratic is None:
                 raise ValueError("Either `quadratic` or `coupling` is required.")
             coupling = self.symmetric_coupling(quadratic)
+        self._check_linear(linear, coupling.shape[:-2])
         x, squeeze = self._align_spins(x, linear)
         spins = torch.nan_to_num(x, nan=0.0)
         fields = linear if linear.ndim == 1 else linear.unsqueeze(-2)
@@ -230,6 +237,31 @@ class GraphIndex(torch.nn.Module):
             fields, coupling = fields[..., idx], coupling[..., :, idx]
         fields = fields + spins @ coupling
         return fields.squeeze(-2) if squeeze else fields
+
+    def _check_linear(self, linear: torch.Tensor, batch_shape: torch.Size) -> None:
+        """Raise unless ``linear`` holds one bias per node for every model of a batch.
+
+        Args:
+            linear (torch.Tensor): Linear biases, expected to be of shape
+                ``(*batch_shape, n_nodes)``.
+            batch_shape (torch.Size): Batch shape of the quadratic biases or of the couplings,
+                i.e. ``quadratic.shape[:-1]`` or ``coupling.shape[:-2]``.
+
+        Raises:
+            ValueError: If ``linear`` does not have shape ``(*batch_shape, n_nodes)``, in
+                particular when only one of the biases is batched, which would otherwise
+                broadcast into results of the wrong shape.
+        """
+        if linear.ndim < 1 or linear.shape[-1] != self.n_nodes:
+            raise ValueError(
+                f"Expected {self.n_nodes} linear biases (one per node), got shape "
+                f"{tuple(linear.shape)}."
+            )
+        if linear.shape[:-1] != batch_shape:
+            raise ValueError(
+                "`linear` and the quadratic biases must define the same batch of models, got "
+                f"batch shapes {tuple(linear.shape[:-1])} and {tuple(batch_shape)}."
+            )
 
     @staticmethod
     def _align_spins(x: torch.Tensor, linear: torch.Tensor) -> tuple[torch.Tensor, bool]:

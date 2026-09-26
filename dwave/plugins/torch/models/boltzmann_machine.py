@@ -240,11 +240,11 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
     def effective_field(
         self,
         x: torch.Tensor,
-        idx: torch.Tensor | None = None,
-        coupling: torch.Tensor | None = None,
         *,
         linear: torch.Tensor | None = None,
         quadratic: torch.Tensor | None = None,
+        idx: torch.Tensor | None = None,
+        coupling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""Effective fields :math:`h_k + \sum_{l} J_{kl} s_l` acting on nodes.
 
@@ -258,17 +258,22 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         Args:
             x (torch.Tensor): Spins of shape (..., N) where N denotes the number of variables in
                 the model; ``torch.nan`` marks unknown spins.
+            linear (torch.Tensor, optional): Linear biases to use instead of the model's
+                :attr:`linear`, possibly a batch of them (see
+                :meth:`~dwave.plugins.torch.utils.GraphIndex.effective_field`).
+            quadratic (torch.Tensor, optional): Quadratic biases of the edges to use instead of
+                the model's :attr:`quadratic`, possibly a batch of them.
             idx (torch.Tensor, optional): Indices of the nodes whose fields are returned. If
                 ``None``, the fields of all nodes are returned. Defaults to ``None``.
             coupling (torch.Tensor, optional): The
                 :meth:`~dwave.plugins.torch.utils.GraphIndex.symmetric_coupling` matrix of the
                 quadratic biases, which a caller evaluating the fields of several blocks of nodes
                 can pass to avoid rebuilding it. Defaults to ``None``, i.e. it is built.
-            linear (torch.Tensor, optional): Linear biases to use instead of the model's
-                :attr:`linear`, possibly a batch of them (see
-                :meth:`~dwave.plugins.torch.utils.GraphIndex.effective_field`).
-            quadratic (torch.Tensor, optional): Quadratic biases of the edges to use instead of
-                the model's :attr:`quadratic`, possibly a batch of them.
+
+        Raises:
+            ValueError: If explicitly given biases do not hold one bias per node or per edge, or
+                are not batched like the biases they are combined with, e.g. a batch of
+                ``linear`` biases with the model's single set of quadratic biases.
 
         Returns:
             torch.Tensor: Effective fields of shape (..., N) or (..., ``len(idx)``).

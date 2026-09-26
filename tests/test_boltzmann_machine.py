@@ -293,13 +293,13 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
 
         with self.subTest("Subset of nodes"):
             idx = torch.tensor([2, 0])
-            torch.testing.assert_close(self.bm.effective_field(spins, idx), expected[:, [2, 0]])
+            torch.testing.assert_close(self.bm.effective_field(spins, idx=idx), expected[:, [2, 0]])
 
         with self.subTest("Precomputed coupling matrix"):
             coupling = self.bm.symmetric_coupling(self.bm.quadratic)
             torch.testing.assert_close(self.bm.effective_field(spins, coupling=coupling), expected)
             torch.testing.assert_close(
-                self.bm.effective_field(spins, idx, coupling), expected[:, [2, 0]]
+                self.bm.effective_field(spins, idx=idx, coupling=coupling), expected[:, [2, 0]]
             )
 
         with self.subTest("Explicit biases override the parameters"):
@@ -310,6 +310,12 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
                 self.bm.effective_field(spins, quadratic=torch.zeros(4)),
                 self.bm.linear.expand_as(expected),
             )
+
+        with self.subTest("Explicit biases must be batched like the model's own"):
+            with self.assertRaisesRegex(ValueError, "same batch of models"):
+                self.bm.effective_field(spins, linear=torch.zeros(2, 4))
+            with self.assertRaisesRegex(ValueError, "same batch of models"):
+                self.bm.effective_field(spins, quadratic=torch.zeros(2, 4))
 
         with self.subTest("NaN spins contribute nothing"):
             padded = spins.clone()
@@ -439,7 +445,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         # effective field [2] = 0.13 * [-1] - 0.17 * [1] + 0.4 = 0.1
         set_weights(bm, [-0.1, -0.2, 0.4, 0.2], [-0.15, -0.7, 0.15, 0.13, -0.17])
         padded = bm.pad_visible(torch.tensor([[-1.0, 1.0]]))
-        h_eff = bm.effective_field(padded, bm.hidden_idx)
+        h_eff = bm.effective_field(padded, idx=bm.hidden_idx)
         torch.testing.assert_close(h_eff, torch.tensor([[-0.5, 0.1]]))
         expected = bm.conditional_expectation(padded)
         torch.testing.assert_close(expected[:, bm.visible_idx], torch.tensor([[-1.0, 1.0]]))
@@ -452,7 +458,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
                   quadratic={("b", "h"): 1.0, ("h", "a"): 0.1})
         padded = bm.pad_visible(torch.tensor([[1.0, -1.0]]))  # s_a = 1, s_b = -1
         self.assertAlmostEqual(
-            bm.effective_field(padded, bm.hidden_idx).item(), 0.1 - 1.0, places=6
+            bm.effective_field(padded, idx=bm.hidden_idx).item(), 0.1 - 1.0, places=6
         )
 
     def test_effective_field_ignores_hidden_couplings(self):
@@ -464,7 +470,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             quadratic={("v1", "h1"): 0.3, ("v2", "h1"): -0.2, ("v2", "h2"): 0.5, ("h1", "h2"): 0.7},
         )
         padded = bm.pad_visible(torch.tensor([[1.0, -1.0]]))
-        h_eff = bm.effective_field(padded, bm.hidden_idx)
+        h_eff = bm.effective_field(padded, idx=bm.hidden_idx)
         torch.testing.assert_close(h_eff, torch.tensor([[0.1 + 0.3 + 0.2, -0.4 - 0.5]]))
         with self.assertRaisesRegex(ValueError, "no two unknown spins are adjacent"):
             bm.conditional_expectation(padded)
