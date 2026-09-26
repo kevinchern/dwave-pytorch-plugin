@@ -20,7 +20,6 @@ import torch
 import torch.nn as nn
 
 from dwave.plugins.torch.nn.functional import maximum_mean_discrepancy_loss as mmd_loss
-from dwave.plugins.torch.nn.modules.utils import store_config
 
 if TYPE_CHECKING:
     from dwave.plugins.torch.nn.modules.kernels import Kernel
@@ -38,7 +37,6 @@ class MaximumMeanDiscrepancyLoss(nn.Module):
         kernel (Kernel): A kernel function object.
     """
 
-    @store_config
     def __init__(self, kernel: Kernel) -> None:
         super().__init__()
         self.kernel = kernel

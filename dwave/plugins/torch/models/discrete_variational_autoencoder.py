@@ -24,10 +24,13 @@
 # https://cloud.dwavesys.com/leap/legal/cloud_subscription_agreement/
 #
 
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Optional
 
 import torch
+
+from dwave.plugins.torch.nn.functional import gumbel_spins
 
 __all__ = ["DiscreteVariationalAutoencoder"]
 
@@ -65,61 +68,27 @@ class DiscreteVariationalAutoencoder(torch.nn.Module):
             is (l, n) -> d, where l is the output of the encoder and has shape
             (batch_size, l1, l2, ...), n is the number of discrete representations per
             data point, and d has shape (batch_size, n, d1, d2, ...), which will be the
-            input to the decoder. If None, the gumbel softmax function is used for
-            stochasticity. Defaults to None.
+            input to the decoder. If None,
+            :func:`~dwave.plugins.torch.nn.functional.gumbel_spins` is used, which
+            interprets the latents as the logits of spins. Defaults to None.
+
+    Attributes:
+        encoder (torch.nn.Module): The encoder, a submodule.
+        decoder (torch.nn.Module): The decoder, a submodule.
+        latent_to_discrete (Callable[[torch.Tensor, int], torch.Tensor]): The map from latents
+            to discrete representations.
     """
 
     def __init__(
         self,
         encoder: torch.nn.Module,
         decoder: torch.nn.Module,
-        latent_to_discrete: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
+        latent_to_discrete: Callable[[torch.Tensor, int], torch.Tensor] | None = None,
     ):
         super().__init__()
-        self._encoder = encoder
-        self._decoder = decoder
-        if latent_to_discrete is None:
-
-            def latent_to_discrete(logits: torch.Tensor, n_samples: int) -> torch.Tensor:
-                # Logits is of shape (batch_size, l1, l2, ...), we assume these logits
-                # refer to the probability of each discrete variable being 1. To use the
-                # gumbel softmax function we need to reshape the logits to (batch_size,
-                # l1, l2, ..., 1), and then stack the logits to a zeros tensor of the
-                # same shape. This is done to ensure that the gumbel softmax function
-                # works correctly.
-                n_feature_dims = logits.dim() - 1
-                logits = logits.unsqueeze(-1)
-                logits = torch.cat((logits, torch.zeros_like(logits)), dim=-1)
-                # We now create a new leading dimension and repeat the logits n_samples
-                # times:
-                logits = logits.unsqueeze(1).repeat(
-                    *((1, n_samples) + (1,) * n_feature_dims + (1,))
-                )
-                one_hots = torch.nn.functional.gumbel_softmax(logits, tau=1 / 7, hard=True)
-                # The constant 1/7 is used because it was used in
-                # https://iopscience.iop.org/article/10.1088/2632-2153/aba220
-
-                # one_hots is of shape (batch_size, n_samples, f_1, f_2, ..., 2), we need
-                # to take the first element of the last dimension and convert it to spin
-                # variables to make the latent space compatible with QPU models.
-                return one_hots[..., 0] * 2 - 1
-
-        self._latent_to_discrete = latent_to_discrete
-
-    @property
-    def encoder(self):
-        """Encoder network that maps image data to latent spinstrings."""
-        return self._encoder
-
-    @property
-    def decoder(self):
-        """Decoder network that maps latent variables to images."""
-        return self._decoder
-
-    @property
-    def latent_to_discrete(self):
-        """Function that maps the output of the encoder to a discrete representation"""
-        return self._latent_to_discrete
+        self.encoder = encoder
+        self.decoder = decoder
+        self.latent_to_discrete = gumbel_spins if latent_to_discrete is None else latent_to_discrete
 
     def forward(
         self, x: torch.Tensor, n_samples: int = 1
@@ -135,10 +104,10 @@ class DiscreteVariationalAutoencoder(torch.nn.Module):
                 samples are obtained. Defaults to 1.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor]: The reconstructed data of
-            shape (batch_size, n_samples, ...), the discrete representation(s) of the
-            encoded data with the shape (batch_size, n_samples, ...), and the logits,
-            which are the encoded data of shape (batch_size, ...).
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor]: The latents, i.e. the encoded data,
+            of shape (batch_size, ...); the discrete representation(s) of the encoded data, of
+            shape (batch_size, n_samples, ...); and the reconstructed data, of shape
+            (batch_size, n_samples, ...).
         """
         latents = self.encoder(x)
         discretes = self.latent_to_discrete(latents, n_samples)

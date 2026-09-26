@@ -16,7 +16,7 @@ import unittest
 import torch
 from parameterized import parameterized
 
-from dwave.plugins.torch.nn.functional import bit2spin_soft
+from dwave.plugins.torch.nn.functional import bit2spin_soft, gumbel_spins
 from dwave.plugins.torch.nn.functional import maximum_mean_discrepancy_loss as mmd_loss
 from dwave.plugins.torch.nn.functional import spin2bit_soft
 from tests.helper_functions import ConstantKernel
@@ -65,6 +65,30 @@ class TestMaximumMeanDiscrepancyLoss(unittest.TestCase):
         # kxx + kyy - 2*kxy = -25.0
         self.assertEqual(-25, mmd_loss(x, y, kernel))
 
+
+class TestGumbelSpins(unittest.TestCase):
+    def test_shape_and_values(self):
+        logits = torch.linspace(-2, 2, 24).reshape(4, 3, 2)
+        spins = gumbel_spins(logits, n_samples=5)
+        self.assertEqual((4, 5, 3, 2), tuple(spins.shape))
+        self.assertTrue(torch.all(spins.abs() == 1))
+        self.assertEqual((4, 1, 3, 2), tuple(gumbel_spins(logits).shape))
+
+    def test_strong_logits_are_deterministic(self):
+        # A logit of 20 is flipped by the Gumbel noise with probability sigmoid(-20), i.e. never
+        logits = torch.tensor([[20.0, -20.0], [-20.0, 20.0]])
+        spins = gumbel_spins(logits, n_samples=100)
+        expected = torch.tensor([[1.0, -1.0], [-1.0, 1.0]]).unsqueeze(1).expand(-1, 100, -1)
+        torch.testing.assert_close(spins, expected)
+
+    def test_straight_through_gradient(self):
+        # At a high temperature the relaxation never saturates, so every logit receives a positive
+        # gradient from every sample while the forward spins are still exactly ±1
+        logits = torch.zeros(3, 4, requires_grad=True)
+        spins = gumbel_spins(logits, n_samples=7, tau=100.0)
+        self.assertTrue(torch.all(spins.abs() == 1))
+        spins.sum().backward()
+        self.assertTrue(torch.all(logits.grad > 0))
 
 class TestFunctional(unittest.TestCase):
 

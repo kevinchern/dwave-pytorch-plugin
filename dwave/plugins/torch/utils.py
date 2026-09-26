@@ -14,14 +14,14 @@
 
 from __future__ import annotations
 
-from typing import Hashable, Iterable, Optional, Sequence
+from typing import Hashable, Iterable, Sequence
 
 import numpy as np
 import torch
 from dimod import BinaryQuadraticModel, SampleSet
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
 
-__all__ = ["GraphIndex", "estimate_beta", "sampleset_to_tensor", "to_bqm", "to_ising"]
+__all__ = ["GraphIndex", "estimate_beta", "randspin", "sampleset_to_tensor", "to_bqm", "to_ising"]
 
 
 class GraphIndex(torch.nn.Module):
@@ -209,9 +209,9 @@ class GraphIndex(torch.nn.Module):
         x: torch.Tensor,
         *,
         linear: torch.Tensor,
-        quadratic: Optional[torch.Tensor] = None,
-        idx: Optional[torch.Tensor] = None,
-        coupling: Optional[torch.Tensor] = None,
+        quadratic: torch.Tensor | None = None,
+        idx: torch.Tensor | None = None,
+        coupling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""Effective fields :math:`h_k + \sum_{l} J_{kl} s_l` acting on nodes under given biases.
 
@@ -263,8 +263,23 @@ class GraphIndex(torch.nn.Module):
         return x, False
 
 
+def randspin(size: Sequence[int], **kwargs) -> torch.Tensor:
+    """Random spins, i.e. ``±1`` values drawn uniformly and independently.
+
+    Args:
+        size (Sequence[int]): Shape of the output tensor.
+        **kwargs: Keyword arguments of :func:`torch.randint`, such as ``generator``, ``device``
+            and ``dtype``.
+
+    Returns:
+        torch.Tensor: A tensor of ``±1`` values of the given shape, of ``torch.int64`` unless
+        ``dtype`` is given.
+    """
+    return 2 * torch.randint(0, 2, size, **kwargs) - 1
+
+
 def sampleset_to_tensor(
-    ordered_vars: Sequence[Hashable], sample_set: SampleSet, device: Optional[torch.device] = None
+    ordered_vars: Sequence[Hashable], sample_set: SampleSet, device: torch.device | None = None
 ) -> torch.Tensor:
     """Converts a ``dimod.SampleSet`` to a ``torch.Tensor`` with one row per read.
 
@@ -290,7 +305,7 @@ def sampleset_to_tensor(
 
 
 def _scale_and_clip(
-    biases: torch.Tensor, prefactor: float, bounds: Optional[tuple[float, float]]
+    biases: torch.Tensor, prefactor: float, bounds: tuple[float, float] | None
 ) -> torch.Tensor:
     """Scales ``biases`` by ``prefactor`` and then clips them to ``bounds``, if given."""
     biases = prefactor * biases
@@ -303,8 +318,8 @@ def to_ising(
     linear: torch.Tensor,
     quadratic: torch.Tensor,
     prefactor: float = 1.0,
-    linear_range: Optional[tuple[float, float]] = None,
-    quadratic_range: Optional[tuple[float, float]] = None,
+    linear_range: tuple[float, float] | None = None,
+    quadratic_range: tuple[float, float] | None = None,
 ) -> tuple[dict[Hashable, float], dict[tuple[Hashable, Hashable], float]]:
     """Converts linear and quadratic biases to the Ising dictionaries used by dimod.
 
@@ -356,8 +371,8 @@ def to_bqm(
     linear: torch.Tensor,
     quadratic: torch.Tensor,
     prefactor: float = 1.0,
-    linear_range: Optional[tuple[float, float]] = None,
-    quadratic_range: Optional[tuple[float, float]] = None,
+    linear_range: tuple[float, float] | None = None,
+    quadratic_range: tuple[float, float] | None = None,
 ) -> BinaryQuadraticModel:
     """Converts linear and quadratic biases to a ``dimod.BinaryQuadraticModel``.
 

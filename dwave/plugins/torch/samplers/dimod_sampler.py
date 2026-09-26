@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Hashable, Optional
+from typing import Any, Hashable
 
 import dimod
 import torch
@@ -68,9 +68,9 @@ class DimodSampler(TorchSampler):
         model: GraphIndex,
         sampler: dimod.Sampler,
         prefactor: float = 1.0,
-        linear_range: Optional[tuple[float, float]] = None,
-        quadratic_range: Optional[tuple[float, float]] = None,
-        sample_kwargs: Optional[dict[str, Any]] = None,
+        linear_range: tuple[float, float] | None = None,
+        quadratic_range: tuple[float, float] | None = None,
+        sample_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(model)
         self.sampler = sampler
@@ -78,7 +78,7 @@ class DimodSampler(TorchSampler):
         self.linear_range = None if linear_range is None else tuple(linear_range)
         self.quadratic_range = None if quadratic_range is None else tuple(quadratic_range)
         self.sample_kwargs = dict(sample_kwargs or {})
-        self._sample_set: Optional[dimod.SampleSet] = None
+        self._sample_set: dimod.SampleSet | None = None
 
     @property
     def sample_set(self) -> dimod.SampleSet:
@@ -134,7 +134,7 @@ class DimodSampler(TorchSampler):
                 f"{self.model.n_nodes}), got sample sizes {sorted(num_reads)}."
             )
 
-    def sample(self, x: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def sample(self, x: torch.Tensor | None = None) -> torch.Tensor:
         """Sample the model's parameters with the dimod sampler and return the corresponding tensor.
 
         Args:

@@ -19,8 +19,8 @@ import torch
 from dimod import SPIN, BinaryQuadraticModel, SampleSet
 from torch import Tensor
 
-from dwave.plugins.torch.utils import (GraphIndex, estimate_beta, sampleset_to_tensor, to_bqm,
-                                       to_ising)
+from dwave.plugins.torch.utils import (GraphIndex, estimate_beta, randspin, sampleset_to_tensor,
+                                       to_bqm, to_ising)
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
 from tests.helper_functions import randspins
 
@@ -48,6 +48,24 @@ class TestUtils(unittest.TestCase):
         with self.subTest("Empty sample sets"):
             ss = SampleSet.from_samples(([], "ab"), SPIN, [])
             self.assertEqual((0, 2), tuple(sampleset_to_tensor("ab", ss).shape))
+
+
+class TestRandspin(unittest.TestCase):
+    def test_randspin(self):
+        spins = randspin((2000,), generator=torch.Generator().manual_seed(0))
+        self.assertEqual(torch.int64, spins.dtype)
+        self.assertSetEqual({-1, 1}, set(spins.unique().tolist()))
+
+        with self.subTest("Keyword arguments reach torch.randint"):
+            spins = randspin((3, 4), dtype=torch.float32, device="meta")
+            self.assertEqual((3, 4), tuple(spins.shape))
+            self.assertEqual(torch.float32, spins.dtype)
+            self.assertEqual("meta", spins.device.type)
+
+        with self.subTest("Seeded draws are reproducible"):
+            first = randspin((5, 5), generator=torch.Generator().manual_seed(3))
+            second = randspin((5, 5), generator=torch.Generator().manual_seed(3))
+            self.assertTrue(torch.equal(first, second))
 
 
 class TestToIsing(unittest.TestCase):

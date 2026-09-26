@@ -22,7 +22,7 @@ from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzman
 from dwave.plugins.torch.samplers import BlockSampler, TorchSampler
 from dwave.plugins.torch.utils import to_ising
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
-from tests.helper_functions import model_to_bqm, randspins, set_weights
+from tests.helper_functions import RecordedBernoulli, model_to_bqm, randspins, set_weights
 
 
 def random_model(n: int, p: float, n_hidden: int = 0, seed: int = 0, connect_hidden=False) -> GRBM:
@@ -616,29 +616,28 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         grad_auto = torch.cat([bm.linear.grad, bm.quadratic.grad[bm.edge_idx_i, bm.edge_idx_j]])
         torch.testing.assert_close(grad, grad_auto)
 
-    def test_quasi_objective_sampling_with_block_sampler(self):
-        # Sampling disconnected hidden units with a block-Gibbs sampler approximates their exact
-        # conditional expectations: every hidden unit only neighbours clamped visible units, so
-        # one sweep is exact.
+    def test_complete_draws_exact_conditional_samples(self):
+        # Sampling disconnected hidden units with one block-Gibbs sweep draws them from their exact
+        # conditional distributions: every hidden spin is +1 with probability (1 + E[s | data]) / 2
         model = random_model(7, 0.6, n_hidden=3, seed=11)
         s_observed = randspins(4, 4, seed=12)
-        s_model = randspins(6, 7, seed=13)
+        sampler = BlockSampler(model)
+        with RecordedBernoulli() as bernoulli:
+            s_data = sampler.complete(s_observed, num_samples=2)
+        self.assertEqual((4, 2, 7), tuple(s_data.shape))
 
-        exact = model.quasi_objective(
-            model.conditional_expectation(model.pad_visible(s_observed)), s_model
-        )
-        exact.backward()
-        grad_exact = model.linear.grad.clone()
-        model.zero_grad()
+        expectation = model.conditional_expectation(model.pad_visible(s_observed))
+        expected = ((1 + expectation) / 2).repeat_interleave(2, 0)  # one row per (observation, sample)
+        for block, probabilities in zip(sampler.partition, bernoulli.probabilities, strict=True):
+            hidden = torch.isin(block, model.hidden_idx)
+            if hidden.any():
+                torch.testing.assert_close(probabilities[:, hidden], expected[:, block[hidden]])
 
-        sampler = BlockSampler(model, seed=0)
-        s_data = sampler.complete(s_observed, num_samples=4000)
-        self.assertEqual((4, 4000, 7), tuple(s_data.shape))
-        approx = model.quasi_objective(s_data, s_model)
-        self.assertEqual((), tuple(approx.shape))
-        approx.backward()
-        torch.testing.assert_close(approx, exact, atol=0.05, rtol=0)
-        torch.testing.assert_close(model.linear.grad, grad_exact, atol=0.05, rtol=0)
+        with self.subTest("Visible spins are the observations and hidden spins are the draws"):
+            torch.testing.assert_close(
+                s_data[..., model.visible_idx], s_observed.unsqueeze(1).expand(-1, 2, -1)
+            )
+            self.assertTrue(torch.all(s_data[..., model.hidden_idx].abs() == 1))
 
     def test_quasi_objective_sampling_gradient_wrt_observations(self):
         bm = GRBM([1, 2, 3], [(1, 3), (2, 3)], [3], {1: 0.2, 2: 0.2, 3: 0.3},

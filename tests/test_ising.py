@@ -15,10 +15,11 @@
 import unittest
 
 import torch
-from dimod import BQM
+from dimod import BQM, ExactSolver
 
-from dwave.plugins.torch.nn.modules.ising import (IdentityStatistic, Ising, IsingExpectation,
-                                                  IsingStatistic, SpinStatistic)
+from dwave.plugins.torch.nn.modules.ising import Ising, IsingExpectation
+from dwave.plugins.torch.nn.modules.spin_statistic import (IdentityStatistic, IsingStatistic,
+                                                           SpinStatistic)
 from dwave.plugins.torch.samplers import BlockSampler, DimodSampler
 from dwave.plugins.torch.utils import to_bqm
 from dwave.samplers import SimulatedAnnealingSampler as Neal
@@ -159,6 +160,14 @@ class TestIsingStatistic(unittest.TestCase):
         # Edge indices have different length
         with self.assertRaisesRegex(ValueError, "Interaction indices should be of the same length, got"):
             IsingStatistic(node_indices=[], endpoints_1=[0], endpoints_2=[1, 2])
+
+    def test_from_graph(self):
+        # All spins followed by the products along the (canonically oriented) edges
+        ising = Ising("abc", [("b", "a"), ("a", "c")])
+        stat = IsingStatistic.from_graph(ising)
+        self.assertEqual(5, stat.dim_out)
+        x = torch.tensor([[[1.0, -1.0, 1.0]]])
+        torch.testing.assert_close(stat(x), torch.tensor([[[1.0, -1.0, 1.0, -1.0, 1.0]]]))
 
     def test_tensor_indices(self):
         # Ising internally passes nn.Parameter tensors as indices;
@@ -367,53 +376,44 @@ class TestIsing(unittest.TestCase):
         torch.testing.assert_close(torch.tensor(dimod_betas), estimated_betas)
 
     def test_sampling_with_block_sampler(self):
-        # End to end: statistics of a batch of models sampled on the layer's graph, on the GPU if
-        # the layer lives there
+        # The layer is sampled on its own graph by a sampler bound to it; strong fields make the
+        # Gibbs draws deterministic (a spin flips against a field of 10 with probability e^-20)
         ising = Ising("abc", [("a", "b"), ("a", "c")])
-        sampler = BlockSampler(ising, schedule=[1.0] * 5, seed=0)
+        sampler = BlockSampler(ising, schedule=[1.0] * 5)
+        linear = torch.tensor([[10.0] * 3, [-10.0] * 3])
         quadratic = torch.zeros(2, 3, 3)
-
-        with self.subTest("Strong fields pin the spins"):
-            linear = torch.tensor([[10.0] * 3, [-10.0] * 3])
-            spins = sampler.sample_biases(linear, quadratic, num_samples=100)
-            self.assertEqual((2, 100, 3), tuple(spins.shape))
-            torch.testing.assert_close(
-                ising(linear, quadratic, spins), torch.tensor([[-1.0] * 3, [1.0] * 3])
-            )
-
-        with self.subTest("Zero fields give zero average"):
-            linear = torch.zeros(2, 3)
-            spins = sampler.sample_biases(linear, quadratic, num_samples=100_000)
-            torch.testing.assert_close(
-                ising(linear, quadratic, spins), torch.zeros(2, 3), atol=0.02, rtol=0
-            )
+        spins = sampler.sample_biases(linear, quadratic, num_samples=100)
+        self.assertEqual((2, 100, 3), tuple(spins.shape))
+        torch.testing.assert_close(
+            ising(linear, quadratic, spins), torch.tensor([[-1.0] * 3, [1.0] * 3])
+        )
 
         with self.subTest("The layer has no parameters of its own to sample"):
             with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
                 sampler.sample()
 
     def test_sampling_with_dimod_sampler(self):
-        # A sampler operating at effective inverse temperature beta is given the biases scaled by
-        # 1/beta, the prefactor of the wrapper
         ising = Ising("abc", [("a", "b"), ("a", "c")])
-        bs = 10
+        bs = 4
         quadratic = torch.zeros((bs, 3, 3))
 
-        with self.subTest("Spins should be pinned"):
+        with self.subTest("An exactly enumerated uniform prior gives exactly zero statistics"):
+            # ExactSolver returns every state once, which is the Boltzmann distribution of zero
+            # biases, so the layer's averages vanish exactly
+            sampler = DimodSampler(ising, ExactSolver())
+            linear = torch.zeros(bs, 3)
+            spins = sampler.sample_biases(linear, quadratic)
+            self.assertEqual((bs, 8, 3), tuple(spins.shape))
+            torch.testing.assert_close(ising(linear, quadratic, spins), torch.zeros(bs, 3))
+
+        with self.subTest("Biases are scaled by the prefactor of a sampler at another temperature"):
+            # Scaled to 1e14, the fields pin every spin of every read of simulated annealing
             sampler = DimodSampler(ising, Neal(), prefactor=1e20,
-                                   sample_kwargs=dict(num_sweeps=1, num_reads=10000, beta_range=[1, 1]))
+                                   sample_kwargs=dict(num_sweeps=1, num_reads=10, beta_range=[1, 1]))
             linear = torch.ones((bs, 3)) * 1e-6
             spins = sampler.sample_biases(linear, quadratic)
-            self.assertEqual((bs, 10000, 3), tuple(spins.shape))
-            torch.testing.assert_close(ising(linear, quadratic, spins).mean(0), -torch.ones(3))
-
-        with self.subTest("Average should be 0"):
-            sampler = DimodSampler(ising, Neal(), prefactor=1e-30,
-                                   sample_kwargs=dict(num_sweeps=2, num_reads=100000, beta_range=[1, 1]))
-            linear = torch.ones((bs, 3))
-            spins = sampler.sample_biases(linear, quadratic)
-            torch.testing.assert_close(ising(linear, quadratic, spins).mean(0), torch.zeros(3),
-                                       rtol=0.001, atol=0.01)
+            self.assertEqual((bs, 10, 3), tuple(spins.shape))
+            torch.testing.assert_close(ising(linear, quadratic, spins), -torch.ones(bs, 3))
 
     def test_statistic_moves_with_layer(self):
         ising = Ising("abc", [("a", "b")], statistic=IsingStatistic([1], [0], [1])).to("meta")

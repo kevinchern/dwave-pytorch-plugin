@@ -60,7 +60,13 @@ features:
     ``(B, n_nodes, n_nodes)`` quadratic biases and returns dense gradients (nonzero only at edges);
     ``edge_biases`` and ``dense_quadratic`` convert between per-edge and dense biases.
     ``SpinStatistic`` is a ``torch.nn.Module``, so the statistic of a layer moves to the device of
-    the layer.
+    the layer, and ``IsingStatistic.from_graph`` builds the sufficient statistics of a graph's
+    Ising model.
+  - |
+    ``dwave.plugins.torch.nn.functional.gumbel_spins`` samples spins from encoder logits with the
+    straight-through Gumbel-softmax estimator. It is the default ``latent_to_discrete`` map of
+    ``DiscreteVariationalAutoencoder``, whose ``encoder``, ``decoder`` and ``latent_to_discrete``
+    are plain attributes.
   - |
     ``dwave.plugins.torch.nn`` exports the kernels, losses and Ising modules;
     ``dwave.plugins.torch.samplers`` exports ``BipartiteGibbsSampler``.
@@ -114,8 +120,24 @@ upgrade:
     are tuples. ``IdentityStatistic`` takes ``dim_out`` and ``IsingStatistic`` stores its indices
     as buffers.
   - |
+    The generic neural-network utilities ``Affine``, ``SkipLinear``, ``LinearBlock`` and
+    ``store_config`` are removed from ``dwave.plugins.torch.nn``; ``torch.nn`` provides the
+    building blocks they were composed of.
+  - |
+    ``pseudo_kl_divergence_loss`` moved from ``dwave.plugins.torch.models.losses`` to
+    ``dwave.plugins.torch.nn.functional`` and the ``models.losses`` package is removed.
+    ``randspin`` moved from ``dwave.plugins.torch.tensor`` to ``dwave.plugins.torch.utils`` and
+    the ``tensor`` module is removed. ``dwave.plugins.torch.nn.modules.ising`` is a module holding
+    ``Ising`` and ``IsingExpectation``; the statistics are in
+    ``dwave.plugins.torch.nn.modules.spin_statistic``. All of these remain exported by
+    ``dwave.plugins.torch.nn``.
+  - |
+    ``DiscreteVariationalAutoencoder`` registers its encoder and decoder as ``encoder`` and
+    ``decoder``, so the keys of ``state_dict()`` lose their leading underscores.
+  - |
     ``dwave-hybrid`` and ``einops`` are no longer dependencies, and ``dwave-graphs`` is required only
-    by the tests and examples. Package discovery is restricted to the ``dwave`` namespace.
+    by the tests and examples. Package discovery is restricted to the ``dwave`` namespace, and the
+    ``setup.py`` shim is removed in favour of ``pyproject.toml``.
 fixes:
   - |
     Effective fields of hidden units were wrong whenever a hidden node was the first endpoint of
@@ -134,5 +156,5 @@ fixes:
     the numbers of distinct samples differed between batch elements.
   - |
     ``TorchSampler.to()`` no longer leaves the original sampler half-moved; ``GaussianKernel`` no
-    longer produces zero bandwidths for integer ``factor``; ``store_config`` no longer raises for
-    array-valued arguments; ``tests/test_samplers`` is now collected by test discovery.
+    longer produces zero bandwidths for integer ``factor``; ``tests/test_samplers`` is now
+    collected by test discovery.

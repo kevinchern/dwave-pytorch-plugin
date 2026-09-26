@@ -19,11 +19,11 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from dwave.plugins.torch.nn.modules.ising.spin_statistic import IdentityStatistic
+from dwave.plugins.torch.nn.modules.spin_statistic import IdentityStatistic
 from dwave.plugins.torch.utils import GraphIndex, estimate_beta
 
 if TYPE_CHECKING:
-    from dwave.plugins.torch.nn.modules.ising.spin_statistic import SpinStatistic
+    from dwave.plugins.torch.nn.modules.spin_statistic import SpinStatistic
 
 __all__ = ["Ising", "IsingExpectation"]
 

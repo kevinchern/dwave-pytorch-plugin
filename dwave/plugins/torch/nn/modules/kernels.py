@@ -19,7 +19,6 @@ import torch
 import torch.nn as nn
 
 from dwave.plugins.torch.nn.functional import _validate_sample_pair
-from dwave.plugins.torch.nn.modules.utils import store_config
 
 __all__ = ["Kernel", "GaussianKernel"]
 
@@ -92,7 +91,6 @@ class GaussianKernel(Kernel):
             from the data (without gradients). Defaults to ``None``.
     """
 
-    @store_config
     def __init__(
         self, n_kernels: int, factor: int | float = 2.0, bandwidth: float | None = None
     ):

@@ -16,8 +16,12 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from dwave.plugins.torch.utils import GraphIndex
 
 __all__ = ["SpinStatistic", "IdentityStatistic", "IsingStatistic"]
 
@@ -108,6 +112,7 @@ class IsingStatistic(SpinStatistic):
 
     Computes the concatenation of selected node spins and element-wise
     products of spin pairs, i.e. [x[..., indices], x[..., indices_j] * x[..., indices_i]].
+    :meth:`from_graph` builds the statistic of all nodes and edges of a graph.
 
     Args:
         node_indices: Indices of nodes to include directly.
@@ -138,6 +143,21 @@ class IsingStatistic(SpinStatistic):
         self.register_buffer("node_indices", node_indices, persistent=False)
         self.register_buffer("endpoints_1", endpoints_1, persistent=False)
         self.register_buffer("endpoints_2", endpoints_2, persistent=False)
+
+    @classmethod
+    def from_graph(cls, graph: GraphIndex) -> IsingStatistic:
+        """The sufficient statistics of the Ising model on a graph: the spins of all nodes, in
+        index order, followed by the products of spins along the edges, in the order of the
+        graph's edges.
+
+        Args:
+            graph (GraphIndex): The graph, for example an :class:`~dwave.plugins.torch.nn.Ising`
+                layer.
+
+        Returns:
+            IsingStatistic: A statistic with ``dim_out == graph.n_nodes + graph.n_edges``.
+        """
+        return cls(range(graph.n_nodes), graph.edge_idx_i, graph.edge_idx_j)
 
     def _transform(self, x: torch.Tensor) -> torch.Tensor:
         """``x`` and pairwise products defined by the given indices."""

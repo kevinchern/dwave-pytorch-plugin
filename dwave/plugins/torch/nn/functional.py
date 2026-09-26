@@ -16,12 +16,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from dwave.plugins.torch.nn.modules.kernels import Kernel
-
 import torch
 
-__all__ = ["maximum_mean_discrepancy_loss", "bit2spin_soft", "spin2bit_soft"]
+if TYPE_CHECKING:
+    from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
+    from dwave.plugins.torch.nn.modules.kernels import Kernel
+
+__all__ = [
+    "bit2spin_soft",
+    "gumbel_spins",
+    "maximum_mean_discrepancy_loss",
+    "pseudo_kl_divergence_loss",
+    "spin2bit_soft",
+]
 
 
 def _validate_sample_pair(x: torch.Tensor, y: torch.Tensor) -> None:
@@ -95,6 +102,76 @@ def maximum_mean_discrepancy_loss(x: torch.Tensor, y: torch.Tensor, kernel: Kern
     yy = (kernel_yy.sum() - kernel_yy.trace()) / (num_y * (num_y - 1))
     xy = kernel_xy.sum() / (num_x * num_y)
     return xx + yy - 2 * xy
+
+
+def pseudo_kl_divergence_loss(
+    spins: torch.Tensor,
+    logits: torch.Tensor,
+    samples: torch.Tensor,
+    boltzmann_machine: GraphRestrictedBoltzmannMachine,
+) -> torch.Tensor:
+    """A pseudo Kullback-Leibler divergence loss function for a discrete autoencoder with a
+    Boltzmann machine prior.
+
+    This is not the true KL divergence, but the gradient of this function is the same as
+    the KL divergence gradient. See https://arxiv.org/abs/1609.02200 for more details.
+
+    The loss is the average, over the batch, of the energy of the encoder's spins under the
+    Boltzmann machine (up to a constant that does not depend on the encoder) minus the entropy of
+    the encoder's factorized distribution over the spins of each data point.
+
+    Args:
+        spins (torch.Tensor): A tensor of spins of shape (batch_size, n_spins) or shape
+            (batch_size, n_samples, n_spins) obtained from a stochastic function that
+            maps the output of the encoder (logit representation) to a spin
+            representation, e.g. :func:`gumbel_spins`.
+        logits (torch.Tensor): A tensor of logits of shape (batch_size, n_spins). These
+            logits are the raw output of the encoder.
+        samples (torch.Tensor): A tensor of samples from the Boltzmann machine, of shape
+            (num_samples, n_spins).
+        boltzmann_machine (GraphRestrictedBoltzmannMachine): The Boltzmann machine prior. Any
+            object with a ``quasi_objective(s_data, s_model)`` method is accepted.
+
+    Returns:
+        torch.Tensor: The computed pseudo KL divergence loss.
+    """
+    probabilities = torch.sigmoid(logits)
+    # Entropy of the factorized encoder distribution of each data point is the *sum* of the
+    # per-spin binary entropies; like the energy term below it is then averaged over the batch.
+    entropy = torch.nn.functional.binary_cross_entropy_with_logits(
+        logits, probabilities, reduction="none"
+    ).flatten(1).sum(-1).mean()
+    cross_entropy = boltzmann_machine.quasi_objective(spins, samples)
+    return cross_entropy - entropy
+
+
+def gumbel_spins(logits: torch.Tensor, n_samples: int = 1, tau: float = 1 / 7) -> torch.Tensor:
+    r"""Samples spins from the factorized distribution of encoder logits with the straight-through
+    Gumbel-softmax estimator.
+
+    Every logit :math:`\ell` defines a spin with :math:`P(s = +1) = \sigma(\ell)`. Spins are drawn
+    with a hard two-class Gumbel-softmax over :math:`(\ell, 0)` at temperature ``tau`` (see
+    :func:`torch.nn.functional.gumbel_softmax`): the forward pass yields exact spins and the
+    backward pass uses the gradient of the softmax relaxation. This is the default
+    ``latent_to_discrete`` map of
+    :class:`~dwave.plugins.torch.models.DiscreteVariationalAutoencoder`; the default temperature
+    is the one used in https://iopscience.iop.org/article/10.1088/2632-2153/aba220.
+
+    Args:
+        logits (torch.Tensor): Logits of shape (batch_size, l1, l2, ...).
+        n_samples (int): Number of spin configurations drawn per row of logits. Defaults to 1.
+        tau (float): Temperature of the Gumbel-softmax relaxation. Defaults to ``1/7``.
+
+    Returns:
+        torch.Tensor: Spins in ``{-1, +1}`` of shape (batch_size, n_samples, l1, l2, ...),
+        differentiable with respect to ``logits``.
+    """
+    expanded = logits.unsqueeze(1).expand(-1, n_samples, *logits.shape[1:])
+    two_class = torch.stack((expanded, torch.zeros_like(expanded)), dim=-1)
+    one_hot = torch.nn.functional.gumbel_softmax(two_class, tau=tau, hard=True)
+    # The first class indicates s = +1. The straight-through estimator can leave the indicator a
+    # rounding error away from {0, 1}, so the exact range check of bit2spin_soft is not used here.
+    return 2 * one_hot[..., 0] - 1
 
 
 def bit2spin_soft(b: torch.Tensor) -> torch.Tensor:

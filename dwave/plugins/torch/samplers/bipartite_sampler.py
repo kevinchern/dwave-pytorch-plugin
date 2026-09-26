@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 
@@ -55,8 +54,8 @@ class BipartiteGibbsSampler(BlockSampler):
         model: GraphRestrictedBoltzmannMachine,
         num_chains: int = 1,
         schedule: Iterable[float] = (1.0,),
-        initial_states: Optional[torch.Tensor] = None,
-        seed: Optional[int] = None,
+        initial_states: torch.Tensor | None = None,
+        seed: int | None = None,
     ) -> None:
         if not isinstance(model, GraphRestrictedBoltzmannMachine):
             raise TypeError(

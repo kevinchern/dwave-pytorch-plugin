@@ -34,7 +34,7 @@ The package provides the following components.
   exact conditional expectations of hidden units that are not adjacent to each other, a
   quasi-objective whose gradient is the gradient of the negative log likelihood, and estimation of
   the effective inverse temperature of a set of samples. ``DiscreteVariationalAutoencoder``,
-  together with the ``pseudo_kl_divergence_loss`` of ``dwave.plugins.torch.models.losses``,
+  together with the ``pseudo_kl_divergence_loss`` of ``dwave.plugins.torch.nn.functional``,
   supports training autoencoders with a Boltzmann machine prior over discrete latent variables.
 
 * **Samplers** (``dwave.plugins.torch.samplers``). Samplers are ``torch.nn.Module`` objects that
@@ -50,13 +50,14 @@ The package provides the following components.
 * **Neural network modules** (``dwave.plugins.torch.nn``). An ``Ising`` layer takes the biases
   of a batch of Ising models and spins sampled from them by any of the samplers, and returns
   expected statistics with a backward pass approximated by sample covariances; ``SpinStatistic``
-  classes define the statistics it returns. Also included are ``LinearBlock``, ``SkipLinear``,
-  and ``Affine`` layers, a ``GaussianKernel``, a ``MaximumMeanDiscrepancyLoss``, and, in
-  ``dwave.plugins.torch.nn.functional``, the functional form of that loss and soft
-  conversions between bits and spins.
+  classes define the statistics it returns. Also included are a ``GaussianKernel`` and a
+  ``MaximumMeanDiscrepancyLoss`` for matching encoder samples to prior samples, and, in
+  ``dwave.plugins.torch.nn.functional``, the functional losses, the Gumbel-softmax sampling of
+  spins from encoder logits, and soft conversions between bits and spins.
 
-* **Utilities** (``dwave.plugins.torch.utils`` and ``dwave.plugins.torch.tensor``). Conversions
-  between tensors and dimod's Ising dictionaries and sample sets, and random spin generation.
+* **Utilities** (``dwave.plugins.torch.utils``). The graph module that models and layers are
+  built on, conversions between tensors and dimod's Ising dictionaries and sample sets,
+  temperature estimation, and random spin generation.
 
 .. end_pytorch_plugin_about
 

@@ -37,11 +37,6 @@ class TestKernel(unittest.TestCase):
 
 class TestGaussianKernel(unittest.TestCase):
 
-    def test_has_config(self):
-        rbf = GaussianKernel(5, 2.1, 0.1)
-        self.assertDictEqual(dict(rbf.config), dict(module_name="GaussianKernel",
-                             n_kernels=5, factor=2.1, bandwidth=0.1))
-
     @parameterized.expand([
         (torch.randn((5, 12)), torch.rand((7, 12))),
         (torch.randn((5, 12, 34)), torch.rand((7, 12, 34))),

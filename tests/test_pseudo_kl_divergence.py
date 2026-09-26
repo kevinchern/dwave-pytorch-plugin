@@ -32,7 +32,7 @@ import torch
 import torch.nn.functional as F
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
-from dwave.plugins.torch.models.losses.kl_divergence import pseudo_kl_divergence_loss
+from dwave.plugins.torch.nn.functional import pseudo_kl_divergence_loss
 
 
 def encoder_entropy(logits: torch.Tensor) -> torch.Tensor:
@@ -169,6 +169,7 @@ class TestPseudoKLDivergenceLoss(unittest.TestCase):
 
         batch_size, n_spins = 2, 3
 
+        torch.manual_seed(0)
         logits = torch.randn(batch_size, n_spins, requires_grad=True)
         spins_data = torch.ones(batch_size, n_spins)
         spins_model = torch.zeros(batch_size, n_spins)

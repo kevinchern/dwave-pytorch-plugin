@@ -26,7 +26,7 @@
 
 from __future__ import annotations
 
-from typing import Hashable, Iterable, Optional
+from typing import Hashable, Iterable
 
 import torch
 
@@ -76,9 +76,11 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
     samples drawn by the ``complete`` method of a
     :class:`~dwave.plugins.torch.samplers.TorchSampler` otherwise.
 
-    The graph attributes and buffers are those of :class:`~dwave.plugins.torch.utils.GraphIndex`.
+    The graph attributes and buffers---``nodes``, ``edges``, ``node_to_idx``, ``edge_idx_i``,
+    ``edge_idx_j`` and ``adjacency``---are those of :class:`~dwave.plugins.torch.utils.GraphIndex`.
     The parameters and buffers of the module are registered under the attribute names listed
-    below, which are therefore the keys of :meth:`~torch.nn.Module.state_dict`.
+    below and in the base class, which are therefore the keys of
+    :meth:`~torch.nn.Module.state_dict`.
 
     Args:
         nodes (Iterable[Hashable]): List of nodes.
@@ -101,23 +103,10 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
             tensor. The bias of the edge between the nodes with indices ``i < j`` is stored at
             ``[i, j]``; entries outside :attr:`adjacency` are ignored by every computation. The
             per-edge biases, in the order of :attr:`edges`, are returned by :meth:`edge_biases`.
-        adjacency (torch.Tensor): Strictly upper-triangular boolean buffer of shape
-            ``(n_nodes, n_nodes)`` that is ``True`` exactly at the entries of :attr:`quadratic`
-            that correspond to edges.
-        edge_idx_i (torch.Tensor): The smaller node index of each edge, in the order of
-            :attr:`edges`.
-        edge_idx_j (torch.Tensor): The larger node index of each edge, in the order of
-            :attr:`edges`.
         visible_idx (torch.Tensor): Indices of the visible units, in the order of the columns
             of observations.
         hidden_idx (torch.Tensor): Indices of the hidden units.
-        nodes (tuple[Hashable, ...]): The nodes of the model, visible and hidden, in index
-            order.
-        edges (tuple[tuple[Hashable, Hashable], ...]): The edges of the model, in the
-            orientation given at construction.
         hidden_nodes (tuple[Hashable, ...]): The hidden nodes.
-        node_to_idx (dict[Hashable, int]): Mapping from node to index; derived from ``nodes``
-            and not to be modified.
     """
     # QPU beta has been measured to be 5-8 (in inverse units of programmed J)
     # Considering the higher temperature within this range, to sample from a beta=1
@@ -131,9 +120,9 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         self,
         nodes: Iterable[Hashable],
         edges: Iterable[tuple[Hashable, Hashable]],
-        hidden_nodes: Optional[Iterable[Hashable]] = None,
-        linear: Optional[dict[Hashable, float]] = None,
-        quadratic: Optional[dict[tuple[Hashable, Hashable], float]] = None,
+        hidden_nodes: Iterable[Hashable] | None = None,
+        linear: dict[Hashable, float] | None = None,
+        quadratic: dict[tuple[Hashable, Hashable], float] | None = None,
     ) -> None:
         super().__init__(nodes, edges)
 
@@ -228,7 +217,7 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         with torch.no_grad():
             self.quadratic[rows, cols] = values
 
-    def coupling(self, quadratic: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def coupling(self, quadratic: torch.Tensor | None = None) -> torch.Tensor:
         """The coupling matrix :math:`J` with off-graph entries forced to zero.
 
         Args:
@@ -240,7 +229,7 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         """
         return super().coupling(self.quadratic if quadratic is None else quadratic)
 
-    def symmetric_coupling(self, quadratic: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def symmetric_coupling(self, quadratic: torch.Tensor | None = None) -> torch.Tensor:
         """The symmetrized coupling matrix :math:`J + J^T`, whose row ``k`` holds the couplings
         of node ``k`` to every other node.
 
@@ -253,7 +242,7 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         """
         return super().symmetric_coupling(self.quadratic if quadratic is None else quadratic)
 
-    def edge_biases(self, quadratic: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def edge_biases(self, quadratic: torch.Tensor | None = None) -> torch.Tensor:
         """Quadratic biases of the edges, of shape ``(..., n_edges)`` and in the order of
         :attr:`edges`.
 
@@ -308,11 +297,11 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
     def effective_field(
         self,
         x: torch.Tensor,
-        idx: Optional[torch.Tensor] = None,
-        coupling: Optional[torch.Tensor] = None,
+        idx: torch.Tensor | None = None,
+        coupling: torch.Tensor | None = None,
         *,
-        linear: Optional[torch.Tensor] = None,
-        quadratic: Optional[torch.Tensor] = None,
+        linear: torch.Tensor | None = None,
+        quadratic: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""Effective fields :math:`h_k + \sum_{l} J_{kl} s_l` acting on nodes.
 
@@ -390,7 +379,7 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         :meth:`sufficient_statistics` of data and model, i.e. the gradient of the negative log
         likelihood. The objective is differentiable with respect to ``s_data`` as well, which
         lets gradients flow into an encoder that produces the data (see
-        :func:`~dwave.plugins.torch.models.losses.pseudo_kl_divergence_loss`).
+        :func:`~dwave.plugins.torch.nn.functional.pseudo_kl_divergence_loss`).
 
         Both arguments are complete spin configurations with one column per node. For a model
         with hidden units, fill in the hidden units of the data first: exactly with

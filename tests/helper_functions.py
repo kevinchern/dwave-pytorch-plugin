@@ -11,19 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from inspect import signature
-from typing import Optional
+from __future__ import annotations
+
+import unittest.mock
 
 import torch
 from dimod import BinaryQuadraticModel
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.nn.modules.kernels import Kernel
-from dwave.plugins.torch.tensor import randspin
-from dwave.plugins.torch.utils import to_bqm
+from dwave.plugins.torch.utils import randspin, to_bqm
 
-
-# ---------------------------------------------------------------- Boltzmann machines ------------
 
 def set_weights(bm: GRBM, linear, quadratic) -> None:
     """Set the linear biases and the per-edge quadratic biases (in edge order) of a model."""
@@ -44,8 +42,6 @@ def randspins(*shape, seed: int = 0) -> torch.Tensor:
     return randspin(shape, generator=torch.Generator().manual_seed(seed)).float()
 
 
-# ---------------------------------------------------------------- kernels -----------------------
-
 class ConstantKernel(Kernel):
     """A kernel whose matrix is a fixed constant irrespective of its inputs.
 
@@ -53,7 +49,7 @@ class ConstantKernel(Kernel):
         matrix: The kernel matrix. Defaults to a 4-by-4 matrix.
     """
 
-    def __init__(self, matrix: Optional[list[list[float]]] = None) -> None:
+    def __init__(self, matrix: list[list[float]] | None = None) -> None:
         super().__init__()
         if matrix is None:
             matrix = [[10, 4, 0, 1],
@@ -66,121 +62,87 @@ class ConstantKernel(Kernel):
         return self.matrix
 
 
-# ---------------------------------------------------------------- neural network modules --------
+# ---------------------------------------------------------------- exact tests of samplers -------
 
-def model_probably_good(
-        model: torch.nn.Module, shape_in: tuple[int, ...], shape_out: tuple[int, ...]
-) -> bool:
-    """Checks whether the model output has expected shape, is probably unconstrained, and the model
-    has its configs stored.
+class RecordedBernoulli:
+    """Replaces ``torch.bernoulli`` by a deterministic threshold rule and records the probabilities
+    it is called with, so that sampling code is tested exactly rather than statistically.
 
-    This function generates dummy data with a padded batch dimension on top of the
-    input dimension (so ``shape_in`` should exclude a batch dimension). The data is passed through
-    the ``model``. Subsequent tests are described in ``shapes_match``, ``probably_unconstrained``,
-    and ``has_correct_config``.
+    A draw is 1 where the probability exceeds ``threshold`` and 0 elsewhere.
 
     Args:
-        model (torch.nn.Module): The module to be tested.
-        shape_in (tuple[int, ...]): Input data shape excluding the batch dimension.
-        shape_out (tuple[int, ...]): Output data shape excluding the batch dimension.
+        threshold: The probability above which a draw is 1. Defaults to 0.5.
+    """
+
+    def __init__(self, threshold: float = 0.5) -> None:
+        self.threshold = threshold
+        self.probabilities: list[torch.Tensor] = []
+        self._patch = unittest.mock.patch("torch.bernoulli", side_effect=self._draw)
+
+    def _draw(self, probabilities: torch.Tensor, *, generator=None) -> torch.Tensor:
+        self.probabilities.append(probabilities.clone())
+        return (probabilities > self.threshold).to(probabilities.dtype)
+
+    def __enter__(self) -> RecordedBernoulli:
+        self._patch.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._patch.stop()
+
+
+def constant_randspin(value: float = 1.0):
+    """Patches the block sampler's random spin initialization to return spins equal to ``value``."""
+    return unittest.mock.patch(
+        "dwave.plugins.torch.samplers.block_spin_sampler.randspin",
+        side_effect=lambda size, **kwargs: torch.full(tuple(size), value),
+    )
+
+
+def exact_update_probabilities(graph, x, linear, quadratic, block, beta, criterion) -> torch.Tensor:
+    """The probabilities a block update must draw with, computed from exact energies.
+
+    For ``"Gibbs"`` these are the conditional probabilities of the spins of ``block`` being ``+1``
+    given all other spins; for ``"Metropolis"`` the acceptance probabilities of flipping them.
+    Biases follow the batching convention of ``GraphIndex.energy``.
 
     Returns:
-        bool: Indicator for whether the model meets the three conditions above.
+        torch.Tensor: Probabilities of shape ``(*x.shape[:-1], len(block))``.
     """
-    bs = 100
-    x = torch.randn((bs, ) + shape_in)
-    y = model(x)
-    padded_out = (bs,)+shape_out
-    return (shapes_match(y, padded_out)
-            and probably_unconstrained(y)
-            and has_correct_config(model))
+    probabilities = []
+    for node in block.tolist():
+        plus, minus = x.clone(), x.clone()
+        plus[..., node], minus[..., node] = 1.0, -1.0
+        e_plus = graph.energy(plus, linear, quadratic)
+        e_minus = graph.energy(minus, linear, quadratic)
+        if criterion == "Gibbs":
+            probabilities.append(torch.sigmoid(-beta * (e_plus - e_minus)))
+        else:
+            current = graph.energy(x, linear, quadratic)
+            flipped = torch.where(x[..., node] > 0, e_minus, e_plus)
+            probabilities.append(torch.exp(-beta * (flipped - current)).clamp(max=1.0))
+    return torch.stack(probabilities, -1)
 
 
-def has_correct_config(model: torch.nn.Module) -> bool:
-    """Checks whether the model has its initialization arguments stored in a ``config`` field.
+def replay_sweep(graph, x, linear, quadratic, partition, beta, criterion, recorded,
+                 clamp_mask=None, clamped_values=None, threshold: float = 0.5) -> torch.Tensor:
+    """Replays one block sweep from the probabilities recorded by :class:`RecordedBernoulli`.
 
-    Args:
-        model (torch.nn.Module): The module to be tested.
-
-    Returns:
-        bool: Indicator for whether the model has its initialization arguments stored.
+    Asserts that every recorded probability is the exact one for the state at that point of the
+    sweep, applies the threshold draws as the sampler does, restores clamped spins, and returns
+    the resulting state.
     """
-    if not hasattr(model, "config"):
-        return False
-    sig = signature(model.__init__)
-    return set(model.config.keys()) == set(sig.parameters.keys()) | {"module_name"}
-
-
-def shapes_match(x: torch.Tensor, y: tuple[int, ...]) -> bool:
-    """Checks whether `x.shape` is equal to `y`.
-
-    Args:
-        x (torch.Tensor): A tensor.
-        y (tuple[int, ...]): The expected shape.
-
-    Returns:
-        bool: Indicator for whether the shape is as expected.
-    """
-    return tuple(x.shape) == y
-
-
-def are_all_spins(x: torch.Tensor) -> bool:
-    """Checks all entries of `x` are one in absolute value.
-
-    Args:
-        x (torch.Tensor): A tensor.
-
-    Returns:
-        bool: indicator for whether all entries of `x` are in ``{-1, 1}``.
-    """
-    return (x.float().abs() == 1).all()
-
-
-def has_mixed_signs(x: torch.Tensor) -> bool:
-    """Checks whether `x` has both positive and negative values.
-
-    Args:
-        x (torch.Tensor): A tensor to be cast to type float.
-
-    Returns:
-        bool: Indicator for whether `x` consists of both positive and negative values.
-    """
-    return bool(x.max() > 0 and x.min() < 0)
-
-
-def has_zeros(x: torch.Tensor) -> bool:
-    """Checks whether `x` has exact zeros.
-
-    Args:
-        x (torch.Tensor): A tensor.
-
-    Returns:
-        bool: Indicator for whether `x` has any zero-valued entries.
-    """
-    return (x == 0).float().any()
-
-
-def bounded_in_plus_minus_one(x: torch.Tensor) -> bool:
-    """Checks whether all entries of `x` are in ``[-1, 1]``.
-
-    Args:
-        x (torch.Tensor): A tensor.
-
-    Returns:
-        bool: Indicator for whether all values of `x` are in ``[-1, 1]``.
-    """
-    return bool((x.abs() <= 1).all())
-
-
-def probably_unconstrained(x: torch.Tensor):
-    """Checks whether `x` has any activation-like constraints.
-    Checks `x` has no exact zeros, not bounded in ``[-1, 1]``, and has both positive and
-    negative-valued entries.
-
-    Args:
-        x (torch.Tensor): A tensor.
-
-    Returns:
-        bool: Indicator for whether `x` passes the "constraints".
-    """
-    return not has_zeros(x) and not bounded_in_plus_minus_one(x) and has_mixed_signs(x)
+    x = x.clone()
+    for block, probabilities in zip(partition, recorded, strict=True):
+        expected = exact_update_probabilities(graph, x, linear, quadratic, block, beta, criterion)
+        torch.testing.assert_close(probabilities, expected)
+        draw = (probabilities > threshold).to(x.dtype)
+        if criterion == "Gibbs":
+            x[..., block] = 2 * draw - 1
+        else:
+            x[..., block] = x[..., block] * (1 - 2 * draw)
+        if clamp_mask is not None:
+            x[..., block] = torch.where(
+                clamp_mask[..., block], clamped_values[..., block], x[..., block]
+            )
+    return x

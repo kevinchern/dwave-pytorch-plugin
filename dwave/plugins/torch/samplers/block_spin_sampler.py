@@ -15,15 +15,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable, Iterable
-from typing import Literal, Optional
+from typing import Literal
 
 import networkx as nx
 import torch
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
 from dwave.plugins.torch.samplers.base import TorchSampler
-from dwave.plugins.torch.tensor import randspin
-from dwave.plugins.torch.utils import GraphIndex
+from dwave.plugins.torch.utils import GraphIndex, randspin
 
 __all__ = ["BlockSampler"]
 
@@ -87,12 +86,12 @@ class BlockSampler(TorchSampler):
     def __init__(
         self,
         model: GraphIndex,
-        colouring: Optional[Callable[[Hashable], Hashable]] = None,
+        colouring: Callable[[Hashable], Hashable] | None = None,
         num_chains: int = 1,
         schedule: Iterable[float] = (1.0,),
         proposal_acceptance_criteria: Literal["Gibbs", "Metropolis"] = "Gibbs",
-        initial_states: Optional[torch.Tensor] = None,
-        seed: Optional[int] = None,
+        initial_states: torch.Tensor | None = None,
+        seed: int | None = None,
     ) -> None:
         super().__init__(model)
 
@@ -108,7 +107,7 @@ class BlockSampler(TorchSampler):
         if not self.schedule:
             raise ValueError("`schedule` should contain at least one inverse temperature.")
         self._seed = None if seed is None else int(seed)
-        self._generator: Optional[torch.Generator] = None
+        self._generator: torch.Generator | None = None
 
         # The blocks are consecutive slices of the node indices sorted by colour. The indices
         # are a (non-persistent) buffer so that the blocks live on the device of the model.
@@ -141,7 +140,7 @@ class BlockSampler(TorchSampler):
         return [model.edges[k] for k in same.nonzero().flatten().tolist()]
 
     def _partition_nodes(
-        self, colouring: Optional[Callable[[Hashable], Hashable]]
+        self, colouring: Callable[[Hashable], Hashable] | None
     ) -> tuple[torch.Tensor, tuple[int, ...]]:
         """Partition the node indices into blocks of equal colour, ordered by colour.
 
@@ -185,7 +184,7 @@ class BlockSampler(TorchSampler):
         return block_idx, block_ptr
 
     def _prepare_initial_states(
-        self, num_chains: int, initial_states: Optional[torch.Tensor] = None
+        self, num_chains: int, initial_states: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Validate the initial states or draw them uniformly at random.
 
@@ -229,11 +228,11 @@ class BlockSampler(TorchSampler):
         return self.state.shape[0]
 
     @property
-    def seed(self) -> Optional[int]:
+    def seed(self) -> int | None:
         """Seed of the sampler's random number generator, or ``None``."""
         return self._seed
 
-    def _rng(self, device: Optional[torch.device] = None) -> Optional[torch.Generator]:
+    def _rng(self, device: torch.device | None = None) -> torch.Generator | None:
         """The sampler's random number generator on ``device`` (by default the device of its
         state), or ``None`` when the global generator is used. The generator is re-seeded when
         the device changes."""
@@ -300,8 +299,8 @@ class BlockSampler(TorchSampler):
         x: torch.Tensor,
         linear: torch.Tensor,
         coupling: torch.Tensor,
-        clamp_mask: Optional[torch.Tensor] = None,
-        clamped_values: Optional[torch.Tensor] = None,
+        clamp_mask: torch.Tensor | None = None,
+        clamped_values: torch.Tensor | None = None,
     ) -> None:
         """Performs one sweep, i.e. a block-spin update of every block, in-place.
 
@@ -332,7 +331,7 @@ class BlockSampler(TorchSampler):
                 )
 
     @torch.no_grad()
-    def sample(self, x: Optional[torch.Tensor] = None, num_samples: int = 1) -> torch.Tensor:
+    def sample(self, x: torch.Tensor | None = None, num_samples: int = 1) -> torch.Tensor:
         """Performs block updates on the model's parameters.
 
         Without ``x``, every persistent chain is advanced by one sweep per inverse temperature in

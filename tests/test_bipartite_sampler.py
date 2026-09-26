@@ -19,7 +19,7 @@ import torch
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.bipartite_sampler import BipartiteGibbsSampler
 from dwave.plugins.torch.samplers.block_spin_sampler import BlockSampler
-from tests.helper_functions import set_weights
+from tests.helper_functions import RecordedBernoulli, exact_update_probabilities, set_weights
 
 
 def rbm() -> GRBM:
@@ -39,6 +39,10 @@ class TestBipartiteGibbsSampler(unittest.TestCase):
         self.assertListEqual(sampler.partition[0].tolist(), grbm.visible_idx.tolist())
         self.assertListEqual(sampler.partition[1].tolist(), grbm.hidden_idx.tolist())
 
+    def test_requires_boltzmann_machine(self):
+        with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
+            BipartiteGibbsSampler(torch.nn.Linear(2, 2))
+
     def test_visible_visible_connection(self):
         grbm = GRBM(["v1", "v2", "h1"], [["v1", "h1"], ["v1", "v2"]], hidden_nodes=["h1"])
         with self.assertRaisesRegex(ValueError, r"requires a bipartite model.*\('v1', 'v2'\)"):
@@ -50,6 +54,7 @@ class TestBipartiteGibbsSampler(unittest.TestCase):
             BipartiteGibbsSampler(grbm, num_chains=2, schedule=[1.0])
 
     def test_sample(self):
+        # Sampling is one sweep per inverse temperature of the schedule on the persistent chains
         grbm = rbm()
         set_weights(grbm, [0.1, -0.2, 0.3, -0.4], [0.5, 0.2, -0.7, 0.6])
         sampler1 = BipartiteGibbsSampler(grbm, num_chains=5, schedule=[1.0, 2.0], seed=42)
@@ -64,7 +69,7 @@ class TestBipartiteGibbsSampler(unittest.TestCase):
         with self.subTest("clamp visible -> hidden becomes deterministic"):
             grbm = rbm()
             set_weights(grbm, [1e10] * 4, [0.0] * 4)
-            sampler = BipartiteGibbsSampler(grbm, num_chains=3, schedule=[1.0, 2.0], seed=123)
+            sampler = BipartiteGibbsSampler(grbm, num_chains=3, schedule=[1.0, 2.0])
             chains = sampler.state.clone()
 
             x = grbm.pad_visible(torch.tensor([[1., -1.], [1., 1.], [-1., -1.]]))
@@ -77,7 +82,7 @@ class TestBipartiteGibbsSampler(unittest.TestCase):
         with self.subTest("clamp hidden -> visible becomes deterministic"):
             grbm = rbm()
             set_weights(grbm, [1e6] * 4, [0.0] * 4)
-            sampler = BipartiteGibbsSampler(grbm, num_chains=3, schedule=[1.0], seed=123)
+            sampler = BipartiteGibbsSampler(grbm, num_chains=3, schedule=[1.0])
 
             x = torch.full((3, 4), float("nan"))
             x[:, grbm.hidden_idx] = torch.tensor([[1., -1.], [-1., 1.], [1., 1.]])
@@ -87,15 +92,30 @@ class TestBipartiteGibbsSampler(unittest.TestCase):
                                        x[:, None, grbm.hidden_idx].expand(3, 2, 2))
             torch.testing.assert_close(result[:, :, grbm.visible_idx], -torch.ones(3, 2, 2))
 
-    def test_sample_conditional_matches_exact_conditional(self):
+    def test_sample_conditional_draws_exact_conditionals(self):
+        # Given the visible units, the hidden units are drawn from their exact conditional
+        # distribution, which is also what the model's conditional expectations describe
         grbm = rbm()
         set_weights(grbm, [0.1, -0.2, 0.3, -0.4], [0.5, 0.2, -0.7, 0.6])
-        sampler = BipartiteGibbsSampler(grbm, num_chains=1, schedule=[1.0], seed=0)
+        sampler = BipartiteGibbsSampler(grbm, num_chains=1, schedule=[1.0])
         x = grbm.pad_visible(torch.tensor([[1.0, -1.0]]))
-        samples = sampler.sample(x, num_samples=200_000)
-        expected = -torch.tanh(grbm.effective_field(x, grbm.hidden_idx))
-        torch.testing.assert_close(samples[0, :, grbm.hidden_idx].mean(0, keepdim=True), expected,
-                                   atol=5e-3, rtol=0)
+        with RecordedBernoulli() as bernoulli:
+            samples = sampler.sample(x, num_samples=4)
+
+        # The visible block is updated (and restored) first, the hidden block second
+        hidden = sampler.partition[1]
+        filled = torch.nan_to_num(x, nan=1.0).expand(4, -1)
+        expected = exact_update_probabilities(
+            grbm, filled, grbm.linear.detach(), grbm.quadratic.detach(), hidden, 1.0, "Gibbs"
+        )
+        torch.testing.assert_close(bernoulli.probabilities[1], expected)
+        torch.testing.assert_close(
+            expected, ((1 + grbm.conditional_expectation(x)[:, hidden]) / 2).expand(4, -1)
+        )
+        torch.testing.assert_close(
+            samples[0][:, hidden], 2 * (bernoulli.probabilities[1] > 0.5).float() - 1
+        )
+        torch.testing.assert_close(samples[0][:, grbm.visible_idx], x[:, grbm.visible_idx].expand(4, -1))
 
 
 if __name__ == "__main__":
