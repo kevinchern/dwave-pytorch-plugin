@@ -26,7 +26,8 @@ features:
     ``BlockSampler`` computes effective fields with one matrix product per block, computes a greedy
     colouring when none is given, and supports conditional sampling of arbitrary partially observed
     spins (any number of free blocks, ``num_samples`` per row, arbitrary batch dimensions) without
-    modifying its persistent chains. ``BipartiteGibbsSampler`` is a two-block ``BlockSampler``.
+    modifying its persistent chains. A restricted Boltzmann machine is sampled by colouring its
+    visible and hidden layers.
   - |
     ``DimodSampler`` builds conditional binary quadratic models from the model's dense effective
     fields (no per-row ``fix_variables``) and applies ``prefactor`` and clipping consistently.
@@ -69,8 +70,7 @@ features:
     ``DiscreteVariationalAutoencoder``, whose ``encoder``, ``decoder`` and ``latent_to_discrete``
     are plain attributes.
   - |
-    ``dwave.plugins.torch.nn`` exports the kernels, losses and Ising modules;
-    ``dwave.plugins.torch.samplers`` exports ``BipartiteGibbsSampler``.
+    ``dwave.plugins.torch.nn`` exports the kernels, losses and Ising modules.
 upgrade:
   - |
     ``GraphRestrictedBoltzmannMachine.quadratic`` has shape ``(n_edges,)`` and holds the bias of
@@ -104,12 +104,16 @@ upgrade:
     ``state`` (the buffer holding the persistent chains, a key of ``state_dict()``),
     ``partition`` and ``seed`` instead of parameters; conditional ``sample(x)`` returns
     ``(..., num_samples, n_nodes)`` and requires ``x`` to have shape ``(..., n_nodes)`` (the batch
-    size no longer has to equal the number of chains). ``BipartiteGibbsSampler`` rejects
-    hidden-hidden as well as visible-visible edges. Unseeded samplers draw from the global PyTorch
-    generator. ``DimodSampler.sample_set`` is the sample set as returned by the wrapped sampler.
+    size no longer has to equal the number of chains). Unseeded samplers draw from the global
+    PyTorch generator. ``DimodSampler.sample_set`` is the sample set as returned by the wrapped
+    sampler.
     ``TorchSampler`` subclasses implement ``sample_biases`` in addition to ``sample``, and
     ``sample``, ``complete`` and ``DimodSampler.to_ising`` raise ``TypeError`` when the sampler is
     bound to a graph module that is not a ``GraphRestrictedBoltzmannMachine``.
+  - |
+    ``BipartiteGibbsSampler`` is removed. ``BlockSampler(model, colouring=lambda node: node in
+    hidden)`` is the same two-block Gibbs sampler (visible units first, hidden units second) and
+    raises ``ValueError`` for an edge within a layer, as the removed class did.
   - |
     ``Ising(nodes, edges, statistic=None)`` no longer takes ``sampler``, ``sample_params`` or
     ``beta``, and ``set_sampler``, ``set_sample_params``, ``set_beta`` and the ``beta`` buffer are
@@ -124,7 +128,9 @@ upgrade:
   - |
     The generic neural-network utilities ``Affine``, ``SkipLinear``, ``LinearBlock`` and
     ``store_config`` are removed from ``dwave.plugins.torch.nn``; ``torch.nn`` provides the
-    building blocks they were composed of.
+    building blocks they were composed of. The conversions ``bit2spin_soft`` and ``spin2bit_soft``
+    are removed from ``dwave.plugins.torch.nn.functional``; they were ``2 * b - 1`` and
+    ``(s + 1) / 2`` with a range check.
   - |
     ``pseudo_kl_divergence_loss`` moved from ``dwave.plugins.torch.models.losses`` to
     ``dwave.plugins.torch.nn.functional`` and the ``models.losses`` package is removed.
@@ -160,6 +166,12 @@ fixes:
     ``TorchSampler.to()`` no longer leaves the original sampler half-moved; ``GaussianKernel`` no
     longer produces zero bandwidths for integer ``factor``; ``tests/test_samplers`` is now
     collected by test discovery.
+  - |
+    A ``Kernel`` no longer requires at least two items per input; that requirement belongs to the
+    maximum mean discrepancy and is enforced by ``maximum_mean_discrepancy_loss``. The docstrings
+    of ``Kernel`` and ``GaussianKernel`` describe what is computed: an ``(n_x, n_y)`` kernel
+    matrix, and ``exp(-d^2 / sigma_i)`` with the base bandwidth the mean squared distance between
+    distinct items.
   - |
     A seeded ``BlockSampler`` drew its initial states and its first sweep from two generators with
     the same seed, and reseeded from scratch whenever it changed device. All draws now descend from

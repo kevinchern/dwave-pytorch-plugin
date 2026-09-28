@@ -15,12 +15,13 @@ import torch
 from torch.optim import SGD
 
 from dwave.plugins.torch.models import GraphRestrictedBoltzmannMachine as GRBM
-from dwave.plugins.torch.samplers import BipartiteGibbsSampler
+from dwave.plugins.torch.samplers import BlockSampler
 
 
 def run(device: str = "cpu"):
     """Run an example of fitting a restricted Boltzmann machine (a bipartite graph-restricted
-    Boltzmann machine) with a BipartiteGibbsSampler to synthetic data generated uniformly at random.
+    Boltzmann machine) with a two-block Gibbs sampler to synthetic data generated uniformly at
+    random.
 
     Args:
         device (str): Device on which to train, e.g. "cpu" or "cuda".
@@ -31,10 +32,15 @@ def run(device: str = "cpu"):
     edges = [(v, h) for v in visible_nodes for h in hidden_nodes]
     grbm = GRBM(visible_nodes + hidden_nodes, edges, hidden_nodes=hidden_nodes)
 
-    # The sampler holds the model, so moving the sampler moves the model as well. Its persistent
-    # Markov chains provide the negative phase (persistent contrastive divergence).
+    # The two layers of a restricted Boltzmann machine are the two blocks of a block-Gibbs sampler:
+    # each sweep samples all visible units given the hidden units and then all hidden units given
+    # the visible units. The sampler holds the model, so moving the sampler moves the model as
+    # well. Its persistent Markov chains provide the negative phase (persistent contrastive
+    # divergence).
     num_chains = batch_size = 100
-    sampler = BipartiteGibbsSampler(grbm, num_chains=num_chains, schedule=[1.0], seed=123).to(device)
+    hidden = set(hidden_nodes)
+    sampler = BlockSampler(grbm, colouring=lambda node: node in hidden, num_chains=num_chains,
+                           schedule=[1.0], seed=123).to(device)
 
     n_iterations = 3
     X = 1 - 2.0 * torch.randint(0, 2, (n_iterations, batch_size, n_visible), device=device)

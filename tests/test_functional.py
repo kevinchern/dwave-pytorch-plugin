@@ -14,11 +14,9 @@
 import unittest
 
 import torch
-from parameterized import parameterized
 
-from dwave.plugins.torch.nn.functional import bit2spin_soft, gumbel_spins
+from dwave.plugins.torch.nn.functional import gumbel_spins
 from dwave.plugins.torch.nn.functional import maximum_mean_discrepancy_loss as mmd_loss
-from dwave.plugins.torch.nn.functional import spin2bit_soft
 from tests.helper_functions import ConstantKernel
 
 
@@ -38,15 +36,13 @@ class TestMaximumMeanDiscrepancyLoss(unittest.TestCase):
     def test_sample_size_error(self):
         x = torch.tensor([[1.2], [4.1]])
         y = torch.tensor([[0.3]])
-        self.assertRaisesRegex(ValueError, "must be at least two", mmd_loss, x, y, None)
+        self.assertRaisesRegex(ValueError, "at least two samples", mmd_loss, x, y, None)
 
     def test_mmd_loss_dim_mismatch(self):
         x = torch.tensor([[1], [4]], dtype=torch.float32)
         y = torch.tensor([[0.1, 0.2, 0.3],
                           [0.4, 0.5, 0.6]])
-        self.assertRaisesRegex(ValueError,
-                               "Input dimensions must match. You are trying to compute ",
-                               mmd_loss, x, y, None)
+        self.assertRaisesRegex(ValueError, "Feature shapes of x and y must match", mmd_loss, x, y, None)
 
     def test_mmd_loss_arange(self):
         x = torch.tensor([[1.0], [4.0], [5.0]])
@@ -89,23 +85,6 @@ class TestGumbelSpins(unittest.TestCase):
         self.assertTrue(torch.all(spins.abs() == 1))
         spins.sum().backward()
         self.assertTrue(torch.all(logits.grad > 0))
-
-class TestFunctional(unittest.TestCase):
-
-    def test_spin2bit_soft(self):
-        self.assertListEqual(spin2bit_soft(torch.tensor([-1.0, 1.0, 0.5])).tolist(), [0, 1, 0.75])
-
-    @parameterized.expand([([-1.1, 1.0],), ([-0.5, 1.1],)])
-    def test_spin2bit_raises(self, input):
-        self.assertRaises(ValueError, spin2bit_soft, torch.tensor(input))
-
-    def test_bit2spin_soft(self):
-        self.assertListEqual(bit2spin_soft(torch.tensor([0.0, 1.0, 0.5])).tolist(), [-1, 1, 0])
-
-    @parameterized.expand([([-0.1, 1.0],), ([0.1, 1.1],)])
-    def test_bit2spin_soft_raises(self, input):
-        self.assertRaises(ValueError, bit2spin_soft, torch.tensor(input))
-
 
 if __name__ == "__main__":
     unittest.main()

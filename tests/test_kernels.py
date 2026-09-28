@@ -1,3 +1,16 @@
+# Copyright 2025 D-Wave
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import unittest
 
 import torch
@@ -7,33 +20,24 @@ from dwave.plugins.torch.nn.modules.kernels import Kernel, GaussianKernel
 
 
 class TestKernel(unittest.TestCase):
-    def test_forward(self):
-        class One(Kernel):
-            def _kernel(self, x, y):
-                return 1
-        one = One()
-        x = torch.rand((5, 3))
-        y = torch.randn((9, 3))
-        self.assertEqual(1, one(x, y))
+    class One(Kernel):
+        def _kernel(self, x, y):
+            return torch.ones(x.shape[0], y.shape[0])
 
-    @parameterized.expand([(1, 2), (2, 1)])
-    def test_sample_size(self, nx, ny):
-        class One(Kernel):
-            def _kernel(self, x, y):
-                return 1
-        one = One()
-        x = torch.rand((nx, 5))
-        y = torch.randn((ny, 5))
-        self.assertRaisesRegex(ValueError, "must be at least two", one, x, y)
+    def test_forward(self):
+        k = self.One()(torch.rand(5, 3), torch.randn(9, 3))
+        self.assertEqual((5, 9), tuple(k.shape))
+
+    def test_single_items(self):
+        # A kernel is defined for any number of items, including one; only the maximum mean
+        # discrepancy needs two
+        k = self.One()(torch.rand(1, 3), torch.randn(1, 3))
+        self.assertEqual((1, 1), tuple(k.shape))
 
     def test_shape_mismatch(self):
-        class One(Kernel):
-            def _kernel(self, x, y):
-                return 1
-        one = One()
-        x = torch.rand((5, 4))
-        y = torch.randn((9, 3))
-        self.assertRaisesRegex(ValueError, "Input dimensions must match", one, x, y)
+        with self.assertRaisesRegex(ValueError, "Feature shapes of x and y must match"):
+            self.One()(torch.rand(5, 4), torch.randn(9, 3))
+
 
 class TestGaussianKernel(unittest.TestCase):
 
@@ -52,6 +56,12 @@ class TestGaussianKernel(unittest.TestCase):
         torch.testing.assert_close(rbf.factors, torch.tensor([0.5, 1.0, 2.0]))
         x = torch.randn(4, 3)
         self.assertFalse(rbf(x, x).isnan().any())
+
+    def test_single_item(self):
+        x, y = torch.randn(1, 3), torch.randn(4, 3)
+        self.assertEqual((1, 4), tuple(GaussianKernel(2, 2.0, bandwidth=1.0)(x, y).shape))
+        with self.assertRaisesRegex(ValueError, "at least two items"):
+            GaussianKernel(2, 2.0)(x, y)
 
     def test_get_bandwidth_default(self):
         rbf = GaussianKernel(2, 2.1, 0.1)

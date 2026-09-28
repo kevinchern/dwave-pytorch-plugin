@@ -23,36 +23,10 @@ if TYPE_CHECKING:
     from dwave.plugins.torch.nn.modules.kernels import Kernel
 
 __all__ = [
-    "bit2spin_soft",
     "gumbel_spins",
     "maximum_mean_discrepancy_loss",
     "pseudo_kl_divergence_loss",
-    "spin2bit_soft",
 ]
-
-
-def _validate_sample_pair(x: torch.Tensor, y: torch.Tensor) -> None:
-    """Checks that ``x`` and ``y`` are two samples of at least two items each with equal feature
-    shapes, as required by kernels and the maximum mean discrepancy.
-
-    Args:
-        x (torch.Tensor): A (n_x, f1, f2, ..., fk) tensor.
-        y (torch.Tensor): A (n_y, f1, f2, ..., fk) tensor.
-
-    Raises:
-        ValueError: If shape of ``x`` and ``y`` mismatch (excluding batch size).
-        ValueError: If the sample size of ``x`` or ``y`` is less than two.
-    """
-    if x.shape[1:] != y.shape[1:]:
-        raise ValueError(
-            "Input dimensions must match. You are trying to compute "
-            f"the kernel between tensors of shape {x.shape} and {y.shape}."
-        )
-    if x.shape[0] < 2 or y.shape[0] < 2:
-        raise ValueError(
-            "Sample size of ``x`` and ``y`` must be at least two. "
-            f"Got, respectively, {x.shape} and {y.shape}."
-        )
 
 
 def maximum_mean_discrepancy_loss(x: torch.Tensor, y: torch.Tensor, kernel: Kernel) -> torch.Tensor:
@@ -84,13 +58,20 @@ def maximum_mean_discrepancy_loss(x: torch.Tensor, y: torch.Tensor, kernel: Kern
         kernel (Kernel): A kernel function object.
 
     Raises:
-        ValueError: If the sample size of ``x`` or ``y`` is less than two.
-        ValueError: If shape of ``x`` and ``y`` mismatch (excluding batch size)
+        ValueError: If ``x`` or ``y`` holds fewer than two samples, or their feature shapes differ.
 
     Returns:
         torch.Tensor: The squared maximum mean discrepancy estimate.
     """
-    _validate_sample_pair(x, y)
+    if x.shape[1:] != y.shape[1:]:
+        raise ValueError(
+            f"Feature shapes of x and y must match, got {tuple(x.shape)} and {tuple(y.shape)}."
+        )
+    if x.shape[0] < 2 or y.shape[0] < 2:
+        raise ValueError(
+            "x and y must each hold at least two samples, got shapes "
+            f"{tuple(x.shape)} and {tuple(y.shape)}."
+        )
     num_x = x.shape[0]
     num_y = y.shape[0]
     xy = torch.cat([x, y], dim=0)
@@ -169,44 +150,6 @@ def gumbel_spins(logits: torch.Tensor, n_samples: int = 1, tau: float = 1 / 7) -
     expanded = logits.unsqueeze(1).expand(-1, n_samples, *logits.shape[1:])
     two_class = torch.stack((expanded, torch.zeros_like(expanded)), dim=-1)
     one_hot = torch.nn.functional.gumbel_softmax(two_class, tau=tau, hard=True)
-    # The first class indicates s = +1. The straight-through estimator can leave the indicator a
-    # rounding error away from {0, 1}, so the exact range check of bit2spin_soft is not used here.
+    # The first class indicates s = +1; the straight-through estimator can leave the indicator a
+    # rounding error away from {0, 1}.
     return 2 * one_hot[..., 0] - 1
-
-
-def bit2spin_soft(b: torch.Tensor) -> torch.Tensor:
-    """Maps input :math:`b` to :math:`2b-1`.
-
-    The mapping does not require :math:`b` to be binary, only that it is in the interval :math:`[0, 1]`.
-
-    Args:
-        b (torch.Tensor): Input tensor of values in :math:`[0, 1]`.
-
-    Raises:
-        ValueError: If not all ``b`` values are in :math:`[0, 1]`.
-
-    Returns:
-        torch.Tensor: A tensor with values :math:`2b-1`.
-    """
-    if not ((b >= 0) & (b <= 1)).all():
-        raise ValueError(f"Not all inputs are in [0, 1]: {b}")
-    return b * 2 - 1
-
-
-def spin2bit_soft(s: torch.Tensor) -> torch.Tensor:
-    """Maps input :math:`s` to :math:`(s+1)/2`.
-
-    The mapping does not require :math:`s` to be spin-valued, only that it is in the interval :math:`[-1, 1]`.
-
-    Args:
-        s (torch.Tensor): Input tensor of values in :math:`[-1, 1]`.
-
-    Raises:
-        ValueError: If not all ``s`` values are in `[-1, 1]`.
-
-    Returns:
-        torch.Tensor: A tensor with values :math:`(s+1)/2`.
-    """
-    if (s.abs() > 1).any():
-        raise ValueError(f"Not all inputs are in [-1, 1]: {s}")
-    return (s + 1) / 2

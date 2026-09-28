@@ -42,8 +42,8 @@ The package provides the following components.
 * **Samplers** (``dwave.plugins.torch.samplers``). Samplers are ``torch.nn.Module`` objects that
   hold the model they sample from, so moving or saving a sampler moves or saves the model and the
   sampler's own state together. ``BlockSampler`` performs block-Gibbs or block-Metropolis
-  sampling with persistent Markov chains, ``BipartiteGibbsSampler`` specializes it to restricted
-  Boltzmann machines, and ``DimodSampler`` wraps any dimod sampler, including the
+  sampling with persistent Markov chains on any colouring of the graph, such as the two layers
+  of a restricted Boltzmann machine, and ``DimodSampler`` wraps any dimod sampler, including the
   ``DWaveSampler`` of `dwave-system <https://github.com/dwavesystems/dwave-system>`_, scaling and
   clipping the Hamiltonian before it is submitted. All samplers support conditional sampling of
   partially observed spins and sampling from batches of Ising models given by their biases, which
@@ -54,8 +54,8 @@ The package provides the following components.
   expected statistics with a backward pass approximated by sample covariances; ``SpinStatistic``
   classes define the statistics it returns. Also included are a ``GaussianKernel`` and a
   ``MaximumMeanDiscrepancyLoss`` for matching encoder samples to prior samples, and, in
-  ``dwave.plugins.torch.nn.functional``, the functional losses, the Gumbel-softmax sampling of
-  spins from encoder logits, and soft conversions between bits and spins.
+  ``dwave.plugins.torch.nn.functional``, the functional losses and the Gumbel-softmax sampling of
+  spins from encoder logits.
 
 * **Utilities** (``dwave.plugins.torch.utils``). The graph module that models and layers are
   built on, conversions between tensors and dimod's Ising dictionaries and sample sets,
@@ -181,14 +181,16 @@ units are adjacent, or with conditional samples drawn by any sampler otherwise.
 .. code-block:: python
 
     from dwave.plugins.torch.models import GraphRestrictedBoltzmannMachine
-    from dwave.plugins.torch.samplers import BipartiteGibbsSampler
+    from dwave.plugins.torch.samplers import BlockSampler
 
     # A restricted Boltzmann machine: 8 visible units fully connected to 4 hidden units
     visible = [f"v{i}" for i in range(8)]
     hidden = [f"h{j}" for j in range(4)]
     edges = [(v, h) for v in visible for h in hidden]
     grbm = GraphRestrictedBoltzmannMachine(visible + hidden, edges, hidden_nodes=hidden)
-    sampler = BipartiteGibbsSampler(grbm, num_chains=100)
+    # The two layers are the two blocks of a block-Gibbs sampler: each sweep samples the visible
+    # units given the hidden units and then the hidden units given the visible units
+    sampler = BlockSampler(grbm, colouring=lambda node: node in hidden, num_chains=100)
 
     x = ...  # observations of shape (batch_size, 8), one column per visible unit
 

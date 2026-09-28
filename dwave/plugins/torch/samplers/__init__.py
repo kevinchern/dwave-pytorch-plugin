@@ -14,5 +14,4 @@
 
 from dwave.plugins.torch.samplers.base import *
 from dwave.plugins.torch.samplers.block_spin_sampler import *
-from dwave.plugins.torch.samplers.bipartite_sampler import *
 from dwave.plugins.torch.samplers.dimod_sampler import *

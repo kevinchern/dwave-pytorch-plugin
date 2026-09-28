@@ -108,6 +108,21 @@ class TestBlockSampler(unittest.TestCase):
         def crayon(n): return 1
         self.assertRaisesRegex(ValueError, "not a valid colouring", BlockSampler, grbm, crayon, 10, [1.0])
 
+    def test_bipartite_colouring(self):
+        # A restricted Boltzmann machine is sampled by colouring its two layers: the visible units
+        # form the first block and the hidden units the second
+        visible, hidden = ["v1", "v2", "v3"], ["h1", "h2"]
+        grbm = GRBM(visible + hidden, [(v, h) for v in visible for h in hidden], hidden_nodes=hidden)
+        sampler = BlockSampler(grbm, colouring=lambda node: node in hidden, num_chains=3)
+        self.assertEqual(2, len(sampler.partition))
+        self.assertListEqual(sampler.partition[0].tolist(), grbm.visible_idx.tolist())
+        self.assertListEqual(sampler.partition[1].tolist(), grbm.hidden_idx.tolist())
+
+        with self.subTest("An edge within a layer is not a valid two-colouring"):
+            grbm = GRBM(["v1", "v2", "h1"], [("v1", "h1"), ("v1", "v2")], hidden_nodes=["h1"])
+            with self.assertRaisesRegex(ValueError, r"not a valid colouring.*\('v1', 'v2'\)"):
+                BlockSampler(grbm, colouring=lambda node: node == "h1")
+
     def test_invalid_proposal(self):
         grbm = GRBM([0, 1], [(0, 1)])
         def crayon(n): return n
