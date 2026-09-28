@@ -66,8 +66,11 @@ class BlockSampler(TorchSampler):
         initial_states (torch.Tensor, optional): A tensor of ``±1`` values of shape
             ``(num_chains, model.n_nodes)`` holding the initial states of the Markov chains. If
             ``None``, initial states are drawn uniformly at random. Defaults to ``None``.
-        seed (int, optional): Seed of the sampler's private random number generator. If ``None``,
-            the global PyTorch generator is used. Defaults to ``None``.
+        seed (int, optional): Seed of the sampler's private random number generator, which draws
+            the initial states and every later sample. A generator for another device is seeded
+            from its stream when the sampler is moved there, so equal seeds give equal samples on
+            any one device and moving the sampler starts a new stream instead of replaying the
+            seed. If ``None``, the global PyTorch generator is used. Defaults to ``None``.
 
     Raises:
         ValueError: If ``num_chains`` is not positive, the acceptance criterion is unknown, the
@@ -107,7 +110,9 @@ class BlockSampler(TorchSampler):
         if not self.schedule:
             raise ValueError("`schedule` should contain at least one inverse temperature.")
         self._seed = None if seed is None else int(seed)
-        self._generator: torch.Generator | None = None
+        # One CPU generator draws the initial states and seeds every other draw (see _rng)
+        self._generator = None if seed is None else torch.Generator().manual_seed(self._seed)
+        self._device_generator: torch.Generator | None = None
 
         # The blocks are consecutive slices of the node indices sorted by colour. The indices
         # are a (non-persistent) buffer so that the blocks live on the device of the model.
@@ -201,8 +206,7 @@ class BlockSampler(TorchSampler):
         """
         n_nodes = self.model.n_nodes
         if initial_states is None:
-            generator = None if self._seed is None else torch.Generator().manual_seed(self._seed)
-            return randspin((num_chains, n_nodes), generator=generator).float()
+            return randspin((num_chains, n_nodes), generator=self._generator).float()
 
         initial_states = torch.as_tensor(initial_states)
         if tuple(initial_states.shape) != (num_chains, n_nodes):
@@ -233,16 +237,23 @@ class BlockSampler(TorchSampler):
         return self._seed
 
     def _rng(self, device: torch.device | None = None) -> torch.Generator | None:
-        """The sampler's random number generator on ``device`` (by default the device of its
-        state), or ``None`` when the global generator is used. The generator is re-seeded when
-        the device changes."""
-        if self._seed is None:
+        """The sampler's random number generator for draws on ``device`` (by default the device of
+        its state), or ``None`` when the sampler is unseeded and the global generator is used.
+
+        Every draw descends from the CPU generator seeded at construction, which also drew the
+        initial states: draws on the CPU continue its stream, and a generator for another device
+        is seeded from that stream when the device is first used. Moving the sampler therefore
+        starts a new stream derived from the seed instead of replaying it.
+        """
+        if self._generator is None:
             return None
         device = self.state.device if device is None else torch.device(device)
-        if self._generator is None or self._generator.device != device:
-            self._generator = torch.Generator(device=device)
-            self._generator.manual_seed(self._seed)
-        return self._generator
+        if device.type == "cpu":
+            return self._generator
+        if self._device_generator is None or self._device_generator.device != device:
+            seed = int(torch.randint(2**63 - 1, (), generator=self._generator))
+            self._device_generator = torch.Generator(device=device).manual_seed(seed)
+        return self._device_generator
 
     # ------------------------------------------------------------------ updates ------------------
 

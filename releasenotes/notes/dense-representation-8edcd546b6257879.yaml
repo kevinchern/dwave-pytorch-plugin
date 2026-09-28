@@ -160,3 +160,8 @@ fixes:
     ``TorchSampler.to()`` no longer leaves the original sampler half-moved; ``GaussianKernel`` no
     longer produces zero bandwidths for integer ``factor``; ``tests/test_samplers`` is now
     collected by test discovery.
+  - |
+    A seeded ``BlockSampler`` drew its initial states and its first sweep from two generators with
+    the same seed, and reseeded from scratch whenever it changed device. All draws now descend from
+    one generator seeded at construction, and moving the sampler to another device starts a new
+    stream derived from it.

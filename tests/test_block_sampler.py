@@ -23,7 +23,7 @@ from parameterized import parameterized
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.block_spin_sampler import BlockSampler
-from dwave.plugins.torch.utils import GraphIndex, sampleset_to_tensor
+from dwave.plugins.torch.utils import GraphIndex, randspin, sampleset_to_tensor
 from tests.helper_functions import (RecordedBernoulli, constant_randspin, exact_update_probabilities,
                                     model_to_bqm, replay_sweep, set_weights)
 
@@ -420,6 +420,33 @@ class TestBlockSampler(unittest.TestCase):
             s6 = BlockSampler(model, None, 50, [1.0]).sample()
             self.assertTrue(torch.equal(s4, s5))
             self.assertFalse(torch.equal(s5, s6))
+
+    def test_single_random_stream(self):
+        # The initial states and every later draw descend from one generator seeded once
+        model = five_cycle_with_chord()
+        sampler = BlockSampler(model, None, 4, [1.0], seed=11)
+        generator = torch.Generator().manual_seed(11)
+        with self.subTest("The initial states are the first draws of the seeded generator"):
+            expected = randspin((4, model.n_nodes), generator=generator).float()
+            torch.testing.assert_close(sampler.state, expected)
+        with self.subTest("Sweeps continue that stream instead of restarting it from the seed"):
+            torch.testing.assert_close(
+                torch.rand(3, generator=sampler._rng()), torch.rand(3, generator=generator)
+            )
+        with self.subTest("An unseeded sampler uses the global generator"):
+            self.assertIsNone(BlockSampler(model, None, 4, [1.0])._rng())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_single_random_stream_cuda(self):
+        # A device generator is seeded from the CPU stream: equal seeds still give equal samples,
+        # and the device stream is derived from the seed rather than a replay of it
+        model = five_cycle_with_chord()
+        first = BlockSampler(model, None, 8, [1.0], seed=5).cuda()
+        second = BlockSampler(model, None, 8, [1.0], seed=5).cuda()
+        self.assertTrue(torch.equal(first.sample(), second.sample()))
+        self.assertEqual("cuda", first._rng().device.type)
+        self.assertNotEqual(5, first._rng().initial_seed())
+        self.assertEqual(first._rng().initial_seed(), second._rng().initial_seed())
 
     # ------------------------------------------------------------------ module behaviour --------
 
