@@ -19,8 +19,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from dwave.plugins.torch.graph import GraphIndex
 from dwave.plugins.torch.nn.modules.spin_statistic import IdentityStatistic
-from dwave.plugins.torch.utils import GraphIndex, estimate_beta
+from dwave.plugins.torch.utils import estimate_beta
 
 if TYPE_CHECKING:
     from dwave.plugins.torch.nn.modules.spin_statistic import SpinStatistic
@@ -163,7 +164,7 @@ class Ising(GraphIndex):
     ``(B, M, |V|)`` with ``M`` samples per model. Outputs have shape ``(B, D)`` where ``D`` is
     the output dimension of ``statistic``. The gradient with respect to ``quadratic`` has one
     entry per edge; ``spins`` receive no gradient. The coupling matrices of the models, should
-    they be needed, are built by :meth:`~dwave.plugins.torch.utils.GraphIndex.dense_quadratic`.
+    they be needed, are built by :meth:`~dwave.plugins.torch.graph.GraphIndex.dense_quadratic`.
 
     The gradient estimator assumes that the spins are Boltzmann distributed at unit inverse
     temperature under the given biases. In practice, when sampling using a quantum annealer,
@@ -180,7 +181,7 @@ class Ising(GraphIndex):
     for more on estimating beta.
 
     The graph attributes, buffers and the batched :meth:`energy` and :meth:`effective_field` are
-    those of :class:`~dwave.plugins.torch.utils.GraphIndex`.
+    those of :class:`~dwave.plugins.torch.graph.GraphIndex`.
 
     Args:
         nodes: Nodes of the model.
@@ -272,6 +273,6 @@ class Ising(GraphIndex):
         """
         self._validate_inputs(linear, quadratic, spins)
         return torch.tensor([
-            estimate_beta(self.nodes, self.edges, h, J, s)
+            estimate_beta(self, h, J, s)
             for h, J, s in zip(linear.detach(), quadratic.detach(), spins)
         ])

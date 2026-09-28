@@ -20,7 +20,7 @@ import torch
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers import BlockSampler, TorchSampler
-from dwave.plugins.torch.utils import to_ising
+from dwave.plugins.torch.utils import to_bqm
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
 from tests.helper_functions import RecordedBernoulli, model_to_bqm, randspins, set_weights
 
@@ -125,10 +125,8 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             ["edge_idx_i", "edge_idx_j", "visible_idx", "hidden_idx"],
             [name for name, _ in bm.named_buffers()],
         )
-        self.assertSetEqual(
-            {"linear", "quadratic", "edge_idx_i", "edge_idx_j", "visible_idx", "hidden_idx"},
-            set(bm.state_dict()),
-        )
+        # The index buffers are derived from the constructor arguments and are not saved
+        self.assertSetEqual({"linear", "quadratic"}, set(bm.state_dict()))
         with self.assertRaises(TypeError):
             bm.linear = torch.zeros(3)  # torch refuses to replace a parameter by a tensor
 
@@ -675,11 +673,9 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         torch.testing.assert_close(objective_cuda.cpu(), objective)
         for grad, p in zip(grads, model.parameters()):
             torch.testing.assert_close(p.grad.cpu(), grad)
-        ising_cuda = to_ising(model.nodes, model.edges, model.linear, model.quadratic)
+        bqm_cuda = to_bqm(model, model.linear, model.quadratic)
         model.cpu()
-        self.assertEqual(
-            ising_cuda, to_ising(model.nodes, model.edges, model.linear, model.quadratic)
-        )
+        self.assertEqual(bqm_cuda, to_bqm(model, model.linear, model.quadratic))
 
 
 if __name__ == "__main__":

@@ -57,9 +57,11 @@ The package provides the following components.
   ``dwave.plugins.torch.nn.functional``, the functional losses and the Gumbel-softmax sampling of
   spins from encoder logits.
 
-* **Utilities** (``dwave.plugins.torch.utils``). The graph module that models and layers are
-  built on, conversions between tensors and dimod's Ising dictionaries and sample sets,
-  temperature estimation, and random spin generation.
+* **Graph core** (``dwave.plugins.torch.graph``). ``GraphIndex``, the graph module that models,
+  layers and samplers are built on, and random spin generation. It imports nothing but PyTorch.
+
+* **dimod utilities** (``dwave.plugins.torch.utils``). Conversions between tensors and dimod's
+  binary quadratic models and sample sets, and temperature estimation with dwave-system.
 
 .. end_pytorch_plugin_about
 

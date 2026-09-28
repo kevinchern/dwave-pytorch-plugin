@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from dwave.plugins.torch.utils import GraphIndex
+    from dwave.plugins.torch.graph import GraphIndex
 
 __all__ = ["SpinStatistic", "IdentityStatistic", "IsingStatistic"]
 

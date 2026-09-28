@@ -18,8 +18,8 @@ import abc
 
 import torch
 
+from dwave.plugins.torch.graph import GraphIndex
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
-from dwave.plugins.torch.utils import GraphIndex
 
 __all__ = ["TorchSampler"]
 
@@ -28,7 +28,7 @@ class TorchSampler(torch.nn.Module, abc.ABC):
     """Base class for all PyTorch plugin samplers.
 
     A sampler is a :class:`torch.nn.Module` bound to the graph of a
-    :class:`~dwave.plugins.torch.utils.GraphIndex`, which it holds as the submodule
+    :class:`~dwave.plugins.torch.graph.GraphIndex`, which it holds as the submodule
     :attr:`model`. Consequently :meth:`~torch.nn.Module.to`, :meth:`~torch.nn.Module.cuda`,
     :meth:`~torch.nn.Module.state_dict` and friends act on the graph module and on the sampler's
     own state (e.g. persistent Markov chains) together.
@@ -47,7 +47,7 @@ class TorchSampler(torch.nn.Module, abc.ABC):
     Args:
         model (GraphIndex): The graph module the sampler is bound to: a
             :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine` to sample from
-            its parameters, or any :class:`~dwave.plugins.torch.utils.GraphIndex`, such as an
+            its parameters, or any :class:`~dwave.plugins.torch.graph.GraphIndex`, such as an
             :class:`~dwave.plugins.torch.nn.Ising` layer, to sample explicit biases on its graph.
     """
 

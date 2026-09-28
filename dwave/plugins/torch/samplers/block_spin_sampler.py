@@ -20,9 +20,9 @@ from typing import Literal
 import networkx as nx
 import torch
 
+from dwave.plugins.torch.graph import GraphIndex, randspin
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
 from dwave.plugins.torch.samplers.base import TorchSampler
-from dwave.plugins.torch.utils import GraphIndex, randspin
 
 __all__ = ["BlockSampler"]
 

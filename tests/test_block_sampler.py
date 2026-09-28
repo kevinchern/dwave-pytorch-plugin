@@ -23,7 +23,8 @@ from parameterized import parameterized
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.block_spin_sampler import BlockSampler
-from dwave.plugins.torch.utils import GraphIndex, randspin, sampleset_to_tensor
+from dwave.plugins.torch.graph import GraphIndex, randspin
+from dwave.plugins.torch.utils import sampleset_to_tensor
 from tests.helper_functions import (RecordedBernoulli, constant_randspin, exact_update_probabilities,
                                     model_to_bqm, replay_sweep, set_weights)
 
@@ -480,10 +481,8 @@ class TestBlockSampler(unittest.TestCase):
         grbm = GRBM(list("ab"), [["a", "b"]])
         bss = BlockSampler(grbm, self.crayon_veqa, 4, [1.0], seed=2)
         state_dict = bss.state_dict()
-        self.assertIn("state", state_dict)
-        self.assertIn("model.linear", state_dict)
-        self.assertIn("model.quadratic", state_dict)
-        self.assertNotIn("_block_idx", state_dict, "blocks are derived from the colouring")
+        # The chains and the parameters; blocks and index buffers are derived, not saved
+        self.assertSetEqual({"state", "model.linear", "model.quadratic"}, set(state_dict))
         self.assertEqual(0, len(list(bss.parameters())) - len(list(grbm.parameters())))
 
         with self.subTest("The chains are restored from the state dict"):

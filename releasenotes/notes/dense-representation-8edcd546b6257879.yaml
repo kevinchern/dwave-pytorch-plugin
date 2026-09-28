@@ -29,23 +29,26 @@ features:
     modifying its persistent chains. A restricted Boltzmann machine is sampled by colouring its
     visible and hidden layers.
   - |
-    ``DimodSampler`` builds conditional binary quadratic models from the model's dense effective
-    fields (no per-row ``fix_variables``) and applies ``prefactor`` and clipping consistently.
-    ``DimodSampler.to_ising`` returns the model as it is submitted to the wrapped sampler.
-    ``dwave.plugins.torch.utils.to_ising`` and ``dwave.plugins.torch.utils.to_bqm`` convert
-    biases to dimod's Ising dictionaries and to a ``dimod.BinaryQuadraticModel``, and
+    ``DimodSampler`` submits binary quadratic models built directly from the tensors, and builds
+    conditional models from the model's dense effective fields on the subgraph of the free
+    variables (no per-row ``fix_variables``), applying ``prefactor`` and clipping consistently.
+    ``DimodSampler.to_bqm`` returns the model as it is submitted to the wrapped sampler.
+    ``dwave.plugins.torch.utils.to_bqm`` converts the biases of an Ising model on a
+    ``GraphIndex`` to a ``dimod.BinaryQuadraticModel`` without intermediate dictionaries, and
     ``dwave.plugins.torch.utils.sampleset_to_tensor`` repeats aggregated samples according to
     ``num_occurrences``, which replaces the dependency on ``dwave-hybrid``.
   - |
-    ``dwave.plugins.torch.utils.GraphIndex`` is the ``torch.nn.Module`` base class of
+    ``dwave.plugins.torch.graph.GraphIndex`` is the ``torch.nn.Module`` base class of
     ``GraphRestrictedBoltzmannMachine`` and ``Ising``. It validates the graph and provides the
     graph attributes ``nodes``, ``edges``, ``node_to_idx``, ``edge_to_idx``, ``n_nodes`` and
     ``n_edges``, the buffers ``edge_idx_i`` and ``edge_idx_j``, the coupling matrices
     ``dense_quadratic`` and ``symmetric_coupling`` of per-edge biases, and the Ising ``energy``
     and ``effective_field`` of spins under explicitly given per-edge biases, for a single model or
-    a batch of models on the graph.
-    ``dwave.plugins.torch.utils.estimate_beta`` estimates the inverse temperature of samples of
-    such a model by maximum pseudolikelihood.
+    a batch of models on the graph. ``dwave.plugins.torch.graph`` holds the graph core and
+    imports nothing but PyTorch; ``dwave.plugins.torch.utils`` holds the dimod conversions and
+    ``estimate_beta``, which estimates the inverse temperature of samples of such a model by
+    maximum pseudolikelihood and imports ``dwave.system`` only when called, so the models,
+    layers and ``BlockSampler`` import without it.
   - |
     Samplers bind to any ``GraphIndex`` and gain ``sample_biases(linear, quadratic)``, which
     samples a batch of Ising models on the graph given by their per-edge biases. ``BlockSampler`` updates
@@ -77,17 +80,19 @@ upgrade:
     every edge in the order of ``edges``, irrespective of the orientation given at construction.
     ``sufficient_statistics`` returns batch-averaged statistics in the layout of the parameters
     instead of per-sample statistics.
-    ``theta``, ``interactions``, ``to_ising`` (use ``dwave.plugins.torch.utils.to_ising`` or
-    ``DimodSampler.to_ising``), ``idx_to_node`` (use ``nodes[idx]``) and the deprecated
+    ``theta``, ``interactions``, ``to_ising`` (use ``DimodSampler.to_bqm`` or
+    ``dwave.plugins.torch.utils.to_bqm``, and ``bqm.to_ising()`` for the dictionaries),
+    ``idx_to_node`` (use ``nodes[idx]``) and the deprecated
     ``sample``/``sampleset_to_tensor`` methods are removed. ``edge_idx_i``/
     ``edge_idx_j`` hold the smaller/larger node index of each edge irrespective of the orientation
     given at construction. Duplicate nodes or edges, unknown edge endpoints and unknown hidden nodes
     raise ``ValueError``.
   - |
-    The parameters and buffers of ``GraphRestrictedBoltzmannMachine`` are registered under their
-    public names, so the keys of ``state_dict()`` are ``linear``, ``quadratic``, ``edge_idx_i``,
-    ``edge_idx_j``, ``visible_idx`` and ``hidden_idx`` instead of
-    underscore-prefixed names; checkpoints saved with earlier versions cannot be loaded.
+    The parameters of ``GraphRestrictedBoltzmannMachine`` are registered under their public
+    names, and the index buffers (``edge_idx_i``, ``edge_idx_j``, ``visible_idx`` and
+    ``hidden_idx``) are derived from the constructor arguments and not saved, so the keys of
+    ``state_dict()`` are ``linear`` and ``quadratic`` (``model.linear``, ``model.quadratic`` and
+    ``state`` for a ``BlockSampler``); checkpoints saved with earlier versions cannot be loaded.
     ``nodes``, ``edges``, ``hidden_nodes`` and ``visible_nodes`` are tuples.
   - |
     ``quasi_objective(s_data, s_model)`` no longer takes ``kind``, ``sampler``, ``prefactor``,
@@ -108,7 +113,7 @@ upgrade:
     PyTorch generator. ``DimodSampler.sample_set`` is the sample set as returned by the wrapped
     sampler.
     ``TorchSampler`` subclasses implement ``sample_biases`` in addition to ``sample``, and
-    ``sample``, ``complete`` and ``DimodSampler.to_ising`` raise ``TypeError`` when the sampler is
+    ``sample``, ``complete`` and ``DimodSampler.to_bqm`` raise ``TypeError`` when the sampler is
     bound to a graph module that is not a ``GraphRestrictedBoltzmannMachine``.
   - |
     ``BipartiteGibbsSampler`` is removed. ``BlockSampler(model, colouring=lambda node: node in
@@ -134,7 +139,7 @@ upgrade:
   - |
     ``pseudo_kl_divergence_loss`` moved from ``dwave.plugins.torch.models.losses`` to
     ``dwave.plugins.torch.nn.functional`` and the ``models.losses`` package is removed.
-    ``randspin`` moved from ``dwave.plugins.torch.tensor`` to ``dwave.plugins.torch.utils`` and
+    ``randspin`` moved from ``dwave.plugins.torch.tensor`` to ``dwave.plugins.torch.graph`` and
     the ``tensor`` module is removed. ``dwave.plugins.torch.nn.modules.ising`` is a module holding
     ``Ising`` and ``IsingExpectation``; the statistics are in
     ``dwave.plugins.torch.nn.modules.spin_statistic``. All of these remain exported by

@@ -18,9 +18,10 @@ import unittest.mock
 import torch
 from dimod import BinaryQuadraticModel
 
+from dwave.plugins.torch.graph import randspin
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.nn.modules.kernels import Kernel
-from dwave.plugins.torch.utils import randspin, to_bqm
+from dwave.plugins.torch.utils import to_bqm
 
 
 def set_weights(bm: GRBM, linear, quadratic) -> None:
@@ -32,7 +33,7 @@ def set_weights(bm: GRBM, linear, quadratic) -> None:
 
 def model_to_bqm(bm: GRBM) -> BinaryQuadraticModel:
     """The model as a dimod binary quadratic model."""
-    return to_bqm(bm.nodes, bm.edges, bm.linear, bm.quadratic)
+    return to_bqm(bm, bm.linear, bm.quadratic)
 
 
 def randspins(*shape, seed: int = 0) -> torch.Tensor:

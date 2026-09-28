@@ -347,7 +347,7 @@ class TestIsing(unittest.TestCase):
         energies = ising.energy(spins, linear, edge_biases)
         self.assertEqual((2, 6), tuple(energies.shape))
         for b in range(2):
-            bqm = to_bqm(ising.nodes, ising.edges, linear[b], edge_biases[b])
+            bqm = to_bqm(ising, linear[b], edge_biases[b])
             expected = bqm.energies((spins[b].numpy(), list(ising.nodes)))
             torch.testing.assert_close(energies[b], torch.tensor(expected, dtype=torch.float32))
 

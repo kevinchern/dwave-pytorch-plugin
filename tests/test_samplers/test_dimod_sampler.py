@@ -19,9 +19,19 @@ from dimod import SPIN, ExactSolver, IdentitySampler, SampleSet, TrackingComposi
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.dimod_sampler import DimodSampler
-from dwave.plugins.torch.utils import GraphIndex
+from dwave.plugins.torch.graph import GraphIndex
 from dwave.samplers import SimulatedAnnealingSampler, SteepestDescentSampler
 from tests.helper_functions import set_weights
+
+
+def linear_of(bqm, graph) -> torch.Tensor:
+    """Linear biases of ``bqm`` as a tensor in the node order of ``graph``."""
+    return torch.tensor([bqm.get_linear(node) for node in graph.nodes], dtype=torch.float32)
+
+
+def quadratic_of(bqm, graph) -> torch.Tensor:
+    """Quadratic biases of ``bqm`` as a tensor in the edge order of ``graph``."""
+    return torch.tensor([bqm.get_quadratic(u, v) for u, v in graph.edges], dtype=torch.float32)
 
 
 class TestDimodSampler(unittest.TestCase):
@@ -48,24 +58,22 @@ class TestDimodSampler(unittest.TestCase):
         self.assertIsNone(sampler.quadratic_range)
         self.assertDictEqual(dict(num_reads=3), sampler.sample_kwargs)
 
-    def test_to_ising(self):
+    def test_to_bqm(self):
         set_weights(self.bm, [-3, 0, 1, 3.0], [-1, 1, 2.0, 0])
 
         with self.subTest("Unscaled and unclipped"):
-            h, J = DimodSampler(self.bm, IdentitySampler()).to_ising()
-            self.assertDictEqual(h, {"d": -3.0, "b": 0.0, "a": 1.0, "c": 3.0})
-            self.assertDictEqual(
-                J, {("a", "b"): -1.0, ("a", "c"): 1.0, ("a", "d"): 2.0, ("b", "c"): 0.0}
-            )
+            bqm = DimodSampler(self.bm, IdentitySampler()).to_bqm()
+            self.assertEqual(SPIN, bqm.vartype)
+            self.assertListEqual(list("dbac"), list(bqm.variables))
+            torch.testing.assert_close(linear_of(bqm, self.bm), torch.tensor([-3.0, 0.0, 1.0, 3.0]))
+            torch.testing.assert_close(quadratic_of(bqm, self.bm), torch.tensor([-1.0, 1.0, 2.0, 0.0]))
 
         with self.subTest("Scaled by the prefactor, then clipped"):
             sampler = DimodSampler(self.bm, IdentitySampler(), prefactor=2,
                                    linear_range=(-1, 5), quadratic_range=(-0.5, 3))
-            h, J = sampler.to_ising()
-            self.assertDictEqual(h, {"d": -1.0, "b": 0.0, "a": 2.0, "c": 5.0})
-            self.assertDictEqual(
-                J, {("a", "b"): -0.5, ("a", "c"): 2.0, ("a", "d"): 3.0, ("b", "c"): 0.0}
-            )
+            bqm = sampler.to_bqm()
+            torch.testing.assert_close(linear_of(bqm, self.bm), torch.tensor([-1.0, 0.0, 2.0, 5.0]))
+            torch.testing.assert_close(quadratic_of(bqm, self.bm), torch.tensor([-0.5, 2.0, 3.0, 0.0]))
 
     def test_sample(self):
         grbm = GRBM(list("abcd"), [("a", "b"), ("a", "c"), ("a", "d"), ("b", "c")])
@@ -87,8 +95,9 @@ class TestDimodSampler(unittest.TestCase):
             tracker = TrackingComposite(SteepestDescentSampler())
             sampler = DimodSampler(grbm, tracker, prefactor=prefactor)
             sampler.sample()
-            self.assertDictEqual(tracker.input['h'], dict(zip(grbm.nodes, [prefactor]*4)))
-            self.assertDictEqual(tracker.input['J'], dict(zip(grbm.edges, [-prefactor]*4)))
+            bqm = tracker.input["bqm"]
+            torch.testing.assert_close(linear_of(bqm, grbm), torch.full((4,), float(prefactor)))
+            torch.testing.assert_close(quadratic_of(bqm, grbm), torch.full((4,), -float(prefactor)))
 
         with self.subTest("Linear weights should be clipped to be 0."):
             set_weights(grbm, [-2, -0.002, 0.002, 3], [-1.0] * 4)
@@ -96,8 +105,7 @@ class TestDimodSampler(unittest.TestCase):
             sampler = DimodSampler(grbm, tracker, prefactor=100, linear_range=[0, 0])
             sampler.sample()
             torch.testing.assert_close(
-                torch.tensor(list(tracker.input['h'].values())),
-                torch.tensor([0, 0, 0, 0.0])
+                linear_of(tracker.input["bqm"], grbm), torch.tensor([0, 0, 0, 0.0])
             )
 
         with self.subTest("Linear weights should be clipped to be within range."):
@@ -105,8 +113,7 @@ class TestDimodSampler(unittest.TestCase):
             sampler = DimodSampler(grbm, tracker, prefactor=100, linear_range=[-1, 1])
             sampler.sample()
             torch.testing.assert_close(
-                torch.tensor(list(tracker.input['h'].values())),
-                torch.tensor([-1, -0.2, 0.2, 1])
+                linear_of(tracker.input["bqm"], grbm), torch.tensor([-1, -0.2, 0.2, 1])
             )
 
         with self.subTest("Quadratic weights should be clipped to be within range."):
@@ -115,8 +122,7 @@ class TestDimodSampler(unittest.TestCase):
             sampler = DimodSampler(grbm, tracker, prefactor=100, quadratic_range=[-1, 1])
             sampler.sample()
             torch.testing.assert_close(
-                torch.tensor(list(tracker.input['J'].values())),
-                torch.tensor([-1, -0.2, 0.2, 1])
+                quadratic_of(tracker.input["bqm"], grbm), torch.tensor([-1, -0.2, 0.2, 1])
             )
 
         with self.subTest("Quadratic weights should be clipped to be 0."):
@@ -124,22 +130,16 @@ class TestDimodSampler(unittest.TestCase):
             sampler = DimodSampler(grbm, tracker, prefactor=100, quadratic_range=[0, 0])
             sampler.sample()
             torch.testing.assert_close(
-                torch.tensor(list(tracker.input['J'].values())),
-                torch.tensor([0, 0, 0, 0.0])
+                quadratic_of(tracker.input["bqm"], grbm), torch.tensor([0, 0, 0, 0.0])
             )
 
     def test_aggregated_samples_are_expanded(self):
         class AggregatingSampler:
-            def sample_ising(self, h, J, **kwargs):
-                return SampleSet.from_samples(
-                    ([[1, 1, 1, 1], [-1, -1, -1, -1]], list(h)), vartype=SPIN, energy=[0, 0],
-                    num_occurrences=[3, 1],
-                )
-
             def sample(self, bqm, **kwargs):
+                n = bqm.num_variables
                 return SampleSet.from_samples(
-                    ([[1] * bqm.num_variables], list(bqm.variables)), vartype=SPIN, energy=[0],
-                    num_occurrences=[4],
+                    ([[1] * n, [-1] * n], list(bqm.variables)), vartype=SPIN, energy=[0, 0],
+                    num_occurrences=[3, 1],
                 )
 
         sampler = DimodSampler(self.bm, AggregatingSampler())
@@ -302,21 +302,22 @@ class TestDimodSampler(unittest.TestCase):
 
         with self.subTest("Every model is submitted scaled by the prefactor and clipped"):
             self.assertEqual(2, len(tracker.inputs))
-            self.assertDictEqual(tracker.inputs[0]["h"], {"d": -1.0, "b": 0.0, "a": 2.0, "c": 5.0})
-            self.assertDictEqual(tracker.inputs[0]["J"], {("a", "b"): -0.5, ("a", "c"): 2.0,
-                                                          ("a", "d"): 3.0, ("b", "c"): 0.0})
-            self.assertDictEqual(tracker.input["h"], {"d": 2.0, "b": 2.0, "a": 2.0, "c": 2.0})
-            self.assertDictEqual(tracker.input["J"], {edge: 1.0 for edge in graph.edges})
+            first, last = tracker.inputs[0]["bqm"], tracker.input["bqm"]
+            self.assertListEqual(list("dbac"), list(first.variables))
+            torch.testing.assert_close(linear_of(first, graph), torch.tensor([-1.0, 0.0, 2.0, 5.0]))
+            torch.testing.assert_close(quadratic_of(first, graph), torch.tensor([-0.5, 2.0, 3.0, 0.0]))
+            torch.testing.assert_close(linear_of(last, graph), torch.full((4,), 2.0))
+            torch.testing.assert_close(quadratic_of(last, graph), torch.ones(4))
 
         with self.subTest("Unbatched biases give (num_reads, n_nodes)"):
             self.assertEqual((3, 4), tuple(sampler.sample_biases(linear[0], quadratic[0]).shape))
 
         with self.subTest("Aggregated sample sets are expanded"):
             class AggregatingSampler:
-                def sample_ising(self, h, J, **kwargs):
+                def sample(self, bqm, **kwargs):
                     return SampleSet.from_samples(
-                        ([[1, 1, 1, 1], [-1, -1, -1, -1]], list(h)), vartype=SPIN, energy=[0, 0],
-                        num_occurrences=[3, 1],
+                        ([[1, 1, 1, 1], [-1, -1, -1, -1]], list(bqm.variables)), vartype=SPIN,
+                        energy=[0, 0], num_occurrences=[3, 1],
                     )
 
             spins = DimodSampler(graph, AggregatingSampler()).sample_biases(linear, quadratic)
@@ -328,11 +329,12 @@ class TestDimodSampler(unittest.TestCase):
                 def __init__(self):
                     self.calls = 0
 
-                def sample_ising(self, h, J, **kwargs):
+                def sample(self, bqm, **kwargs):
                     self.calls += 1
                     num_reads = 5 if self.calls == 1 else 3
                     return SampleSet.from_samples(
-                        ([[1] * 4] * num_reads, list(h)), vartype=SPIN, energy=[0.0] * num_reads
+                        ([[1] * 4] * num_reads, list(bqm.variables)), vartype=SPIN,
+                        energy=[0.0] * num_reads
                     )
 
             with self.assertRaisesRegex(ValueError, "Expected all samples to have shape"):
@@ -342,7 +344,7 @@ class TestDimodSampler(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
                 sampler.sample()
             with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
-                sampler.to_ising()
+                sampler.to_bqm()
 
         with self.subTest("A model-bound sampler samples other biases on its graph"):
             sampler = DimodSampler(self.bm, IdentitySampler(),

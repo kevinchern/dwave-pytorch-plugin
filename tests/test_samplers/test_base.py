@@ -19,7 +19,7 @@ import torch
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.nn import Ising
 from dwave.plugins.torch.samplers.base import TorchSampler
-from dwave.plugins.torch.utils import GraphIndex
+from dwave.plugins.torch.graph import GraphIndex
 
 
 class ConstantSampler(TorchSampler):
@@ -76,8 +76,7 @@ class TestTorchSampler(unittest.TestCase):
         self.assertIsInstance(sampler, torch.nn.Module)
         self.assertIs(self.model, sampler.model)
         self.assertListEqual([self.model], list(sampler.children()))
-        self.assertSetEqual({"model.linear", "model.quadratic"},
-                            {k for k in sampler.state_dict() if "idx" not in k and "adjacency" not in k})
+        self.assertSetEqual({"model.linear", "model.quadratic"}, set(sampler.state_dict()))
         self.assertEqual(len(list(self.model.parameters())), len(list(sampler.parameters())))
 
         with self.subTest("Moving the sampler moves the model"):

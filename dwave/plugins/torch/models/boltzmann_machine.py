@@ -30,7 +30,8 @@ from typing import Hashable, Iterable
 
 import torch
 
-from dwave.plugins.torch.utils import GraphIndex, estimate_beta
+from dwave.plugins.torch.graph import GraphIndex
+from dwave.plugins.torch.utils import estimate_beta
 
 __all__ = ["GraphRestrictedBoltzmannMachine"]
 
@@ -50,7 +51,7 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
     :attr:`quadratic`, in the order of :attr:`edges`. Whenever a computation is a matrix
     product---energies, effective fields for sampling and batch statistics for learning---the
     coupling matrix is built on the fly from the per-edge biases (see
-    :meth:`~dwave.plugins.torch.utils.GraphIndex.dense_quadratic`) and discarded afterwards. The
+    :meth:`~dwave.plugins.torch.graph.GraphIndex.dense_quadratic`) and discarded afterwards. The
     computations are therefore dense and fast on GPUs, while the parameters, their gradients and
     the state of optimizers have exactly one entry per node and per edge, independent of the
     orientation and order of the edge list.
@@ -78,9 +79,10 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
 
     The graph attributes and buffers---``nodes``, ``edges``, ``node_to_idx``, ``edge_to_idx``,
     ``edge_idx_i`` and ``edge_idx_j``---are those of
-    :class:`~dwave.plugins.torch.utils.GraphIndex`. The parameters and buffers of the module are
-    registered under the attribute names listed below and in the base class, which are therefore
-    the keys of :meth:`~torch.nn.Module.state_dict`.
+    :class:`~dwave.plugins.torch.graph.GraphIndex`. The parameters ``linear`` and ``quadratic``
+    are the keys of :meth:`~torch.nn.Module.state_dict`; the index buffers are derived from the
+    constructor arguments and are not saved, so a checkpoint is loaded into a model constructed
+    with the same nodes, edges and hidden nodes.
 
     Args:
         nodes (Iterable[Hashable]): List of nodes.
@@ -139,8 +141,8 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         if unknown:
             raise ValueError(f"Hidden nodes {list(unknown)!r} are not nodes of the model.")
         is_hidden = torch.tensor([v in hidden_set for v in self.nodes], dtype=torch.bool)
-        self.register_buffer("visible_idx", torch.nonzero(~is_hidden).flatten())
-        self.register_buffer("hidden_idx", torch.nonzero(is_hidden).flatten())
+        self.register_buffer("visible_idx", torch.nonzero(~is_hidden).flatten(), persistent=False)
+        self.register_buffer("hidden_idx", torch.nonzero(is_hidden).flatten(), persistent=False)
 
         if linear is not None:
             self.set_linear(linear)
@@ -260,13 +262,13 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
                 the model; ``torch.nan`` marks unknown spins.
             linear (torch.Tensor, optional): Linear biases to use instead of the model's
                 :attr:`linear`, possibly a batch of them (see
-                :meth:`~dwave.plugins.torch.utils.GraphIndex.effective_field`).
+                :meth:`~dwave.plugins.torch.graph.GraphIndex.effective_field`).
             quadratic (torch.Tensor, optional): Quadratic biases of the edges to use instead of
                 the model's :attr:`quadratic`, possibly a batch of them.
             idx (torch.Tensor, optional): Indices of the nodes whose fields are returned. If
                 ``None``, the fields of all nodes are returned. Defaults to ``None``.
             coupling (torch.Tensor, optional): The
-                :meth:`~dwave.plugins.torch.utils.GraphIndex.symmetric_coupling` matrix of the
+                :meth:`~dwave.plugins.torch.graph.GraphIndex.symmetric_coupling` matrix of the
                 quadratic biases, which a caller evaluating the fields of several blocks of nodes
                 can pass to avoid rebuilding it. Defaults to ``None``, i.e. it is built.
 
@@ -438,4 +440,4 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         Returns:
             float: The estimated inverse temperature of the model.
         """
-        return estimate_beta(self.nodes, self.edges, self.linear, self.quadratic, spins)
+        return estimate_beta(self, self.linear, self.quadratic, spins)

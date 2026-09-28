@@ -11,284 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+"""Conversions between tensors and dimod objects, and temperature estimation with dwave-system."""
 from __future__ import annotations
 
-from typing import Hashable, Iterable, Sequence
+from typing import TYPE_CHECKING, Hashable, Sequence
 
 import numpy as np
 import torch
 from dimod import BinaryQuadraticModel, SampleSet
-from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
 
-__all__ = ["GraphIndex", "estimate_beta", "randspin", "sampleset_to_tensor", "to_bqm", "to_ising"]
+if TYPE_CHECKING:
+    from dwave.plugins.torch.graph import GraphIndex
 
-
-class GraphIndex(torch.nn.Module):
-    """Integer indexing of the nodes and edges of a simple graph.
-
-    Nodes are indexed by their position in ``nodes`` and edges by their position in ``edges``.
-    Quadratic biases are given *per edge*, as tensors of shape ``(..., n_edges)`` in the order of
-    :attr:`edges`. Where a dense matrix product is the efficient computation, as in :meth:`energy`
-    and :meth:`effective_field`, the coupling matrix is built on the fly by :meth:`dense_quadratic`
-    and discarded afterwards, so the per-edge biases are the only representation that is stored,
-    optimized and exchanged. The index tensors are registered as buffers, so they move with
-    :meth:`~torch.nn.Module.to` and are part of :meth:`~torch.nn.Module.state_dict`. Modules
-    defined on a graph, such as
-    :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine` and
-    :class:`~dwave.plugins.torch.nn.Ising`, subclass it.
-
-    Args:
-        nodes (Iterable[Hashable]): Nodes of the graph.
-        edges (Iterable[tuple[Hashable, Hashable]]): Edges of the graph.
-
-    Raises:
-        ValueError: If ``nodes`` contains duplicates, an edge references an unknown node, an
-            edge is a self-loop, or an edge is duplicated (in either orientation).
-
-    The module also evaluates the Ising :meth:`energy` and :meth:`effective_field` of spins
-    under biases that are given explicitly, for a single model or a batch of models on the graph.
-    Subclasses that own parameters, such as the Boltzmann machine, wrap these methods with their
-    own biases.
-
-    Attributes:
-        nodes (tuple[Hashable, ...]): The nodes, in index order.
-        edges (tuple[tuple[Hashable, Hashable], ...]): The edges, in the orientation given.
-        node_to_idx (dict[Hashable, int]): Mapping from node to index. It is derived from
-            ``nodes`` and should not be modified.
-        edge_to_idx (dict[tuple[Hashable, Hashable], int]): Mapping from an edge, in either
-            orientation, to its index in :attr:`edges`. It is derived from ``edges`` and should
-            not be modified.
-        edge_idx_i (torch.Tensor): Smaller node index of each edge, shape ``(n_edges,)``.
-        edge_idx_j (torch.Tensor): Larger node index of each edge, shape ``(n_edges,)``.
-    """
-
-    def __init__(
-        self, nodes: Iterable[Hashable], edges: Iterable[tuple[Hashable, Hashable]]
-    ) -> None:
-        super().__init__()
-        self.nodes = tuple(nodes)
-        self.edges = tuple(tuple(edge) for edge in edges)
-        self.node_to_idx = {node: idx for idx, node in enumerate(self.nodes)}
-        if len(self.node_to_idx) != self.n_nodes:
-            raise ValueError("`nodes` contains duplicate entries.")
-        try:
-            endpoints = torch.tensor(
-                [[self.node_to_idx[u], self.node_to_idx[v]] for u, v in self.edges],
-                dtype=torch.long,
-            ).reshape(-1, 2)
-        except KeyError as err:
-            raise ValueError(f"Edge endpoint {err.args[0]!r} is not a node.") from None
-
-        loops = endpoints[:, 0] == endpoints[:, 1]
-        if loops.any():
-            raise ValueError(
-                f"Self-loops are not allowed. Edges with self-loops: "
-                f"{[self.edges[k] for k in loops.nonzero().flatten().tolist()]}"
-            )
-        self.edge_to_idx = {
-            edge: k for k, (u, v) in enumerate(self.edges) for edge in ((u, v), (v, u))
-        }
-        if len(self.edge_to_idx) != 2 * self.n_edges:
-            raise ValueError("Duplicate edges are not allowed.")
-
-        self.register_buffer("edge_idx_i", endpoints.min(1).values)
-        self.register_buffer("edge_idx_j", endpoints.max(1).values)
-
-    def extra_repr(self) -> str:
-        return f"n_nodes={self.n_nodes}, n_edges={self.n_edges}"
-
-    @property
-    def n_nodes(self) -> int:
-        """Number of nodes."""
-        return len(self.nodes)
-
-    @property
-    def n_edges(self) -> int:
-        """Number of edges."""
-        return len(self.edges)
-
-    def degrees(self) -> torch.Tensor:
-        """Degree of every node, shape ``(n_nodes,)``."""
-        return torch.bincount(
-            torch.cat([self.edge_idx_i, self.edge_idx_j]), minlength=self.n_nodes
-        )
-
-    # ------------------------------------------------------------------ coupling matrices --------
-
-    def dense_quadratic(self, quadratic: torch.Tensor) -> torch.Tensor:
-        """Build the dense coupling matrix :math:`J` of per-edge quadratic biases.
-
-        This is the single place where a dense matrix is made from the per-edge biases; callers
-        build it right before a matrix product and let it go afterwards.
-
-        Args:
-            quadratic (torch.Tensor): Quadratic biases of the edges, of shape ``(..., n_edges)``
-                and in the order of :attr:`edges`.
-
-        Raises:
-            ValueError: If the trailing dimension of ``quadratic`` is not the number of edges.
-
-        Returns:
-            torch.Tensor: A strictly upper-triangular tensor of shape ``(..., n_nodes, n_nodes)``
-            holding the bias of edge ``k`` at ``[edge_idx_i[k], edge_idx_j[k]]`` and zeros
-            elsewhere.
-        """
-        if quadratic.shape[-1] != self.n_edges:
-            raise ValueError(
-                f"Expected {self.n_edges} edge biases, got {quadratic.shape[-1]}."
-            )
-        coupling = quadratic.new_zeros(*quadratic.shape[:-1], self.n_nodes, self.n_nodes)
-        coupling[..., self.edge_idx_i, self.edge_idx_j] = quadratic
-        return coupling
-
-    def symmetric_coupling(self, quadratic: torch.Tensor) -> torch.Tensor:
-        """The symmetrized coupling matrix :math:`J + J^T` of per-edge quadratic biases, whose
-        row ``k`` holds the couplings of node ``k`` to every other node.
-
-        Args:
-            quadratic (torch.Tensor): Quadratic biases of the edges, of shape ``(..., n_edges)``.
-
-        Returns:
-            torch.Tensor: A symmetric tensor of shape ``(..., n_nodes, n_nodes)`` with zero
-            diagonal.
-        """
-        coupling = self.dense_quadratic(quadratic)
-        return coupling + coupling.mT
-
-    # ------------------------------------------------------------------ Ising energies -----------
-
-    def energy(
-        self, x: torch.Tensor, linear: torch.Tensor, quadratic: torch.Tensor
-    ) -> torch.Tensor:
-        r"""Energies :math:`\sum_i h_i s_i + \sum_{(i, j)} J_{ij} s_i s_j` of spins under given
-        biases.
-
-        The biases define one Ising model or a batch of them. Unbatched biases, of shapes
-        ``(n_nodes,)`` and ``(n_edges,)``, apply to spins of any shape ``(..., n_nodes)``. Batched
-        biases, of shapes ``(*batch, n_nodes)`` and ``(*batch, n_edges)``, define one model per
-        batch element and apply to spins of shape ``(*batch, M, n_nodes)``, i.e. ``M``
-        configurations per model, or ``(*batch, n_nodes)``, one configuration per model. The
-        coupling matrices are built on the fly with :meth:`dense_quadratic`.
-
-        Args:
-            x (torch.Tensor): Spins.
-            linear (torch.Tensor): Linear biases.
-            quadratic (torch.Tensor): Quadratic biases of the edges, in the order of
-                :attr:`edges`.
-
-        Raises:
-            ValueError: If ``linear`` does not hold one bias per node, ``quadratic`` does not hold
-                one bias per edge, or the two are not batched alike.
-
-        Returns:
-            torch.Tensor: Energies of shape ``x.shape[:-1]``.
-        """
-        self._check_linear(linear, quadratic.shape[:-1])
-        x, squeeze = self._align_spins(x, linear)
-        coupling = self.dense_quadratic(quadratic)
-        energy = (x @ linear.unsqueeze(-1)).squeeze(-1) + ((x @ coupling) * x).sum(-1)
-        return energy.squeeze(-1) if squeeze else energy
-
-    def effective_field(
-        self,
-        x: torch.Tensor,
-        *,
-        linear: torch.Tensor,
-        quadratic: torch.Tensor | None = None,
-        idx: torch.Tensor | None = None,
-        coupling: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        r"""Effective fields :math:`h_k + \sum_{l} J_{kl} s_l` acting on nodes under given biases.
-
-        The effective field of node :math:`k` is the derivative of the energy with respect to
-        :math:`s_k`; the conditional distribution of :math:`s_k` given all other spins is
-        :math:`P(s_k = \pm 1) = \sigma(\mp 2 h^{\text{eff}}_k)`. Entries of ``x`` that are
-        ``torch.nan`` denote unknown spins and contribute nothing to the fields. Biases are batched
-        as in :meth:`energy`.
-
-        Args:
-            x (torch.Tensor): Spins of shape ``(..., n_nodes)``; ``torch.nan`` marks unknown spins.
-            linear (torch.Tensor): Linear biases.
-            quadratic (torch.Tensor, optional): Quadratic biases of the edges, in the order of
-                :attr:`edges`. Required unless ``coupling`` is given.
-            idx (torch.Tensor, optional): Indices of the nodes whose fields are returned. If
-                ``None``, the fields of all nodes are returned. Defaults to ``None``.
-            coupling (torch.Tensor, optional): The :meth:`symmetric_coupling` of ``quadratic``,
-                which a caller evaluating the fields of several blocks of nodes can pass to avoid
-                rebuilding it. Defaults to ``None``, i.e. it is built from ``quadratic``.
-
-        Raises:
-            ValueError: If neither ``quadratic`` nor ``coupling`` is given, ``linear`` does not
-                hold one bias per node, or the biases are not batched alike.
-
-        Returns:
-            torch.Tensor: Effective fields of shape ``(..., n_nodes)`` or ``(..., len(idx))``.
-        """
-        if coupling is None:
-            if quadratic is None:
-                raise ValueError("Either `quadratic` or `coupling` is required.")
-            coupling = self.symmetric_coupling(quadratic)
-        self._check_linear(linear, coupling.shape[:-2])
-        x, squeeze = self._align_spins(x, linear)
-        spins = torch.nan_to_num(x, nan=0.0)
-        fields = linear if linear.ndim == 1 else linear.unsqueeze(-2)
-        if idx is not None:
-            fields, coupling = fields[..., idx], coupling[..., :, idx]
-        fields = fields + spins @ coupling
-        return fields.squeeze(-2) if squeeze else fields
-
-    def _check_linear(self, linear: torch.Tensor, batch_shape: torch.Size) -> None:
-        """Raise unless ``linear`` holds one bias per node for every model of a batch.
-
-        Args:
-            linear (torch.Tensor): Linear biases, expected to be of shape
-                ``(*batch_shape, n_nodes)``.
-            batch_shape (torch.Size): Batch shape of the quadratic biases or of the couplings,
-                i.e. ``quadratic.shape[:-1]`` or ``coupling.shape[:-2]``.
-
-        Raises:
-            ValueError: If ``linear`` does not have shape ``(*batch_shape, n_nodes)``, in
-                particular when only one of the biases is batched, which would otherwise
-                broadcast into results of the wrong shape.
-        """
-        if linear.ndim < 1 or linear.shape[-1] != self.n_nodes:
-            raise ValueError(
-                f"Expected {self.n_nodes} linear biases (one per node), got shape "
-                f"{tuple(linear.shape)}."
-            )
-        if linear.shape[:-1] != batch_shape:
-            raise ValueError(
-                "`linear` and the quadratic biases must define the same batch of models, got "
-                f"batch shapes {tuple(linear.shape[:-1])} and {tuple(batch_shape)}."
-            )
-
-    @staticmethod
-    def _align_spins(x: torch.Tensor, linear: torch.Tensor) -> tuple[torch.Tensor, bool]:
-        """Insert a sample dimension into ``x`` when it holds one configuration per batched model.
-
-        Returns:
-            tuple[torch.Tensor, bool]: The spins with a sample dimension, and whether one was
-            inserted (and should be squeezed out of the results again).
-        """
-        if linear.ndim > 1 and x.ndim == linear.ndim:
-            return x.unsqueeze(-2), True
-        return x, False
-
-
-def randspin(size: Sequence[int], **kwargs) -> torch.Tensor:
-    """Random spins, i.e. ``±1`` values drawn uniformly and independently.
-
-    Args:
-        size (Sequence[int]): Shape of the output tensor.
-        **kwargs: Keyword arguments of :func:`torch.randint`, such as ``generator``, ``device``
-            and ``dtype``.
-
-    Returns:
-        torch.Tensor: A tensor of ``±1`` values of the given shape, of ``torch.int64`` unless
-        ``dtype`` is given.
-    """
-    return 2 * torch.randint(0, 2, size, **kwargs) - 1
+__all__ = ["estimate_beta", "sampleset_to_tensor", "to_bqm"]
 
 
 def sampleset_to_tensor(
@@ -325,26 +60,31 @@ def _scale_and_clip(
     return biases if bounds is None else biases.clip(*bounds)
 
 
-def to_ising(
-    nodes: Sequence[Hashable],
-    edges: Sequence[tuple[Hashable, Hashable]],
+def to_bqm(
+    graph: GraphIndex,
     linear: torch.Tensor,
     quadratic: torch.Tensor,
     prefactor: float = 1.0,
     linear_range: tuple[float, float] | None = None,
     quadratic_range: tuple[float, float] | None = None,
-) -> tuple[dict[Hashable, float], dict[tuple[Hashable, Hashable], float]]:
-    """Converts linear and quadratic biases to the Ising dictionaries used by dimod.
+) -> BinaryQuadraticModel:
+    """Converts the biases of an Ising model on a graph to a ``dimod.BinaryQuadraticModel``.
 
     The biases are scaled by ``prefactor`` and then clipped to ``linear_range`` and
     ``quadratic_range`` (if given), which is how a Hamiltonian is prepared for a sampler that
-    operates at a fixed temperature and with bounded biases, e.g. a quantum annealer.
+    operates at a fixed temperature and with bounded biases, e.g. a quantum annealer. The model is
+    built from the tensors directly; ``bqm.to_ising()`` gives dimod's Ising dictionaries if they
+    are needed.
 
     Args:
-        nodes (Sequence[Hashable]): Node labels, in the order of ``linear``.
-        edges (Sequence[tuple[Hashable, Hashable]]): Edge labels, in the order of ``quadratic``.
-        linear (torch.Tensor): Linear biases of shape ``(len(nodes),)``.
-        quadratic (torch.Tensor): Quadratic biases of the edges, shape ``(len(edges),)``.
+        graph (GraphIndex): The graph of the model, for example a
+            :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine` or an
+            :class:`~dwave.plugins.torch.nn.Ising` layer. Its nodes label the variables and its
+            edges are the interactions.
+        linear (torch.Tensor): Linear biases of shape ``(graph.n_nodes,)``, in the order of
+            ``graph.nodes``.
+        quadratic (torch.Tensor): Quadratic biases of shape ``(graph.n_edges,)``, in the order of
+            ``graph.edges``.
         prefactor (float): Scaling applied to all biases prior to clipping. Defaults to 1.
         linear_range (tuple[float, float], optional): Minimum and maximum of the linear biases.
         quadratic_range (tuple[float, float], optional): Minimum and maximum of the quadratic
@@ -354,58 +94,31 @@ def to_ising(
         ValueError: If the number of biases does not match the number of nodes or edges.
 
     Returns:
-        tuple[dict, dict]: Linear biases keyed by node and quadratic biases keyed by edge, as
-        accepted by :meth:`dimod.Sampler.sample_ising` and
-        :meth:`dimod.BinaryQuadraticModel.from_ising`.
+        dimod.BinaryQuadraticModel: The (scaled and clipped) model in the ``SPIN`` vartype, with
+        its variables in the order of ``graph.nodes``.
     """
-    nodes = list(nodes)
-    edges = [tuple(edge) for edge in edges]
     linear = torch.as_tensor(linear).detach()
     quadratic = torch.as_tensor(quadratic).detach()
-    if tuple(linear.shape) != (len(nodes),):
+    if tuple(linear.shape) != (graph.n_nodes,):
         raise ValueError(
-            f"Expected {len(nodes)} linear biases (one per node), got shape {tuple(linear.shape)}."
+            f"Expected {graph.n_nodes} linear biases (one per node), got shape "
+            f"{tuple(linear.shape)}."
         )
-    if tuple(quadratic.shape) != (len(edges),):
+    if tuple(quadratic.shape) != (graph.n_edges,):
         raise ValueError(
-            f"Expected {len(edges)} quadratic biases (one per edge), got shape "
+            f"Expected {graph.n_edges} quadratic biases (one per edge), got shape "
             f"{tuple(quadratic.shape)}."
         )
-    linear = _scale_and_clip(linear, prefactor, linear_range)
-    quadratic = _scale_and_clip(quadratic, prefactor, quadratic_range)
-    h = dict(zip(nodes, linear.cpu().tolist()))
-    J = dict(zip(edges, quadratic.cpu().tolist()))
-    return h, J
-
-
-def to_bqm(
-    nodes: Sequence[Hashable],
-    edges: Sequence[tuple[Hashable, Hashable]],
-    linear: torch.Tensor,
-    quadratic: torch.Tensor,
-    prefactor: float = 1.0,
-    linear_range: tuple[float, float] | None = None,
-    quadratic_range: tuple[float, float] | None = None,
-) -> BinaryQuadraticModel:
-    """Converts linear and quadratic biases to a ``dimod.BinaryQuadraticModel``.
-
-    The arguments are those of :func:`to_ising`, whose dictionaries are passed on to
-    :meth:`dimod.BinaryQuadraticModel.from_ising`.
-
-    Returns:
-        dimod.BinaryQuadraticModel: The (scaled and clipped) model in the ``SPIN`` vartype.
-    """
-    return BinaryQuadraticModel.from_ising(
-        *to_ising(nodes, edges, linear, quadratic, prefactor, linear_range, quadratic_range)
+    linear = _scale_and_clip(linear, prefactor, linear_range).cpu().numpy()
+    quadratic = _scale_and_clip(quadratic, prefactor, quadratic_range).cpu().numpy()
+    interactions = (graph.edge_idx_i.cpu().numpy(), graph.edge_idx_j.cpu().numpy(), quadratic)
+    return BinaryQuadraticModel.from_numpy_vectors(
+        linear, interactions, 0.0, "SPIN", variable_order=list(graph.nodes)
     )
 
 
 def estimate_beta(
-    nodes: Sequence[Hashable],
-    edges: Sequence[tuple[Hashable, Hashable]],
-    linear: torch.Tensor,
-    quadratic: torch.Tensor,
-    spins: torch.Tensor,
+    graph: GraphIndex, linear: torch.Tensor, quadratic: torch.Tensor, spins: torch.Tensor
 ) -> float:
     """Maximum pseudolikelihood estimate of the inverse temperature at which spins were sampled
     from an Ising model.
@@ -416,16 +129,18 @@ def estimate_beta(
     <https://doi.org/10.3389/fict.2016.00023>`_ for more on estimating beta.
 
     Args:
-        nodes (Sequence[Hashable]): Node labels, in the order of ``linear``.
-        edges (Sequence[tuple[Hashable, Hashable]]): Edge labels, in the order of ``quadratic``.
-        linear (torch.Tensor): Linear biases of shape ``(len(nodes),)``.
-        quadratic (torch.Tensor): Quadratic biases of the edges, shape ``(len(edges),)``.
-        spins (torch.Tensor): Spins of shape ``(M, len(nodes))`` with one column per node, in the
-            order of ``nodes``.
+        graph (GraphIndex): The graph of the model.
+        linear (torch.Tensor): Linear biases of shape ``(graph.n_nodes,)``.
+        quadratic (torch.Tensor): Quadratic biases of shape ``(graph.n_edges,)``.
+        spins (torch.Tensor): Spins of shape ``(M, graph.n_nodes)`` with one column per node, in
+            the order of ``graph.nodes``.
 
     Returns:
         float: The estimated inverse temperature.
     """
-    bqm = to_bqm(nodes, edges, linear, quadratic)
+    # Imported here so that the models, layers and block sampler import without dwave-system
+    from dwave.system.temperatures import maximum_pseudolikelihood_temperature
+
+    bqm = to_bqm(graph, linear, quadratic)
     samples = torch.as_tensor(spins).detach().cpu().numpy()
-    return float(1 / mple(bqm, (samples, list(nodes)))[0])
+    return float(1 / maximum_pseudolikelihood_temperature(bqm, (samples, list(graph.nodes)))[0])
