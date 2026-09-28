@@ -35,9 +35,10 @@ The package provides the following components.
   supports hidden units,
   exact conditional expectations of hidden units that are not adjacent to each other, a
   quasi-objective whose gradient is the gradient of the negative log likelihood, and estimation of
-  the effective inverse temperature of a set of samples. ``DiscreteVariationalAutoencoder``,
-  together with the ``pseudo_kl_divergence_loss`` of ``dwave.plugins.torch.nn.functional``,
-  supports training autoencoders with a Boltzmann machine prior over discrete latent variables.
+  the effective inverse temperature of a set of samples. Through ``gumbel_spins`` and
+  ``pseudo_kl_divergence_loss`` of ``dwave.plugins.torch.nn.functional``, a Boltzmann machine
+  serves as the prior of a discrete variational autoencoder, whose encoder-spins-decoder wiring
+  is a few lines of PyTorch shown in the examples.
 
 * **Samplers** (``dwave.plugins.torch.samplers``). Samplers are ``torch.nn.Module`` objects that
   hold the model they sample from, so moving or saving a sampler moves or saves the model and the
@@ -96,7 +97,9 @@ Examples
 
 Complete scripts are in the repository's
 `examples directory <https://github.com/dwavesystems/dwave-pytorch-plugin/tree/main/examples>`_;
-the Boltzmann machine example additionally requires the ``dwave-graphs`` package.
+the Boltzmann machine example additionally requires the ``dwave-graphs`` package. The discrete
+variational autoencoder example trains an autoencoder with a Boltzmann machine prior sampled by
+a ``BlockSampler``.
 
 Training a Boltzmann machine
 ----------------------------

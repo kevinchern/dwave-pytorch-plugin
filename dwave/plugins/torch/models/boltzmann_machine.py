@@ -107,6 +107,8 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
             of observations.
         hidden_idx (torch.Tensor): Indices of the hidden units.
         hidden_nodes (tuple[Hashable, ...]): The hidden nodes.
+        connected_hidden (bool): Whether any edge connects two hidden units, in which case
+            their conditional expectations given the visible units are not exact.
     """
     # QPU beta has been measured to be 5-8 (in inverse units of programmed J)
     # Considering the higher temperature within this range, to sample from a beta=1
@@ -143,6 +145,9 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         is_hidden = torch.tensor([v in hidden_set for v in self.nodes], dtype=torch.bool)
         self.register_buffer("visible_idx", torch.nonzero(~is_hidden).flatten(), persistent=False)
         self.register_buffer("hidden_idx", torch.nonzero(is_hidden).flatten(), persistent=False)
+        self.connected_hidden = bool(
+            (is_hidden[self.edge_idx_i] & is_hidden[self.edge_idx_j]).any()
+        )
 
         if linear is not None:
             self.set_linear(linear)
@@ -217,13 +222,6 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
     def n_hidden(self) -> int:
         """Number of hidden units."""
         return self.hidden_idx.numel()
-
-    @property
-    def connected_hidden(self) -> bool:
-        """Whether any edge connects two hidden units."""
-        is_hidden = torch.zeros(self.n_nodes, dtype=torch.bool, device=self.hidden_idx.device)
-        is_hidden[self.hidden_idx] = True
-        return bool((is_hidden[self.edge_idx_i] & is_hidden[self.edge_idx_j]).any())
 
     # ------------------------------------------------------------------ energies -----------------
 
@@ -418,7 +416,7 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         """
         unknown = torch.isnan(x)
         with torch.no_grad():
-            if (unknown[..., self.edge_idx_i] & unknown[..., self.edge_idx_j]).any():
+            if self._unknown_are_adjacent(unknown):
                 raise ValueError(
                     "Exact conditional expectations require that no two unknown spins are "
                     "adjacent; with hidden units, the hidden units must be disconnected from "
@@ -426,6 +424,23 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
                 )
             field = self.effective_field(x)
         return torch.where(unknown, -torch.tanh(field), x)
+
+    def _unknown_are_adjacent(self, unknown: torch.Tensor) -> bool:
+        """Whether some row of ``unknown`` marks both endpoints of an edge.
+
+        Unknown spins confined to the hidden units, the case of observations padded with
+        :meth:`pad_visible`, are adjacent only if hidden units are connected, which is the
+        constant :attr:`connected_hidden`; otherwise the edges are checked.
+
+        Args:
+            unknown (torch.Tensor): Boolean tensor of shape (..., N) marking the unknown spins.
+
+        Returns:
+            bool: Whether two unknown spins of some row are adjacent.
+        """
+        if not unknown[..., self.visible_idx].any():
+            return self.connected_hidden
+        return bool((unknown[..., self.edge_idx_i] & unknown[..., self.edge_idx_j]).any())
 
     # ------------------------------------------------------------------ temperature --------------
 

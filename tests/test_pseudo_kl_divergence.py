@@ -30,9 +30,14 @@ import unittest
 
 import torch
 import torch.nn.functional as F
+from dimod import ExactSolver
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
+from dwave.plugins.torch.nn.functional import gumbel_spins
+from dwave.plugins.torch.nn.functional import maximum_mean_discrepancy_loss as mmd_loss
 from dwave.plugins.torch.nn.functional import pseudo_kl_divergence_loss
+from dwave.plugins.torch.nn.modules.kernels import GaussianKernel
+from dwave.plugins.torch.samplers import DimodSampler
 
 
 def encoder_entropy(logits: torch.Tensor) -> torch.Tensor:
@@ -188,6 +193,68 @@ class TestPseudoKLDivergenceLoss(unittest.TestCase):
         (-encoder_entropy(logits2)).backward()
 
         torch.testing.assert_close(logits.grad, logits2.grad)
+
+
+# Data in the corners of the unit square and the spin strings they encode to
+CORNERS = torch.tensor([[1.0, 1.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]])
+SPINS = 2 * CORNERS - 1
+
+
+def bit_encoder(x: torch.Tensor) -> torch.Tensor:
+    """A parameter-free encoder mapping bits to logits of ±20, at which the Gumbel noise flips a
+    spin with probability sigmoid(-20), i.e. never in practice."""
+    return x * 40 - 20
+
+
+def sign_map(logits: torch.Tensor, n_samples: int) -> torch.Tensor:
+    """A deterministic straight-through discretisation: the signs of the logits, repeated."""
+    spins = torch.sign(logits) - logits.detach() + logits
+    return spins.unsqueeze(1).expand(-1, n_samples, *logits.shape[1:])
+
+
+class TestDiscreteAutoencoderObjectives(unittest.TestCase):
+    """The objectives of a discrete variational autoencoder with a Boltzmann machine prior, wired
+    as in ``examples/discrete_variational_autoencoder.py``: encoder -> spins -> decoder."""
+
+    def test_objectives_reach_every_parameter(self):
+        # Gradients flow through the straight-through discretisation to the encoder, to the
+        # decoder and to the prior
+        encoder, decoder = torch.nn.Linear(2, 2), torch.nn.Linear(2, 2)
+        prior = GRBM((0, 1), [(0, 1)], linear={0: 0.1, 1: -0.2}, quadratic={(0, 1): -1.2})
+
+        logits = encoder(CORNERS)
+        spins = sign_map(logits, n_samples=3)
+        reconstruction = F.mse_loss(decoder(spins), CORNERS.unsqueeze(1).expand(-1, 3, -1))
+        kl = pseudo_kl_divergence_loss(spins, logits, SPINS, prior)
+        (reconstruction + 0.1 * kl).backward()
+        parameters = [*encoder.named_parameters(), *decoder.named_parameters(),
+                      *prior.named_parameters()]
+        for name, parameter in parameters:
+            with self.subTest(parameter=name):
+                self.assertIsNotNone(parameter.grad)
+                self.assertTrue(torch.any(parameter.grad != 0))
+
+        with self.subTest("The maximum mean discrepancy also reaches the encoder"):
+            encoder.zero_grad()
+            spins = sign_map(encoder(CORNERS), n_samples=1)
+            mmd_loss(spins.flatten(1), SPINS, GaussianKernel(3)).backward()
+            self.assertTrue(torch.any(encoder.weight.grad != 0))
+
+    def test_uniform_prior_is_a_fixed_point_of_uniform_data(self):
+        # The corners encode to the four spin strings, which the zero-parameter prior generates
+        # uniformly. ExactSolver enumerates every state once, i.e. it samples that prior exactly,
+        # so the gradient of the pseudo-KL divergence with respect to the prior vanishes: training
+        # the prior on this data leaves it uniform.
+        prior = GRBM((0, 1), [(0, 1)], linear={0: 0.0, 1: 0.0}, quadratic={(0, 1): 0.0})
+        logits = bit_encoder(CORNERS)
+        spins = gumbel_spins(logits)  # strong logits: exactly the spin strings of the corners
+        torch.testing.assert_close(spins, SPINS.unsqueeze(1))
+        samples = DimodSampler(prior, ExactSolver()).sample()
+        self.assertEqual((4, 2), tuple(samples.shape))
+        loss = pseudo_kl_divergence_loss(spins, logits, samples, prior)
+        for grad in torch.autograd.grad(loss, list(prior.parameters())):
+            torch.testing.assert_close(grad, torch.zeros_like(grad))
+
 
 if __name__ == "__main__":
     unittest.main()

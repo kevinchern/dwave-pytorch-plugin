@@ -69,9 +69,8 @@ features:
     Ising model.
   - |
     ``dwave.plugins.torch.nn.functional.gumbel_spins`` samples spins from encoder logits with the
-    straight-through Gumbel-softmax estimator. It is the default ``latent_to_discrete`` map of
-    ``DiscreteVariationalAutoencoder``, whose ``encoder``, ``decoder`` and ``latent_to_discrete``
-    are plain attributes.
+    straight-through Gumbel-softmax estimator. It is the discretisation step of the discrete
+    variational autoencoder of ``examples/discrete_variational_autoencoder.py``.
   - |
     ``dwave.plugins.torch.nn`` exports the kernels, losses and Ising modules.
 upgrade:
@@ -145,8 +144,11 @@ upgrade:
     ``dwave.plugins.torch.nn.modules.spin_statistic``. All of these remain exported by
     ``dwave.plugins.torch.nn``.
   - |
-    ``DiscreteVariationalAutoencoder`` registers its encoder and decoder as ``encoder`` and
-    ``decoder``, so the keys of ``state_dict()`` lose their leading underscores.
+    ``DiscreteVariationalAutoencoder`` is removed from ``dwave.plugins.torch.models``: it wired
+    an encoder, a discretisation map and a decoder together and had nothing specific to Ising
+    models. ``examples/discrete_variational_autoencoder.py`` defines the same module in a few
+    lines and trains it with ``gumbel_spins``, ``pseudo_kl_divergence_loss`` and a Boltzmann
+    machine prior sampled by a ``BlockSampler``.
   - |
     ``dwave-hybrid`` and ``einops`` are no longer dependencies, and ``dwave-graphs`` is required only
     by the tests and examples. Package discovery is restricted to the ``dwave`` namespace, and the

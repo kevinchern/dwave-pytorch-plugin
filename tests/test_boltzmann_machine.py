@@ -470,6 +470,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         padded = bm.pad_visible(torch.tensor([[1.0, -1.0]]))
         h_eff = bm.effective_field(padded, idx=bm.hidden_idx)
         torch.testing.assert_close(h_eff, torch.tensor([[0.1 + 0.3 + 0.2, -0.4 - 0.5]]))
+        self.assertTrue(bm.connected_hidden)
         with self.assertRaisesRegex(ValueError, "no two unknown spins are adjacent"):
             bm.conditional_expectation(padded)
 

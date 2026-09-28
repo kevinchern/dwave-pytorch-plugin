@@ -133,9 +133,9 @@ def gumbel_spins(logits: torch.Tensor, n_samples: int = 1, tau: float = 1 / 7) -
     Every logit :math:`\ell` defines a spin with :math:`P(s = +1) = \sigma(\ell)`. Spins are drawn
     with a hard two-class Gumbel-softmax over :math:`(\ell, 0)` at temperature ``tau`` (see
     :func:`torch.nn.functional.gumbel_softmax`): the forward pass yields exact spins and the
-    backward pass uses the gradient of the softmax relaxation. This is the default
-    ``latent_to_discrete`` map of
-    :class:`~dwave.plugins.torch.models.DiscreteVariationalAutoencoder`; the default temperature
+    backward pass uses the gradient of the softmax relaxation. This is the discretisation step
+    of a discrete variational autoencoder with a Boltzmann machine prior (see
+    ``examples/discrete_variational_autoencoder.py``); the default temperature
     is the one used in https://iopscience.iop.org/article/10.1088/2632-2153/aba220.
 
     Args:
