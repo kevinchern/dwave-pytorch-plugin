@@ -11,228 +11,324 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Tests of the Ising layer, its statistics and the gradient estimator behind them.
 
+The estimator is tested exactly: on a three-node model every set of ``M`` samples is enumerated,
+so the expectation of the estimated gradient is computed exactly and compared with the gradient of
+the exact expectation, obtained by autograd through the enumerated probabilities."""
+
+import itertools
 import unittest
 
 import torch
 from dimod import BQM, ExactSolver
 
-from dwave.plugins.torch.nn.modules.ising import Ising, IsingExpectation
-from dwave.plugins.torch.nn.modules.spin_statistic import (IdentityStatistic, IsingStatistic,
-                                                           SpinStatistic)
+from dwave.plugins.torch.graph import GraphIndex
+from dwave.plugins.torch.models import GraphRestrictedBoltzmannMachine as GRBM
+from dwave.plugins.torch.nn import GaussianKernel, Ising, Mean, SquaredMMD
+from dwave.plugins.torch.nn.functional import expectation, leave_one_out
+from dwave.plugins.torch.nn.functional import maximum_mean_discrepancy_loss as mmd_loss
 from dwave.plugins.torch.samplers import BlockSampler, DimodSampler
 from dwave.plugins.torch.utils import to_bqm
 from dwave.samplers import SimulatedAnnealingSampler as Neal
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
 from tests.helper_functions import randspins
 
+# ---------------------------------------------------------------- exact enumeration ------------
 
-class _ConcreteStatistic(SpinStatistic):
-    """Minimal concrete implementation for testing the ABC."""
-
-    def _transform(self, x):
-        return x[..., :self.dim_out]
+GRAPH = GraphIndex("abc", [("a", "b"), ("b", "c"), ("a", "c")])
+STATES = torch.tensor(list(itertools.product([-1.0, 1.0], repeat=3)), dtype=torch.float64)
 
 
-class TestStatistic(unittest.TestCase):
-    """Verify the Statistic ABC enforces its contract:
-    - inputs must be 3D (batch, samples, features)
-    - outputs must be 3D with last dim == dim_out
-    """
-
-    def test_dim_out(self):
-        # The dim_out property should reflect what was passed at construction
-        stat = _ConcreteStatistic(dim_out=3)
-        self.assertEqual(stat.dim_out, 3)
-
-    def test_rejects_2d_input(self):
-        # 2D tensors lack the sample dimension
-        stat = _ConcreteStatistic(dim_out=4)
-        x = torch.randn(2, 4)
-        with self.assertRaisesRegex(ValueError, r"Input tensor.*ndim == 3"):
-            stat(x)
-
-    def test_rejects_4d_input(self):
-        # 4D tensors have an extra spatial dim
-        stat = _ConcreteStatistic(dim_out=4)
-        x = torch.randn(2, 3, 4, 5)
-        with self.assertRaisesRegex(ValueError, r"Input tensor.*ndim == 3"):
-            stat(x)
-
-    def test_rejects_wrong_output_dim(self):
-        # If _transform returns a tensor whose last dim != dim_out, catch the bug early
-        class BadStatistic(SpinStatistic):
-            def _transform(self, x):
-                return x[..., :2]
-
-        stat = BadStatistic(dim_out=5)
-        x = torch.randn(2, 3, 4)
-        with self.assertRaisesRegex(ValueError, r"Output dimension.*does not match"):
-            stat(x)
-
-    def test_rejects_wrong_output_ndim(self):
-        # If _transform collapses a dimension (e.g. returns 2D), catch it
-        class SquashStatistic(SpinStatistic):
-            def _transform(self, x):
-                return x.mean(dim=1)  # (batch, features) — loses sample dim
-
-        stat = SquashStatistic(dim_out=4)
-        x = torch.randn(2, 3, 4)
-        with self.assertRaisesRegex(ValueError, r"Output tensor.*ndim == 3"):
-            stat(x)
-
-    def test_valid_call(self):
-        # Happy path: correct shape in, correct shape out
-        stat = _ConcreteStatistic(dim_out=3)
-        x = torch.randn(2, 4, 5)
-        result = stat(x)
-        self.assertEqual(result.shape, (2, 4, 3))
+def biases(seed: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
+    generator = torch.Generator().manual_seed(seed)
+    linear = (0.7 * torch.randn(3, generator=generator, dtype=torch.float64)).requires_grad_()
+    quadratic = (0.7 * torch.randn(3, generator=generator, dtype=torch.float64)).requires_grad_()
+    return linear, quadratic
 
 
-class TestIdentityStatistic(unittest.TestCase):
-    """Verify IdentityStatistic passes input through unchanged."""
-
-    def test_dim_out(self):
-        stat = IdentityStatistic(5)
-        self.assertEqual(stat.dim_out, 5)
-
-    def test_output_equals_input(self):
-        stat = IdentityStatistic(4)
-        x = torch.randn(2, 3, 4)
-        result = stat(x)
-        torch.testing.assert_close(result, x)
-
-    def test_output_shape(self):
-        stat = IdentityStatistic(7)
-        x = torch.randn(5, 10, 7)
-        result = stat(x)
-        self.assertEqual(result.shape, (5, 10, 7))
+def sample_sets(n_samples: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """All sets of ``n_samples`` states, and the indices of their states."""
+    idx = torch.tensor(list(itertools.product(range(len(STATES)), repeat=n_samples)))
+    return STATES[idx], idx
 
 
-class TestIsingStatistic(unittest.TestCase):
-    """Verify Ising correctly computes [x[indices], x[indices_j]*x[indices_i]]
-    under various edge cases encountered in practice."""
+def exact_gradient(linear, quadratic, statistic, n_samples, weights, *inputs):
+    """The gradient of the exact expectation of ``weights @ statistic`` over sets of ``n_samples``
+    samples, by autograd through the enumerated probabilities (the statistic is constant)."""
+    sets, idx = sample_sets(n_samples)
+    probabilities = torch.softmax(-GRAPH.energy(STATES, linear, quadratic), 0)[idx].prod(-1)
+    with torch.no_grad():
+        values = statistic(sets, *inputs) @ weights
+    return torch.autograd.grad((probabilities * values).sum(), (linear, quadratic))
+
+
+def mean_estimated_gradient(linear, quadratic, statistic, n_samples, weights, *inputs):
+    """The exact expectation of the gradient estimated by ``expectation``, over all sample sets."""
+    sets, idx = sample_sets(n_samples)
+    with torch.no_grad():
+        probabilities = torch.softmax(-GRAPH.energy(STATES, linear, quadratic), 0)[idx].prod(-1)
+    values = expectation(GRAPH, linear, quadratic, sets, statistic, *inputs) @ weights
+    return torch.autograd.grad((probabilities * values).sum(), (linear, quadratic))
+
+
+def relative_error(estimate, exact) -> float:
+    return max((a - b).norm().item() / b.norm().item() for a, b in zip(estimate, exact))
+
+
+def kappa3(x, y, z):
+    """A symmetric kernel of three arguments."""
+    return torch.exp(-(((x - y) ** 2).sum(-1) + ((y - z) ** 2).sum(-1) + ((z - x) ** 2).sum(-1)) / 8)
+
+
+class DegreeThree(torch.nn.Module):
+    """A U-statistic of degree three: the mean of ``kappa3`` over all triples of samples."""
+
+    def forward(self, spins):
+        triples = itertools.combinations(range(spins.shape[-2]), 3)
+        values = [kappa3(spins[..., a, :], spins[..., b, :], spins[..., c, :]) for a, b, c in triples]
+        return torch.stack(values, -1).mean(-1, keepdim=True)
+
+
+class BiasedMMD(torch.nn.Module):
+    """The biased (V-statistic) squared MMD, which is symmetric but not a U-statistic."""
+
+    def __init__(self, kernel):
+        super().__init__()
+        self.kernel = kernel
+
+    def forward(self, spins, reference):
+        reference = reference.expand(*spins.shape[:-2], *reference.shape[-2:])
+        return (self.kernel(spins, spins).mean((-2, -1)) - 2 * self.kernel(spins, reference).mean((-2, -1))
+                + self.kernel(reference, reference).mean((-2, -1))).unsqueeze(-1)
+
+
+class ExpMean(torch.nn.Module):
+    """A nonlinear function of a sample mean, symmetric but not a U-statistic."""
+
+    def forward(self, spins):
+        return torch.exp(spins[..., 0].mean(-1)).unsqueeze(-1)
+
+
+class Scale(torch.nn.Module):
+    """A per-sample transform with a parameter."""
+
+    def __init__(self):
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.tensor(2.0, dtype=torch.float64))
+
+    def forward(self, spins):
+        return self.scale * spins
+
+
+REFERENCE = torch.tensor([[0.8, -0.9, 1.0], [-1.0, 1.0, 0.7]], dtype=torch.float64)
+KERNEL = GaussianKernel(1, bandwidth=2.0)
+
+
+class TestMean(unittest.TestCase):
+    def test_value_and_leave_one_out(self):
+        spins = randspins(2, 5, 3, seed=1)
+        mean = Mean()
+        torch.testing.assert_close(mean(spins), spins.mean(-2))
+        with self.subTest("The closed-form leave-one-out values are the means of the other samples"):
+            generic = leave_one_out(lambda s: s.mean(-2), spins)
+            torch.testing.assert_close(mean.leave_one_out(spins), generic)
+            self.assertEqual((2, 5, 3), tuple(generic.shape))
 
     def test_transform(self):
-        # Core behaviour: picks nodes and computes pairwise products
-        stat = IsingStatistic(
-            node_indices=[0, 2],
-            endpoints_1=[1],
-            endpoints_2=[3],
+        spins = randspins(2, 5, 3, seed=2)
+        with self.subTest("A bound method of a graph is a transform"):
+            mean = Mean(GRAPH.statistics)
+            torch.testing.assert_close(mean(spins), GRAPH.statistics(spins).mean(-2))
+            self.assertEqual((2, 6), tuple(mean(spins).shape))
+        with self.subTest("A module is a submodule whose parameters are exposed"):
+            scale = Scale()
+            mean = Mean(scale)
+            self.assertIs(scale, dict(mean.named_children())["transform"])
+            self.assertEqual(1, len(list(mean.parameters())))
+        with self.subTest("Further inputs reach the transform"):
+            mean = Mean(lambda s, shift: s + shift)
+            torch.testing.assert_close(mean(spins, torch.tensor(1.0)), spins.mean(-2) + 1)
+
+    def test_statistics_of_graph(self):
+        spins = randspins(4, 3, seed=3)
+        expected = torch.cat([spins, spins[:, [0, 1, 0]] * spins[:, [1, 2, 2]]], -1)
+        torch.testing.assert_close(GRAPH.statistics(spins), expected)
+        linear, quadratic = torch.randn(3), torch.randn(3)
+        torch.testing.assert_close(
+            GRAPH.statistics(spins) @ torch.cat([linear, quadratic]),
+            GRAPH.energy(spins, linear, quadratic),
         )
-        # shape (batch=1, samples=2, nodes=4)
-        x = torch.tensor([[[1.0, -1.0, 1.0, -1.0],
-                           [1.0,  1.0, -1.0, 1.0]]])
-        result = stat(x)
-        # expected: [x[...,0], x[...,2], x[...,3]*x[...,1]]
-        expected = torch.tensor([[[1.0, 1.0, (-1.0)*(-1.0)],
-                                  [1.0, -1.0, 1.0*1.0]]])
-        torch.testing.assert_close(result, expected)
 
-    def test_output_shape(self):
-        # Verify shape is (batch, samples, dim_out) for arbitrary input sizes
-        stat = IsingStatistic(
-            node_indices=[0, 1],
-            endpoints_1=[0, 2],
-            endpoints_2=[1, 3],
+
+class TestSquaredMMD(unittest.TestCase):
+    def test_matches_functional(self):
+        spins = randspins(5, 3, seed=4).double()
+        statistic = SquaredMMD(KERNEL)
+        torch.testing.assert_close(
+            statistic(spins, REFERENCE), mmd_loss(spins, REFERENCE, KERNEL).reshape(1)
         )
-        x = torch.randn(3, 5, 7)
-        result = stat(x)
-        self.assertEqual(result.shape, (3, 5, 4))
+        with self.subTest("Batches of sample sets, one reference sample for all"):
+            batch = randspins(2, 5, 3, seed=5).double()
+            values = statistic(batch, REFERENCE)
+            self.assertEqual((2, 1), tuple(values.shape))
+            for b in range(2):
+                torch.testing.assert_close(values[b, 0], mmd_loss(batch[b], REFERENCE, KERNEL))
+        with self.subTest("One reference sample per set"):
+            references = torch.stack([REFERENCE, -REFERENCE])
+            values = statistic(batch, references)
+            for b in range(2):
+                torch.testing.assert_close(values[b, 0], mmd_loss(batch[b], references[b], KERNEL))
 
-    def test_no_interactions(self):
-        # Edge case: only node indices, no interaction terms
-        # (e.g. an Ising model with no input_edges)
-        stat = IsingStatistic(node_indices=[0, 3], endpoints_1=[], endpoints_2=[])
-        x = torch.tensor([[[1.0, 2.0, 3.0, 4.0]],
-                          [[0.1, 2.0, 3.0, 5.0]]])
-        result = stat(x)
-        torch.testing.assert_close(result, torch.tensor([[[1.0, 4.0]], [[0.1, 5.0]]]))
+    def test_leave_one_out(self):
+        spins = randspins(2, 6, 3, seed=6).double()
+        statistic = SquaredMMD(KERNEL)
+        generic = leave_one_out(lambda s, z: statistic(s, z), spins, REFERENCE)
+        torch.testing.assert_close(statistic.leave_one_out(spins, REFERENCE), generic)
+        with self.subTest("A data-dependent bandwidth is held fixed and the values are finite"):
+            adaptive = SquaredMMD(GaussianKernel(3))
+            self.assertTrue(adaptive.leave_one_out(spins, REFERENCE).isfinite().all())
 
-    def test_no_nodes(self):
-        # Edge case: only interaction terms, no direct node indices
-        stat = IsingStatistic(node_indices=[], endpoints_1=[0], endpoints_2=[1])
-        x = torch.tensor([[[3.0, -2.0]]])
-        result = stat(x)
-        torch.testing.assert_close(result, torch.tensor([[[-6.0]]]))
-
-    def test_bad_edge_indices(self):
-        # Edge indices have different length
-        with self.assertRaisesRegex(ValueError, "Interaction indices should be of the same length, got"):
-            IsingStatistic(node_indices=[], endpoints_1=[0], endpoints_2=[1, 2])
-
-    def test_from_graph(self):
-        # All spins followed by the products along the (canonically oriented) edges
-        ising = Ising("abc", [("b", "a"), ("a", "c")])
-        stat = IsingStatistic.from_graph(ising)
-        self.assertEqual(5, stat.dim_out)
-        x = torch.tensor([[[1.0, -1.0, 1.0]]])
-        torch.testing.assert_close(stat(x), torch.tensor([[[1.0, -1.0, 1.0, -1.0, 1.0]]]))
-
-    def test_tensor_indices(self):
-        # Ising internally passes nn.Parameter tensors as indices;
-        # verify IsingStatistic handles them the same as lists
-        stat = IsingStatistic(
-            node_indices=torch.tensor([1]),
-            endpoints_1=torch.tensor([0]),
-            endpoints_2=torch.tensor([2]),
-        )
-        x = torch.nn.Parameter(torch.tensor([[[2.0, 3.0, 4.0]]]))
-        result = stat(x)
-        torch.testing.assert_close(result, torch.tensor([[[3.0, 8.0]]]))
+    def test_validation(self):
+        statistic = SquaredMMD(KERNEL)
+        with self.assertRaisesRegex(ValueError, "At least 2 samples"):
+            statistic(randspins(1, 3).double(), REFERENCE)
+        with self.assertRaisesRegex(ValueError, "At least 3 samples"):
+            statistic.leave_one_out(randspins(2, 3).double(), REFERENCE)
+        with self.assertRaisesRegex(ValueError, "At least two reference items"):
+            statistic(randspins(4, 3).double(), REFERENCE[:1])
 
 
-class TestIsingExpectation(unittest.TestCase):
+class TestExpectation(unittest.TestCase):
+    """Exact tests of the gradient estimator by enumeration of all sample sets."""
 
-    def test_forward_backward(self):
-        """Test forward and backward evaluations are as expected."""
-        spins = torch.tensor([[[-1, -1, -1],
-                               [-1,  1,  1],
-                               [1,  1,  1]],
-                              [[1, -1,  1],
-                               [-1, -1,  1],
-                               [-1, -1,  1]]]).float()
-        # Edges are (0, 1) and (1, 2); interaction terms are col0*col1, col1*col2
-        edge_idx_i, edge_idx_j = torch.tensor([0, 1]), torch.tensor([1, 2])
-        interactions = spins[..., [0, 1]] * spins[..., [1, 2]]
-        sufficient_stats = torch.cat([spins, interactions], dim=-1)
+    def test_unbiased_for_means_and_u_statistics(self):
+        # For a sample mean and for U-statistics the expectation over M samples equals the one over
+        # M - 1 samples, and the estimator is unbiased for the gradient of both
+        linear, quadratic = biases()
+        cases = [
+            ("mean spins", Mean(), 3, torch.tensor([0.3, -1.2, 0.5], dtype=torch.float64), ()),
+            ("mean sufficient statistics", Mean(GRAPH.statistics), 3,
+             torch.arange(1.0, 7.0, dtype=torch.float64), ()),
+            ("squared MMD (degree 2)", SquaredMMD(KERNEL), 3, torch.ones(1, dtype=torch.float64),
+             (REFERENCE,)),
+            ("degree 3", DegreeThree(), 4, torch.ones(1, dtype=torch.float64), ()),
+        ]
+        for name, statistic, n_samples, weights, inputs in cases:
+            with self.subTest(name):
+                estimate = mean_estimated_gradient(linear, quadratic, statistic, n_samples, weights, *inputs)
+                for m in (n_samples, n_samples - 1):
+                    exact = exact_gradient(linear, quadratic, statistic, m, weights, *inputs)
+                    self.assertLess(relative_error(estimate, exact), 1e-9, f"{name}, {m} samples")
 
-        # Statistic is col0 + col1, col1*col2
-        output_stats = torch.cat([spins[..., [0]] + spins[..., [1]],
-                                  spins[..., [1]] * spins[..., [2]]],
-                                 dim=-1)
+    def test_symmetric_statistics_target_one_sample_fewer(self):
+        # For any symmetric statistic the estimator is unbiased for the gradient of the expectation
+        # over M - 1 samples, which differs from the one over M samples by the statistic's own bias
+        linear, quadratic = biases(1)
+        weights = torch.ones(1, dtype=torch.float64)
+        for name, statistic, inputs in [("V-statistic", BiasedMMD(KERNEL), (REFERENCE,)),
+                                        ("nonlinear in a mean", ExpMean(), ())]:
+            with self.subTest(name):
+                estimate = mean_estimated_gradient(linear, quadratic, statistic, 3, weights, *inputs)
+                self.assertLess(
+                    relative_error(estimate, exact_gradient(linear, quadratic, statistic, 2, weights, *inputs)),
+                    1e-9,
+                )
+                self.assertGreater(
+                    relative_error(estimate, exact_gradient(linear, quadratic, statistic, 3, weights, *inputs)),
+                    1e-3,
+                )
 
-        linear = torch.tensor([[-0.1, -0.2, -0.3]] * 2, requires_grad=True)
-        quadratic = torch.zeros(2, 2, requires_grad=True)
+    def test_covariance_form(self):
+        # For a sample mean the gradient is the unbiased sample covariance of the transform with
+        # the sufficient statistics, which the layer of an earlier release computed by hand
+        spins = torch.tensor([[[-1, -1, -1], [-1, 1, 1], [1, 1, 1]],
+                              [[1, -1, 1], [-1, -1, 1], [-1, -1, 1]]]).float().requires_grad_()
+        transform = lambda s: torch.cat([s[..., [1]], s[..., [0, 1]] * s[..., [1, 2]]], -1)
+        linear = torch.zeros((2, 3), requires_grad=True)
+        quadratic = torch.zeros((2, 3), requires_grad=True)
+        y = expectation(GRAPH, linear, quadratic, spins, Mean(transform))
+        torch.testing.assert_close(y, torch.tensor([[1 / 3, 1 / 3, 1], [-1, 1 / 3, -1]]))
+        (y ** 2).sum().backward()
+        grads = []
+        for b in range(2):
+            t = spins[b].detach()
+            stat = torch.hstack([t[..., [1]], t[..., [0, 1]] * t[..., [1, 2]]])
+            sufficient = torch.hstack([t, t[..., [0, 1, 0]] * t[..., [1, 2, 2]]])
+            grads.append(2 * y[b] @ (-torch.cat([stat, sufficient], -1).mT.cov()[:3, 3:]))
+        grad = torch.vstack(grads)
+        torch.testing.assert_close(grad[:, :3], linear.grad)
+        torch.testing.assert_close(grad[:, 3:], quadratic.grad)
+        with self.subTest("Spins receive no gradient"):
+            self.assertIsNone(spins.grad)
 
-        y = IsingExpectation.apply(spins, output_stats, edge_idx_i, edge_idx_j, linear, quadratic)
+    def test_gradients_of_statistic_parameters_and_inputs(self):
+        linear, quadratic = biases(2)
+        spins = randspins(4, 7, 3, seed=7).double()
+        with self.subTest("A parameter of the transform receives the mean pathwise derivative"):
+            scale = Scale()
+            upstream = torch.randn(4, 3, dtype=torch.float64)
+            y = expectation(GRAPH, linear.detach().expand(4, 3), quadratic.detach().expand(4, 3),
+                            spins, Mean(scale))
+            grad, = torch.autograd.grad((y * upstream).sum(), scale.scale)
+            torch.testing.assert_close(grad, (spins.mean(1) * upstream).sum())
+        with self.subTest("The reference sample of the MMD receives its pathwise gradient"):
+            reference = REFERENCE.clone().requires_grad_()
+            statistic = SquaredMMD(KERNEL)
+            y = expectation(GRAPH, linear, quadratic, spins, statistic, reference)
+            through_layer, = torch.autograd.grad(y.sum(), reference)
+            direct, = torch.autograd.grad(statistic(spins, reference).sum(), reference)
+            torch.testing.assert_close(through_layer, direct)
+            self.assertIsNone(spins.grad)
 
-        with self.subTest("Ising aggregation layer produced unexpected output values"):
-            with torch.no_grad():
-                torch.testing.assert_close(y, output_stats.mean(1))
+    def test_boltzmann_machine_prior(self):
+        # The functional takes a Boltzmann machine: its parameters receive the MMD gradient
+        prior = GRBM("abc", [("a", "b"), ("b", "c")], linear={"a": 0.2}, quadratic={("a", "b"): -0.5})
+        samples = BlockSampler(prior, num_chains=8, seed=0).sample()
+        reference = randspins(5, 3, seed=8)
+        loss = expectation(prior, prior.linear, prior.quadratic, samples, SquaredMMD(GaussianKernel(2)), reference)
+        self.assertEqual((1,), tuple(loss.shape))
+        loss.sum().backward()
+        self.assertTrue(prior.linear.grad.isfinite().all() and prior.quadratic.grad.isfinite().all())
 
-        # Gradient amounts to summing over gradients per obs
-        loss = (y**2).sum()
-        loss.backward()
+    def test_batch_dimensions(self):
+        linear = torch.randn(2, 3, 3, requires_grad=True)
+        quadratic = torch.randn(2, 3, 3, requires_grad=True)
+        spins = randspins(2, 3, 6, 3, seed=9)
+        y = expectation(GRAPH, linear, quadratic, spins, Mean())
+        self.assertEqual((2, 3, 3), tuple(y.shape))
+        y.sum().backward()
+        with self.subTest("Every model of the batch is treated on its own"):
+            for b, c in itertools.product(range(2), range(3)):
+                h = linear[b, c].detach().requires_grad_()
+                J = quadratic[b, c].detach().requires_grad_()
+                single = expectation(GRAPH, h, J, spins[b, c], Mean())
+                self.assertEqual((3,), tuple(single.shape))
+                torch.testing.assert_close(single, y[b, c])
+                single.sum().backward()
+                torch.testing.assert_close(h.grad, linear.grad[b, c])
+                torch.testing.assert_close(J.grad, quadratic.grad[b, c])
+        with self.subTest("Unbatched biases apply to a batch of sample sets"):
+            h, J = torch.randn(3), torch.randn(3)
+            self.assertEqual((2, 3, 3), tuple(expectation(GRAPH, h, J, spins, Mean()).shape))
 
-        with torch.no_grad():
-            # Manually compute the gradients
-            dloss_dy = 2*y
-            dy_dhJ = -torch.stack([torch.cat([o, i], -1).mT.cov()[:2, 2:]
-                                   for i, o in zip(sufficient_stats, output_stats)])
-            dloss_dhJ = torch.einsum("bi, bij -> bj", dloss_dy, dy_dhJ)
-
-        with self.subTest("Linear gradients should match"):
-            torch.testing.assert_close(dloss_dhJ[:, :3], linear.grad)
-
-        with self.subTest("Quadratic gradients should match, one per edge"):
-            torch.testing.assert_close(dloss_dhJ[:, 3:], quadratic.grad)
-
-    def test_rejects_non_3d_statistics(self):
-        spins = torch.ones(2, 3, 3)
-        with self.assertRaisesRegex(ValueError, "ndim should be 3"):
-            IsingExpectation.apply(spins, torch.ones(2, 3), torch.tensor([0, 1]),
-                                   torch.tensor([1, 2]), torch.zeros(2, 3), torch.zeros(2, 2))
+    def test_validation(self):
+        h, J, spins = torch.zeros(3), torch.zeros(3), randspins(2, 4, 3)
+        with self.assertRaisesRegex(ValueError, r"spins must have shape \(\.\.\., M, 3\)"):
+            expectation(GRAPH, h, J, randspins(2, 4, 2), Mean())
+        with self.assertRaisesRegex(ValueError, "At least two samples"):
+            expectation(GRAPH, h, J, randspins(2, 1, 3), Mean())
+        with self.assertRaisesRegex(ValueError, "batched like spins"):
+            expectation(GRAPH, torch.zeros(3, 3), torch.zeros(3, 3), spins, Mean())
+        with self.assertRaisesRegex(ValueError, "one bias per edge|edge biases"):
+            expectation(GRAPH, h, torch.zeros(2), spins, Mean())
+        with self.assertRaisesRegex(ValueError, "one row of values per model"):
+            expectation(GRAPH, h, J, spins, lambda s: s.mean((-2, -1)))
+        with self.assertRaisesRegex(ValueError, "leave-one-out statistics must have shape"):
+            class BadLeaveOneOut(Mean):
+                def leave_one_out(self, spins, *inputs):
+                    return super().leave_one_out(spins, *inputs)[..., :-1, :]
+            expectation(GRAPH, h, J, spins, BadLeaveOneOut())
 
 
 class TestIsing(unittest.TestCase):
@@ -240,21 +336,21 @@ class TestIsing(unittest.TestCase):
     EDGES = [("a", "b"), ("a", "c"), ("b", "c")]
 
     def test_has_properties(self):
-        ising = Ising(self.NODES, self.EDGES, statistic=IsingStatistic([1], [0, 1], [1, 2]))
+        statistic = SquaredMMD(GaussianKernel(2))
+        ising = Ising(self.NODES, self.EDGES, statistic=statistic)
         self.assertTupleEqual(("a", "b", "c"), ising.nodes)
         self.assertTupleEqual((("a", "b"), ("a", "c"), ("b", "c")), ising.edges)
         self.assertDictEqual({"a": 0, "b": 1, "c": 2}, ising.node_to_idx)
         self.assertEqual(3, ising.n_nodes)
         self.assertEqual(3, ising.n_edges)
-        self.assertEqual(3, ising.dim_out)
-        self.assertIs(ising.statistic, dict(ising.named_children())["statistic"])
+        self.assertIs(statistic, dict(ising.named_children())["statistic"])
         self.assertEqual(0, len(list(ising.parameters())))
         self.assertIn("n_nodes=3, n_edges=3", repr(ising))
 
-        with self.subTest("The default statistic is the identity"):
+        with self.subTest("The default statistic is the mean of the spins"):
             ising = Ising(self.NODES, self.EDGES)
-            self.assertIsInstance(ising.statistic, IdentityStatistic)
-            self.assertEqual(3, ising.dim_out)
+            self.assertIsInstance(ising.statistic, Mean)
+            self.assertIsNone(ising.statistic.transform)
 
     def test_correct_node_indices_of_edges(self):
         ising = Ising("abc", [("b", "a"), ("a", "c"), ("b", "c")])
@@ -284,59 +380,36 @@ class TestIsing(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Duplicate edges"):
             Ising("abc", [("a", "b"), ("b", "a")])
 
+    def test_forward_is_the_functional(self):
+        ising = Ising(self.NODES, self.EDGES, statistic=Mean(GRAPH.statistics))
+        linear, quadratic = torch.randn(2, 3, requires_grad=True), torch.randn(2, 3, requires_grad=True)
+        spins = randspins(2, 5, 3, seed=10)
+        y = ising(linear, quadratic, spins)
+        expected = expectation(ising, linear, quadratic, spins, ising.statistic)
+        torch.testing.assert_close(y, expected)
+        upstream = torch.randn(2, 6)
+        grads = torch.autograd.grad((y * upstream).sum(), (linear, quadratic))
+        expected_grads = torch.autograd.grad((expected * upstream).sum(), (linear, quadratic))
+        for grad, expected_grad in zip(grads, expected_grads):
+            torch.testing.assert_close(grad, expected_grad)
+        with self.subTest("Further inputs are passed to the statistic"):
+            ising = Ising(self.NODES, self.EDGES, statistic=SquaredMMD(GaussianKernel(2)))
+            reference = randspins(4, 3, seed=11)
+            self.assertEqual((2, 1), tuple(ising(linear, quadratic, spins, reference).shape))
+
     def test_input_validation(self):
         ising = Ising("abc", [("a", "b")])
         linear, quadratic, spins = torch.zeros(2, 3), torch.zeros(2, 1), torch.ones(2, 5, 3)
-        with self.assertRaisesRegex(ValueError, r"linear should have shape \(B, 3\)"):
+        with self.assertRaisesRegex(ValueError, "linear"):
             ising(torch.zeros(2, 4), quadratic, spins)
-        with self.assertRaisesRegex(ValueError, r"quadratic should have shape \(B, 1\)"):
+        with self.assertRaisesRegex(ValueError, "edge biases"):
             ising(linear, torch.zeros(2, 2), spins)
-        with self.assertRaisesRegex(ValueError, r"spins should have shape \(B, M, 3\)"):
+        with self.assertRaisesRegex(ValueError, "batched like spins"):
             ising(linear, quadratic, torch.ones(3, 5, 3))
-        with self.assertRaisesRegex(ValueError, r"spins should have shape \(B, M, 3\)"):
-            ising(linear, quadratic, torch.ones(2, 3))
-        with self.assertRaisesRegex(ValueError, r"spins should have shape \(B, M, 3\)"):
-            ising.estimate_betas(linear, quadratic, torch.ones(2, 3))
-
-    def test_forward_backward(self):
-        # Two models with three samples each, obtained by whatever means
-        spins = torch.tensor([[[-1, -1, -1],
-                               [-1,  1,  1],
-                               [1,  1,  1]],
-                              [[1, -1,  1],
-                               [-1, -1,  1],
-                               [-1, -1,  1]]]).float().requires_grad_()
-        ising = Ising(self.NODES, self.EDGES, statistic=IsingStatistic([1], [0, 1], [1, 2]))
-
-        # The values of the biases do not affect the output; they receive the gradients
-        linear = torch.zeros((2, 3), requires_grad=True)
-        quadratic = torch.zeros((2, 3), requires_grad=True)
-        y = ising(linear, quadratic, spins)
-        with self.subTest("Ising layer produced unexpected output values"):
-            torch.testing.assert_close(y, torch.tensor([[1/3, 1/3, 1],
-                                                        [-1, 1/3, -1]]))
-
-        # Gradient amounts to summing over gradients per obs
-        (y**2).sum().backward()
-
-        # Manually compute the gradients: minus the covariance of the output statistic with the
-        # sufficient statistics (spins and pairwise products along the edges)
-        grads = []
-        for b in range(2):
-            t = spins[b].detach()
-            stat = torch.hstack([t[..., [1]], t[..., [0, 1]] * t[..., [1, 2]]])
-            sufficient = torch.hstack([t, t[..., [0, 0, 1]] * t[..., [1, 2, 2]]])
-            grads.append(2 * y[b] @ (-torch.cat([stat, sufficient], -1).mT.cov()[:3, 3:]))
-        grad = torch.vstack(grads)
-
-        with self.subTest("Linear gradients should match"):
-            torch.testing.assert_close(grad[:, :3], linear.grad)
-
-        with self.subTest("Quadratic gradients should match"):
-            torch.testing.assert_close(grad[:, 3:], quadratic.grad)
-
-        with self.subTest("Spins receive no gradient"):
-            self.assertIsNone(spins.grad)
+        with self.assertRaisesRegex(ValueError, r"spins must have shape \(\.\.\., M, 3\)"):
+            ising(linear, quadratic, torch.ones(2, 5, 2))
+        with self.assertRaisesRegex(ValueError, "batched like spins"):
+            ising.estimate_betas(linear, quadratic, torch.ones(3, 5, 3))
 
     def test_energy(self):
         # The layer inherits the batched energies of its graph
@@ -372,6 +445,13 @@ class TestIsing(unittest.TestCase):
             bqm = BQM.from_ising(dict(zip("abc", h.tolist())), dict(zip(self.EDGES, J.tolist())))
             dimod_betas.append(1 / float(mple(bqm, (s, list("abc")))[0]))
         torch.testing.assert_close(torch.tensor(dimod_betas), estimated_betas)
+
+        with self.subTest("Any batch shape, and unbatched biases"):
+            self.assertEqual((2, 1), tuple(ising.estimate_betas(linear[:, None], quadratic[:, None], spins[:, None]).shape))
+            self.assertEqual((), tuple(ising.estimate_betas(linear[0], quadratic[0], spins[0]).shape))
+            torch.testing.assert_close(ising.estimate_betas(linear[0], quadratic[0], spins), estimated_betas.new_tensor(
+                [dimod_betas[0], 1 / float(mple(BQM.from_ising(dict(zip("abc", linear[0].tolist())),
+                                                              dict(zip(self.EDGES, quadratic[0].tolist()))), (s2, list("abc")))[0])]))
 
     def test_sampling_with_block_sampler(self):
         # The layer is sampled on its own graph by a sampler bound to it; strong fields make the
@@ -414,9 +494,9 @@ class TestIsing(unittest.TestCase):
             torch.testing.assert_close(ising(linear, quadratic, spins), -torch.ones(bs, 3))
 
     def test_statistic_moves_with_layer(self):
-        ising = Ising("abc", [("a", "b")], statistic=IsingStatistic([1], [0], [1])).to("meta")
-        self.assertEqual("meta", ising.statistic.node_indices.device.type)
-        self.assertNotIn("statistic.node_indices", ising.state_dict())
+        ising = Ising("abc", [("a", "b")], statistic=SquaredMMD(GaussianKernel(2))).to("meta")
+        self.assertEqual("meta", ising.statistic.kernel.factors.device.type)
+        self.assertIn("statistic.kernel.factors", ising.state_dict())
 
 
 if __name__ == "__main__":

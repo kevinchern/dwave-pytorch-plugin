@@ -64,9 +64,20 @@ features:
     ``prefactor`` and clipping ranges replace the layer's ``beta``. The layer takes per-edge
     ``(B, n_edges)`` quadratic biases and returns one gradient per edge; ``dense_quadratic``
     builds the coupling matrices of a batch of models when they are needed.
-    ``SpinStatistic`` is a ``torch.nn.Module``, so the statistic of a layer moves to the device of
-    the layer, and ``IsingStatistic.from_graph`` builds the sufficient statistics of a graph's
-    Ising model.
+    The layer's ``statistic`` is any ``torch.nn.Module`` (or callable) of the *set* of samples
+    that is symmetric in them; ``Mean`` (the default: the mean spins, or the mean of any
+    per-sample transform, whose parameters are trained through the layer) and ``SquaredMMD`` (the
+    unbiased squared maximum mean discrepancy to a reference sample, passed as a further input of
+    the layer) are provided. The gradient with respect to the biases is the score-function
+    estimator with leave-one-out (jackknife) weights on the sample energies,
+    ``dwave.plugins.torch.nn.functional.expectation``: it is unbiased for the gradient of the
+    expectation of a sample mean or of a U-statistic of any degree, the squared MMD included, and
+    for any other symmetric statistic for the gradient of its expectation over one sample fewer.
+    ``leave_one_out`` evaluates a statistic on every set of all samples but one, in closed form
+    for the provided statistics and by one evaluation per sample otherwise. ``expectation`` takes
+    any graph module, so a Boltzmann machine prior is trained by the maximum mean discrepancy with
+    the same call. ``GraphIndex.statistics`` returns the sufficient statistics of spins, and
+    ``Mean(graph.statistics)`` is the layer of sufficient statistics.
   - |
     ``dwave.plugins.torch.nn.functional.gumbel_spins`` samples spins from encoder logits with the
     straight-through Gumbel-softmax estimator. It is the discretisation step of the discrete
@@ -121,14 +132,19 @@ upgrade:
   - |
     ``Ising(nodes, edges, statistic=None)`` no longer takes ``sampler``, ``sample_params`` or
     ``beta``, and ``set_sampler``, ``set_sample_params``, ``set_beta`` and the ``beta`` buffer are
-    removed. ``Ising.forward(linear, quadratic, spins)`` and
+    removed. ``Ising.forward(linear, quadratic, spins, *inputs)`` and
     ``Ising.estimate_betas(linear, quadratic, spins)`` take per-edge quadratic biases of shape
-    ``(B, n_edges)`` and the spins sampled from the models, e.g. ``BlockSampler(ising).sample_biases(linear, quadratic)`` or
-    ``DimodSampler(ising, sampler, prefactor=1 / beta).sample_biases(linear, quadratic)``.
-    ``node_idx_of_edges_1``/``node_idx_of_edges_2`` are renamed ``edge_idx_i``/``edge_idx_j``,
-    ``num_nodes``/``num_edges`` are renamed ``n_nodes``/``n_edges``, and ``nodes`` and ``edges``
-    are tuples. ``IdentityStatistic`` takes ``dim_out`` and ``IsingStatistic`` stores its indices
-    as buffers.
+    ``(*batch, n_edges)`` and spins of shape ``(*batch, M, n_nodes)`` sampled from the models
+    with any number of batch dimensions, e.g.
+    ``BlockSampler(ising).sample_biases(linear, quadratic)`` or
+    ``DimodSampler(ising, sampler, prefactor=1 / beta).sample_biases(linear, quadratic)``, and
+    ``forward`` passes further inputs on to the statistic. ``IsingExpectation``,
+    ``SpinStatistic``, ``IdentityStatistic``, ``IsingStatistic`` and ``Ising.dim_out`` are
+    removed: ``Mean()`` replaces ``IdentityStatistic``, ``Mean(graph.statistics)`` replaces
+    ``IsingStatistic.from_graph``, and a statistic is any module of the set of samples (see the
+    features above). ``node_idx_of_edges_1``/``node_idx_of_edges_2`` are renamed
+    ``edge_idx_i``/``edge_idx_j``, ``num_nodes``/``num_edges`` are renamed
+    ``n_nodes``/``n_edges``, and ``nodes`` and ``edges`` are tuples.
   - |
     The generic neural-network utilities ``Affine``, ``SkipLinear``, ``LinearBlock`` and
     ``store_config`` are removed from ``dwave.plugins.torch.nn``; ``torch.nn`` provides the
@@ -140,8 +156,8 @@ upgrade:
     ``dwave.plugins.torch.nn.functional`` and the ``models.losses`` package is removed.
     ``randspin`` moved from ``dwave.plugins.torch.tensor`` to ``dwave.plugins.torch.graph`` and
     the ``tensor`` module is removed. ``dwave.plugins.torch.nn.modules.ising`` is a module holding
-    ``Ising`` and ``IsingExpectation``; the statistics are in
-    ``dwave.plugins.torch.nn.modules.spin_statistic``. All of these remain exported by
+    ``Ising``; the statistics ``Mean`` and ``SquaredMMD`` are in
+    ``dwave.plugins.torch.nn.modules.statistics``. All of these remain exported by
     ``dwave.plugins.torch.nn``.
   - |
     ``DiscreteVariationalAutoencoder`` is removed from ``dwave.plugins.torch.models``: it wired
@@ -175,10 +191,12 @@ fixes:
     collected by test discovery.
   - |
     A ``Kernel`` no longer requires at least two items per input; that requirement belongs to the
-    maximum mean discrepancy and is enforced by ``maximum_mean_discrepancy_loss``. The docstrings
-    of ``Kernel`` and ``GaussianKernel`` describe what is computed: an ``(n_x, n_y)`` kernel
-    matrix, and ``exp(-d^2 / sigma_i)`` with the base bandwidth the mean squared distance between
-    distinct items.
+    maximum mean discrepancy and is enforced by ``maximum_mean_discrepancy_loss``. Kernels take
+    ``(..., n, F)`` tensors of ``F``-dimensional items, with broadcasting batch dimensions, and
+    return ``(..., n_x, n_y)`` kernel matrices; items with several feature dimensions are
+    flattened by the caller, as ``maximum_mean_discrepancy_loss`` does. The docstrings of
+    ``Kernel`` and ``GaussianKernel`` describe what is computed: ``exp(-d^2 / sigma_i)`` with the
+    base bandwidth the mean squared distance between distinct items, estimated per batch element.
   - |
     A seeded ``BlockSampler`` drew its initial states and its first sweep from two generators with
     the same seed, and reseeded from scratch whenever it changed device. All draws now descend from

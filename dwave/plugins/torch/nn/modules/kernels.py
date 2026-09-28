@@ -28,10 +28,13 @@ class Kernel(nn.Module, abc.ABC):
 
     `Kernels <https://en.wikipedia.org/wiki/Kernel_method>`_ are functions that compute a similarity
     measure between data points. A kernel is called with two samples, ``x`` of shape
-    ``(n_x, f1, f2, ..., fk)`` and ``y`` of shape ``(n_y, f1, f2, ..., fk)``, and returns the
-    ``(n_x, n_y)`` matrix of kernel values of every item of ``x`` with every item of ``y``.
-    Subclasses implement :meth:`_kernel`; calling the kernel checks that the feature shapes of
-    ``x`` and ``y`` agree.
+    ``(..., n_x, F)`` and ``y`` of shape ``(..., n_y, F)``, whose items are ``F``-dimensional
+    vectors, and returns the ``(..., n_x, n_y)`` matrices of kernel values of every item of ``x``
+    with every item of ``y``; leading batch dimensions broadcast. Items with several feature
+    dimensions are flattened by the caller, as
+    :func:`~dwave.plugins.torch.nn.functional.maximum_mean_discrepancy_loss` does. Subclasses
+    implement :meth:`_kernel`; calling the kernel checks that the feature dimensions of ``x`` and
+    ``y`` agree.
     """
 
     @abc.abstractmethod
@@ -39,29 +42,30 @@ class Kernel(nn.Module, abc.ABC):
         """Evaluates the kernel between every item of ``x`` and every item of ``y``.
 
         Args:
-            x (torch.Tensor): A (n_x, f1, f2, ..., fk) tensor.
-            y (torch.Tensor): A (n_y, f1, f2, ..., fk) tensor of the same feature shape.
+            x (torch.Tensor): A (..., n_x, F) tensor.
+            y (torch.Tensor): A (..., n_y, F) tensor.
 
         Returns:
-            torch.Tensor: A (n_x, n_y) tensor of kernel values.
+            torch.Tensor: A (..., n_x, n_y) tensor of kernel values.
         """
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Evaluates the kernel between every item of ``x`` and every item of ``y``.
 
         Args:
-            x (torch.Tensor): A (n_x, f1, f2, ..., fk) tensor.
-            y (torch.Tensor): A (n_y, f1, f2, ..., fk) tensor.
+            x (torch.Tensor): A (..., n_x, F) tensor.
+            y (torch.Tensor): A (..., n_y, F) tensor.
 
         Raises:
-            ValueError: If the feature shapes of ``x`` and ``y`` differ.
+            ValueError: If the feature dimensions of ``x`` and ``y`` differ.
 
         Returns:
-            torch.Tensor: A (n_x, n_y) tensor of kernel values.
+            torch.Tensor: A (..., n_x, n_y) tensor of kernel values.
         """
-        if x.shape[1:] != y.shape[1:]:
+        if x.ndim < 2 or y.ndim < 2 or x.shape[-1] != y.shape[-1]:
             raise ValueError(
-                f"Feature shapes of x and y must match, got {tuple(x.shape)} and {tuple(y.shape)}."
+                "x and y must be (..., n, F) tensors with the same feature dimension F, got "
+                f"shapes {tuple(x.shape)} and {tuple(y.shape)}."
             )
         return self._kernel(x, y)
 
@@ -75,15 +79,15 @@ class GaussianKernel(Kernel):
         k(x, y) = \sum_{i=0}^{n_{\text{kernels}} - 1} \exp(-\|x - y\|^2 / \sigma_i),
         \qquad \sigma_i = \sigma \cdot \text{factor}^{\,i - \lfloor n_{\text{kernels}} / 2 \rfloor},
 
-    where :math:`\|x - y\|` is the Euclidean distance between the flattened features and
-    :math:`\sigma` is the base bandwidth. If ``bandwidth`` is ``None``, :math:`\sigma` is set,
-    without gradients, to the mean squared distance between distinct items of the sample the
-    kernel matrix is evaluated on: the sum of the squared distances divided by :math:`n(n - 1)`
-    for an :math:`n \times n` matrix. This is the heuristic of
-    `Sutherland et al. <https://arxiv.org/abs/1707.07269>`_, meant for evaluating the kernel on
-    a sample against itself, as
-    :func:`~dwave.plugins.torch.nn.functional.maximum_mean_discrepancy_loss` does with the
-    pooled sample.
+    where :math:`\|x - y\|` is the Euclidean distance between the items and :math:`\sigma` is
+    the base bandwidth. If ``bandwidth`` is ``None``, :math:`\sigma` is set, without gradients and
+    separately for every batch element, to the mean squared distance between distinct items of the
+    sample the kernel matrix is evaluated on: the sum of the squared distances divided by
+    :math:`n(n - 1)` for an :math:`n \times n` matrix (the plain mean for a matrix that is not
+    square). This is the heuristic of `Sutherland et al. <https://arxiv.org/abs/1707.07269>`_,
+    meant for evaluating the kernel on a sample against itself, as
+    :func:`~dwave.plugins.torch.nn.functional.maximum_mean_discrepancy_loss` and
+    :class:`~dwave.plugins.torch.nn.SquaredMMD` do with the pooled sample.
 
     Args:
         n_kernels (int): Number of bandwidths, i.e. of Gaussian kernels summed.
@@ -109,26 +113,32 @@ class GaussianKernel(Kernel):
     @torch.no_grad()
     def _get_bandwidth(self, distance_matrix: torch.Tensor) -> torch.Tensor | float:
         """The base bandwidth: :attr:`bandwidth` if given, otherwise the mean of the off-diagonal
-        entries of ``distance_matrix``.
+        entries of ``distance_matrix`` for every batch element.
 
         Args:
-            distance_matrix (torch.Tensor): The (n, n) pairwise squared distances of a sample
-                against itself, whose diagonal is zero.
+            distance_matrix (torch.Tensor): The (..., n, n) pairwise squared distances of a
+                sample against itself, whose diagonal is zero.
 
         Raises:
             ValueError: If the bandwidth is to be estimated from fewer than two items.
 
         Returns:
-            torch.Tensor | float: The base bandwidth.
+            torch.Tensor | float: The base bandwidth, of shape ``(...)`` when estimated.
         """
         if self.bandwidth is not None:
             return self.bandwidth
-        num_samples = distance_matrix.shape[0]
-        if num_samples < 2:
+        n_x, n_y = distance_matrix.shape[-2:]
+        if n_x < 2 or n_y < 2:
             raise ValueError("Estimating the bandwidth requires at least two items.")
-        return distance_matrix.sum() / (num_samples * (num_samples - 1))
+        diagonal = n_x if n_x == n_y else 0
+        return distance_matrix.sum((-2, -1)) / (n_x * n_y - diagonal)
 
     def _kernel(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        distance_matrix = torch.cdist(x.flatten(1), y.flatten(1), p=2)**2
-        bandwidth = self._get_bandwidth(distance_matrix) * self.factors
-        return torch.exp(-distance_matrix.unsqueeze(0) / bandwidth.reshape(-1, 1, 1)).sum(dim=0)
+        distance_matrix = torch.cdist(x, y, p=2)**2
+        bandwidth = torch.as_tensor(
+            self._get_bandwidth(distance_matrix), dtype=distance_matrix.dtype, device=x.device
+        )
+        bandwidths = bandwidth.unsqueeze(-1) * self.factors                       # (..., n_kernels)
+        return torch.exp(
+            -distance_matrix.unsqueeze(-1) / bandwidths.unsqueeze(-2).unsqueeze(-2)
+        ).sum(-1)

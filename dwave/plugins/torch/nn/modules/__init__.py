@@ -15,4 +15,4 @@
 from dwave.plugins.torch.nn.modules.ising import *
 from dwave.plugins.torch.nn.modules.kernels import *
 from dwave.plugins.torch.nn.modules.loss import *
-from dwave.plugins.torch.nn.modules.spin_statistic import *
+from dwave.plugins.torch.nn.modules.statistics import *

@@ -22,7 +22,7 @@ from dwave.plugins.torch.nn.modules.kernels import Kernel, GaussianKernel
 class TestKernel(unittest.TestCase):
     class One(Kernel):
         def _kernel(self, x, y):
-            return torch.ones(x.shape[0], y.shape[0])
+            return torch.ones(*x.shape[:-2], x.shape[-2], y.shape[-2])
 
     def test_forward(self):
         k = self.One()(torch.rand(5, 3), torch.randn(9, 3))
@@ -35,20 +35,40 @@ class TestKernel(unittest.TestCase):
         self.assertEqual((1, 1), tuple(k.shape))
 
     def test_shape_mismatch(self):
-        with self.assertRaisesRegex(ValueError, "Feature shapes of x and y must match"):
+        with self.assertRaisesRegex(ValueError, "same feature dimension"):
             self.One()(torch.rand(5, 4), torch.randn(9, 3))
+        with self.assertRaisesRegex(ValueError, "same feature dimension"):
+            self.One()(torch.rand(5), torch.randn(9, 5))
 
 
 class TestGaussianKernel(unittest.TestCase):
 
     @parameterized.expand([
-        (torch.randn((5, 12)), torch.rand((7, 12))),
-        (torch.randn((5, 12, 34)), torch.rand((7, 12, 34))),
+        (torch.randn((5, 12)), torch.rand((7, 12)), (5, 7)),
+        (torch.randn((3, 5, 12)), torch.rand((3, 7, 12)), (3, 5, 7)),
+        (torch.randn((3, 5, 12)), torch.rand((7, 12)), (3, 5, 7)),
     ])
-    def test_shape(self, x, y):
+    def test_shape(self, x, y, shape):
+        # Leading batch dimensions broadcast
         rbf = GaussianKernel(2, 2.1, 0.1)
-        k = rbf(x, y)
-        self.assertEqual(tuple(k.shape), (x.shape[0], y.shape[0]))
+        self.assertEqual(shape, tuple(rbf(x, y).shape))
+
+    def test_batched_equals_unbatched(self):
+        x, y = torch.randn(3, 5, 4), torch.randn(3, 6, 4)
+        for rbf in (GaussianKernel(3, 2.0, 0.7), GaussianKernel(3, 2.0)):
+            with self.subTest(adaptive=rbf.bandwidth is None):
+                batched = rbf(x, y)
+                for b in range(3):
+                    torch.testing.assert_close(batched[b], rbf(x[b], y[b]))
+
+    def test_adaptive_bandwidth_per_batch_element(self):
+        x = torch.stack([torch.randn(6, 3), 10 * torch.randn(6, 3)])
+        rbf = GaussianKernel(1)
+        distances = torch.cdist(x, x) ** 2
+        bandwidths = rbf._get_bandwidth(distances)
+        self.assertEqual((2,), tuple(bandwidths.shape))
+        torch.testing.assert_close(bandwidths, distances.sum((-2, -1)) / (6 * 5))
+        torch.testing.assert_close(rbf(x, x), torch.exp(-distances / bandwidths[:, None, None]))
 
     def test_integer_factor(self):
         # An integer factor must not truncate the bandwidth multipliers to zero

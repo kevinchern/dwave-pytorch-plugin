@@ -51,12 +51,17 @@ The package provides the following components.
   is how the inputs of the ``Ising`` layer are sampled.
 
 * **Neural network modules** (``dwave.plugins.torch.nn``). An ``Ising`` layer takes the biases
-  of a batch of Ising models and spins sampled from them by any of the samplers, and returns
-  expected statistics with a backward pass approximated by sample covariances; ``SpinStatistic``
-  classes define the statistics it returns. Also included are a ``GaussianKernel`` and a
-  ``MaximumMeanDiscrepancyLoss`` for matching encoder samples to prior samples, and, in
-  ``dwave.plugins.torch.nn.functional``, the functional losses and the Gumbel-softmax sampling of
-  spins from encoder logits.
+  of a batch of Ising models and spins sampled from them by any of the samplers, and returns a
+  statistic of the samples together with an unbiased estimate of the gradient of the statistic's
+  expectation with respect to the biases. The statistic is any module of the set of samples:
+  ``Mean`` (the default, the mean spins or the mean of any per-sample transform, whose parameters
+  are trained through the layer) and ``SquaredMMD`` (the squared maximum mean discrepancy to a
+  reference sample) are provided. The estimator itself,
+  ``dwave.plugins.torch.nn.functional.expectation``, takes any graph module, which is how a
+  Boltzmann machine prior is trained by the maximum mean discrepancy. Also included are a
+  ``GaussianKernel`` and a ``MaximumMeanDiscrepancyLoss`` for matching encoder samples to prior
+  samples, and, in ``dwave.plugins.torch.nn.functional``, the functional losses and the
+  Gumbel-softmax sampling of spins from encoder logits.
 
 * **Graph core** (``dwave.plugins.torch.graph``). ``GraphIndex``, the graph module that models,
   layers and samplers are built on, and random spin generation. It imports nothing but PyTorch.
@@ -202,6 +207,30 @@ units are adjacent, or with conditional samples drawn by any sampler otherwise.
     s_data = grbm.conditional_expectation(grbm.pad_visible(x))  # exact: hidden units are not adjacent
     s_data = sampler.complete(x)  # alternative: conditional samples, valid for any model
     grbm.quasi_objective(s_data, sampler.sample()).backward()
+
+Training a prior by the maximum mean discrepancy
+------------------------------------------------
+
+Any statistic of samples of a Boltzmann machine that is symmetric in the samples can be
+differentiated with respect to the machine's biases by
+``dwave.plugins.torch.nn.functional.expectation``, which attaches an unbiased score-function
+estimate of the gradient of the statistic's expectation to the statistic's value. With the squared
+maximum mean discrepancy as the statistic, a Boltzmann machine prior is pulled towards a reference
+sample ``z``, for example the spins an encoder assigns to a batch of data, while ``z`` receives its
+own gradient through the kernel:
+
+.. code-block:: python
+
+    from dwave.plugins.torch.nn import GaussianKernel, SquaredMMD
+    from dwave.plugins.torch.nn.functional import expectation
+
+    mmd = SquaredMMD(GaussianKernel(3))
+    samples = sampler.sample()  # (M, n_nodes) samples of the prior, M >= 3
+    loss = expectation(grbm, grbm.linear, grbm.quadratic, samples, mmd, z)  # z: (R, n_nodes)
+    loss.sum().backward()  # gradients for the prior and for whatever produced z
+
+The ``Ising`` layer is the same estimator for biases produced by another network:
+``Ising(nodes, edges, statistic)(linear, quadratic, spins, *inputs)``.
 
 License
 =======
