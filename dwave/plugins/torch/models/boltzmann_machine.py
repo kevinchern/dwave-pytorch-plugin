@@ -56,17 +56,28 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
     the state of optimizers have exactly one entry per node and per edge, independent of the
     orientation and order of the edge list.
 
-    The initialization strategy is grounded in `Hinton's practical guide for RBM training
-    <https://www.cs.toronto.edu/~hinton/absps/guideTR.pdf>`_, which recommends sampling weights
-    from a Gaussian distribution with mean 0 and small standard deviation. The quadratic weights
-    are initialized with graph-connectivity-dependent standard deviations so the energy remains
-    extensive on sparse graphs as well as dense graphs. In particular, for edge :math:`(u, v)`,
-    we set the standard deviation of its J value as :math:`ß / (\deg(u)\deg(v))^{1/4}`, where
-    :math:`ß=2.5` is half of a representative QPU inverse sampling-temperature scale. This
-    initializes the GRBM in a paramagnetic regime, consistent with the `Sherrington-Kirkpatrick
-    model <https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.35.1792>`_.
-    The linear biases are initialized to zero to avoid introducing any initial preference for spin
-    configurations.
+    The quadratic biases are initialized at random with standard deviations that depend on the
+    connectivity of the graph: the bias of edge :math:`(u, v)` is drawn from a Gaussian with mean
+    zero and standard deviation
+
+    .. math::
+
+        \sigma_{uv} = \frac{1}{T_0\,(\deg(u)\deg(v))^{1/4}},
+
+    where :math:`T_0` is ``init_temperature``. The effective coupling :math:`\sigma \sqrt{\deg}`
+    is then :math:`1 / T_0`, so :math:`T_0` is the initial temperature of the model in units of the
+    critical temperature of the `Sherrington-Kirkpatrick model
+    <https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.35.1792>`_ (of its bipartite
+    analogue for a restricted Boltzmann machine): :math:`T_0 = 1` is critical and :math:`T_0 > 1`
+    is paramagnetic. The default :math:`T_0 = 4` reproduces the standard deviation of 0.01 that
+    `Hinton's practical guide for RBM training <https://www.cs.toronto.edu/~hinton/absps/guideTR.pdf>`_
+    recommends for a restricted Boltzmann machine with 784 visible and 500 hidden units, and it
+    keeps the working graphs of D-Wave QPUs far inside the paramagnetic phase (a Bethe stability
+    radius of 0.06 on Zephyr and Pegasus graphs, against 1 at the transition). A QPU sampled with a
+    ``prefactor`` of about 1/6 then programs initial couplings of about 0.01, at the edge of its
+    coupler precision; :math:`T_0 = 2` doubles them and is still well inside the paramagnetic
+    phase. The linear biases are initialized to zero to avoid introducing any initial preference
+    for spin configurations.
 
     Hidden units are nodes that are not observed in the data. Observed spins of a model with
     hidden units have one column per *visible* node, in the order of :attr:`visible_idx`;
@@ -94,10 +105,14 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
             model to its corresponding linear bias.
         quadratic (dict[tuple[Hashable, Hashable], float], optional): A dictionary mapping from
             edges of the model to its corresponding quadratic bias.
+        init_temperature (float): The initial temperature :math:`T_0` of the model in units of its
+            critical temperature, which sets the standard deviations of the random initial
+            quadratic biases (see above). Defaults to 4.
 
     Raises:
         ValueError: If ``nodes`` contains duplicates, an edge references an unknown node, an edge
-            is a self-loop or a duplicate, or a hidden node is not a node of the model.
+            is a self-loop or a duplicate, a hidden node is not a node of the model, or
+            ``init_temperature`` is not positive.
 
     Attributes:
         linear (torch.nn.Parameter): The linear biases, of shape ``(n_nodes,)``.
@@ -110,14 +125,6 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         connected_hidden (bool): Whether any edge connects two hidden units, in which case
             their conditional expectations given the visible units are not exact.
     """
-    # QPU beta has been measured to be 5-8 (in inverse units of programmed J)
-    # Considering the higher temperature within this range, to sample from a beta=1
-    # Boltzmann distribution, a prefactor of 5 has to multiply the initial Hamiltonian.
-    # To keep the energy scale of the initial Hamiltonian below the effective thermal
-    # energy, we multiply the Hamiltonian weights by an even smaller prefactor so
-    # that the prepared distribution is that of a paramagnet.
-    _INIT_INVERSE_TEMP = 2.5
-
     def __init__(
         self,
         nodes: Iterable[Hashable],
@@ -125,13 +132,18 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
         hidden_nodes: Iterable[Hashable] | None = None,
         linear: dict[Hashable, float] | None = None,
         quadratic: dict[tuple[Hashable, Hashable], float] | None = None,
+        init_temperature: float = 4.0,
     ) -> None:
         super().__init__(nodes, edges)
+        if init_temperature <= 0:
+            raise ValueError(f"`init_temperature` must be positive, got {init_temperature}.")
 
+        # Standard deviation 1 / (T_0 (deg(u) deg(v))^(1/4)): the model starts at T_0 times its
+        # critical temperature (see the class docstring)
         degrees = self.degrees().to(torch.get_default_dtype())
-        quadratic_std = self._INIT_INVERSE_TEMP / (
-            degrees[self.edge_idx_i] * degrees[self.edge_idx_j]
-        )**0.25
+        quadratic_std = 1 / (
+            init_temperature * (degrees[self.edge_idx_i] * degrees[self.edge_idx_j]) ** 0.25
+        )
         self.linear = torch.nn.Parameter(torch.zeros(self.n_nodes))
         self.quadratic = torch.nn.Parameter(torch.randn(self.n_edges) * quadratic_std)
 

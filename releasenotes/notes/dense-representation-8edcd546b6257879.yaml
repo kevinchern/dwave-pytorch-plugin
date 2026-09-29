@@ -171,6 +171,15 @@ upgrade:
     ``setup.py`` shim is removed in favour of ``pyproject.toml``.
 fixes:
   - |
+    The random initialisation of the quadratic biases of ``GraphRestrictedBoltzmannMachine`` put
+    every model in the spin-glass phase at unit inverse temperature (an effective coupling of 2.5
+    against a transition at 1), while its docstring claimed the paramagnetic phase. The standard
+    deviation of the bias of edge ``(u, v)`` is now ``1 / (init_temperature * (deg(u) deg(v)) ** 0.25)``,
+    where the new constructor argument ``init_temperature`` is the initial temperature in units of
+    the model's critical temperature. Its default of 4 reproduces Hinton's standard deviation of
+    0.01 on a 784-by-500 restricted Boltzmann machine and keeps Zephyr and Pegasus graphs far
+    inside the paramagnetic phase.
+  - |
     Effective fields of hidden units were wrong whenever a hidden node was the first endpoint of
     some edges and the second endpoint of others (neighbours were paired with the wrong weights), and
     were ``NaN`` for models with connected hidden units.

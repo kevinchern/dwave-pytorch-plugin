@@ -159,7 +159,8 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         degrees = torch.tensor([3.0, 2.0, 2.0, 1.0])
         edge_idx_i = torch.tensor([0, 0, 0, 1])
         edge_idx_j = torch.tensor([1, 2, 3, 2])
-        expected_std = 2.5 / (degrees[edge_idx_i] * degrees[edge_idx_j])**0.25
+        # Standard deviation 1 / (T_0 (deg u deg v)^(1/4)) with the default T_0 = 4
+        expected_std = 1 / (4 * (degrees[edge_idx_i] * degrees[edge_idx_j])**0.25)
 
         torch.manual_seed(1234)
         expected_quadratic = torch.randn(len(edges)) * expected_std
@@ -169,6 +170,18 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
 
         torch.testing.assert_close(bm.linear, torch.zeros(len(nodes)))
         torch.testing.assert_close(bm.quadratic, expected_quadratic)
+
+        with self.subTest("The initial temperature scales the couplings inversely"):
+            torch.manual_seed(1234)
+            bm = GRBM(nodes, edges, init_temperature=2.0)
+            torch.testing.assert_close(bm.quadratic, 2 * expected_quadratic)
+
+        with self.subTest("The default reproduces Hinton's 0.01 on a 784-by-500 machine"):
+            # Every visible unit has degree 500 and every hidden unit degree 784
+            self.assertAlmostEqual(1 / (4 * (784 * 500) ** 0.25), 0.01, places=4)
+
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            GRBM(nodes, edges, init_temperature=0.0)
 
     def test_default_quadratic_initialization_edgeless(self):
         bm = GRBM([0, 1, 2], [])
