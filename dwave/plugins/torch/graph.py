@@ -157,6 +157,23 @@ class GraphIndex(torch.nn.Module):
 
     # ------------------------------------------------------------------ Ising energies -----------
 
+    def statistics(self, x: torch.Tensor) -> torch.Tensor:
+        r"""Sufficient statistics of spins: the spins followed by their products along the edges,
+        :math:`T(s) = (s_i)_{i \in V} \,\Vert\, (s_i s_j)_{(i, j) \in E}`.
+
+        The energy of ``x`` is ``statistics(x) @ torch.cat([linear, quadratic])``, so ``T`` is the
+        gradient of the energy with respect to the concatenated biases, and the covariances of
+        ``T`` with a statistic of samples are the gradients of its expectation (see
+        :func:`~dwave.plugins.torch.nn.functional.expectation`).
+
+        Args:
+            x (torch.Tensor): Spins of shape ``(..., n_nodes)``.
+
+        Returns:
+            torch.Tensor: A tensor of shape ``(..., n_nodes + n_edges)``.
+        """
+        return torch.cat([x, x[..., self.edge_idx_i] * x[..., self.edge_idx_j]], -1)
+
     def energy(
         self, x: torch.Tensor, linear: torch.Tensor, quadratic: torch.Tensor
     ) -> torch.Tensor:

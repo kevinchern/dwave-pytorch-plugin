@@ -13,6 +13,8 @@
 # limitations under the License.
 #
 
+from dwave.plugins.torch.nn.modules.ising import *
 from dwave.plugins.torch.nn.modules.linear import *
 from dwave.plugins.torch.nn.modules.loss import *
+from dwave.plugins.torch.nn.modules.statistics import *
 from dwave.plugins.torch.nn.modules.utils import *

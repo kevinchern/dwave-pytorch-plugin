@@ -45,14 +45,20 @@ The package provides the following components.
   of a restricted Boltzmann machine, and ``DimodSampler`` wraps any dimod sampler, including the
   ``DWaveSampler`` of `dwave-system <https://github.com/dwavesystems/dwave-system>`_, scaling and
   clipping the Hamiltonian before it is submitted. All samplers support conditional sampling of
-  partially observed spins and sampling from batches of Ising models given by their biases.
+  partially observed spins and sampling from batches of Ising models given by their biases, which
+  is how the inputs of the ``Ising`` layer are sampled.
 
 * **Neural network modules** (``dwave.plugins.torch.nn``). An ``Ising`` layer takes the biases
-  of a batch of Ising models, samples them with a dimod sampler and returns the expected
-  statistic of the samples, with an estimate of its gradient with respect to the biases. Also
-  included is a ``MaximumMeanDiscrepancyLoss`` for matching encoder samples to prior samples
-  under the battery of Hamming-isotropic kernels of ``dwave.plugins.torch.kernels``, whose
-  entries decompose the mismatch by interaction order.
+  of a batch of Ising models and spins sampled from them by any of the samplers, and returns a
+  statistic of the samples together with an unbiased estimate of the gradient of the statistic's
+  expectation with respect to the biases. The statistic is any module of the set of samples:
+  ``Mean`` (the default, the mean spins or the mean of any per-sample transform, whose parameters
+  are trained through the layer) and ``SquaredMMD`` (the squared maximum mean discrepancy to a
+  reference sample, under every kernel of the battery of ``dwave.plugins.torch.kernels``) are
+  provided. The estimator itself,
+  ``dwave.plugins.torch.nn.functional.expectation``, takes any graph module, which is how a
+  Boltzmann machine prior is trained by the maximum mean discrepancy. Also included is a
+  ``MaximumMeanDiscrepancyLoss`` for matching encoder samples to prior samples.
 
 * **Graph core** (``dwave.plugins.torch.graph``). ``GraphIndex``, the graph module that models,
   layers and samplers are built on, and random spin generation. It imports nothing but PyTorch.
@@ -198,6 +204,33 @@ units are adjacent, or with conditional samples drawn by any sampler otherwise.
     s_data = grbm.conditional_expectation(grbm.pad_visible(x))  # exact: hidden units are not adjacent
     s_data = sampler.complete(x)  # alternative: conditional samples, valid for any model
     grbm.quasi_objective(s_data, sampler.sample()).backward()
+
+Training a prior by the maximum mean discrepancy
+------------------------------------------------
+
+Any statistic of samples of a Boltzmann machine that is symmetric in the samples can be
+differentiated with respect to the machine's biases by
+``dwave.plugins.torch.nn.functional.expectation``, which attaches an unbiased score-function
+estimate of the gradient of the statistic's expectation to the statistic's value. With the squared
+maximum mean discrepancy as the statistic, a Boltzmann machine prior is pulled towards a reference
+sample ``z``, for example the spins an encoder assigns to a batch of data, while ``z`` receives its
+own gradient through the kernel. The statistic returns one estimate per kernel of the battery:
+entry 0 the headline kernel (the Gaussian kernel at the bandwidth set by the dimension, or a
+calibrated combination of the orders) and entry ``k`` the order-``k`` kernel, which measures the
+mismatch of the ``k``-spin parities alone.
+
+.. code-block:: python
+
+    from dwave.plugins.torch.nn import SquaredMMD
+    from dwave.plugins.torch.nn.functional import expectation
+
+    mmd = SquaredMMD()
+    samples = sampler.sample()  # (M, n_nodes) samples of the prior, M >= 3
+    loss = expectation(grbm, grbm.linear, grbm.quadratic, samples, mmd, z)  # z: (R, n_nodes)
+    loss[0].backward()  # the headline: gradients for the prior and for whatever produced z
+
+The ``Ising`` layer is the same estimator for biases produced by another network:
+``Ising(nodes, edges, statistic)(linear, quadratic, spins, *inputs)``.
 
 License
 =======

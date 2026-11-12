@@ -3,8 +3,9 @@ prelude: >
     Graph-restricted Boltzmann machines and their samplers now store one quadratic bias per edge
     and build the dense coupling matrix on the fly wherever a matrix product is the efficient
     computation: energies, effective fields and block-Gibbs updates are dense matrix products,
-    while parameters, gradients, optimizer state and the interfaces of the samplers have one
-    entry per node and per edge. This release is not backward compatible; see the upgrade notes.
+    while parameters, gradients, optimizer state and the interfaces of the samplers and of the
+    ``Ising`` layer have one entry per node and per edge. This release is not backward compatible;
+    see the upgrade notes.
 features:
   - |
     ``GraphRestrictedBoltzmannMachine.quadratic`` is a per-edge ``(n_edges,)`` parameter in the
@@ -38,7 +39,7 @@ features:
     ``num_occurrences``, which replaces the dependency on ``dwave-hybrid``.
   - |
     ``dwave.plugins.torch.graph.GraphIndex`` is the ``torch.nn.Module`` base class of
-    ``GraphRestrictedBoltzmannMachine``. It validates the graph and provides the
+    ``GraphRestrictedBoltzmannMachine`` and ``Ising``. It validates the graph and provides the
     graph attributes ``nodes``, ``edges``, ``node_to_idx``, ``edge_to_idx``, ``n_nodes`` and
     ``n_edges``, the buffers ``edge_idx_i`` and ``edge_idx_j``, the coupling matrices
     ``dense_quadratic`` and ``symmetric_coupling`` of per-edge biases, and the Ising ``energy``
@@ -46,8 +47,8 @@ features:
     a batch of models on the graph. ``dwave.plugins.torch.graph`` holds the graph core and
     imports nothing but PyTorch; ``dwave.plugins.torch.utils`` holds the dimod conversions and
     ``estimate_beta``, which estimates the inverse temperature of samples of such a model by
-    maximum pseudolikelihood and imports ``dwave.system`` only when called, so the model and
-    ``BlockSampler`` import without it.
+    maximum pseudolikelihood and imports ``dwave.system`` only when called, so the models,
+    layers and ``BlockSampler`` import without it.
   - |
     Samplers bind to any ``GraphIndex`` and gain ``sample_biases(linear, quadratic)``, which
     samples a batch of Ising models on the graph given by their per-edge biases. ``BlockSampler`` updates
@@ -55,6 +56,30 @@ features:
     are sampled on the GPU; ``DimodSampler`` scales, clips and submits the models one after the
     other. ``sample`` and ``complete`` keep sampling the parameters of a bound
     ``GraphRestrictedBoltzmannMachine``.
+  - |
+    The ``Ising`` layer no longer samples: ``forward(linear, quadratic, spins)`` takes the spins
+    sampled from its inputs by the ``sample_biases`` method of any sampler bound to the layer, in
+    the same way that ``quasi_objective`` takes the samples of a Boltzmann machine. The layer
+    therefore works with ``BlockSampler`` on the GPU as well as with ``DimodSampler``, whose
+    ``prefactor`` and clipping ranges replace the layer's ``beta``. The layer takes per-edge
+    ``(B, n_edges)`` quadratic biases and returns one gradient per edge; ``dense_quadratic``
+    builds the coupling matrices of a batch of models when they are needed.
+    The layer's ``statistic`` is any ``torch.nn.Module`` (or callable) of the *set* of samples
+    that is symmetric in them; ``Mean`` (the default: the mean spins, or the mean of any
+    per-sample transform, whose parameters are trained through the layer) and ``SquaredMMD`` (the
+    unbiased squared maximum mean discrepancy to a reference sample, passed as a further input of
+    the layer) are provided. The gradient with respect to the biases is the score-function
+    estimator with leave-one-out (jackknife) weights on the sample energies,
+    ``dwave.plugins.torch.nn.functional.expectation``: it is unbiased for the gradient of the
+    expectation of a sample mean or of a U-statistic of any degree, the squared MMD included, and
+    for any other symmetric statistic for the gradient of its expectation over one sample fewer.
+    ``leave_one_out`` evaluates a statistic on every set of all samples but one, in closed form
+    for the provided statistics and by one evaluation per sample otherwise. ``expectation`` takes
+    any graph module, so a Boltzmann machine prior is trained by the maximum mean discrepancy with
+    the same call. ``GraphIndex.statistics`` returns the sufficient statistics of spins, and
+    ``Mean(graph.statistics)`` is the layer of sufficient statistics.
+  - |
+    ``dwave.plugins.torch.nn`` exports the kernels, losses and Ising modules.
 upgrade:
   - |
     ``GraphRestrictedBoltzmannMachine.quadratic`` has shape ``(n_edges,)`` and holds the bias of
@@ -101,8 +126,27 @@ upgrade:
     hidden)`` is the same two-block Gibbs sampler (visible units first, hidden units second) and
     raises ``ValueError`` for an edge within a layer, as the removed class did.
   - |
+    ``Ising(nodes, edges, statistic=None)`` no longer takes ``sampler``, ``sample_params`` or
+    ``beta``, and ``set_sampler``, ``set_sample_params``, ``set_beta`` and the ``beta`` buffer are
+    removed. ``Ising.forward(linear, quadratic, spins, *inputs)`` and
+    ``Ising.estimate_betas(linear, quadratic, spins)`` take per-edge quadratic biases of shape
+    ``(*batch, n_edges)`` and spins of shape ``(*batch, M, n_nodes)`` sampled from the models
+    with any number of batch dimensions, e.g.
+    ``BlockSampler(ising).sample_biases(linear, quadratic)`` or
+    ``DimodSampler(ising, sampler, prefactor=1 / beta).sample_biases(linear, quadratic)``, and
+    ``forward`` passes further inputs on to the statistic. ``IsingExpectation``,
+    ``SpinStatistic``, ``IdentityStatistic``, ``IsingStatistic`` and ``Ising.dim_out`` are
+    removed: ``Mean()`` replaces ``IdentityStatistic``, ``Mean(graph.statistics)`` replaces
+    ``IsingStatistic.from_graph``, and a statistic is any module of the set of samples (see the
+    features above). ``node_idx_of_edges_1``/``node_idx_of_edges_2`` are renamed
+    ``edge_idx_i``/``edge_idx_j``, ``num_nodes``/``num_edges`` are renamed
+    ``n_nodes``/``n_edges``, and ``nodes`` and ``edges`` are tuples.
+  - |
     ``randspin`` moved from ``dwave.plugins.torch.tensor`` to ``dwave.plugins.torch.graph`` and
-    the ``tensor`` module is removed.
+    the ``tensor`` module is removed. ``dwave.plugins.torch.nn.modules.ising`` is a module holding
+    ``Ising``; the statistics ``Mean`` and ``SquaredMMD`` are in
+    ``dwave.plugins.torch.nn.modules.statistics``. All of these remain exported by
+    ``dwave.plugins.torch.nn``.
   - |
     ``dwave-hybrid`` is no longer a dependency.
 fixes:

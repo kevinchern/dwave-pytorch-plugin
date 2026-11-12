@@ -40,22 +40,23 @@ class TorchSampler(torch.nn.Module, abc.ABC):
     :meth:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine.quasi_objective` is
     formed for models with hidden units that cannot be marginalized exactly.
     :meth:`sample_biases` draws from Ising models on the same graph whose biases are given
-    explicitly, one model per batch element, for example biases produced by another network.
-    Calling the sampler (``sampler(x)``) is equivalent to :meth:`sample`.
+    explicitly, one model per batch element, which is how the inputs of an
+    :class:`~dwave.plugins.torch.nn.Ising` layer are sampled. Calling the sampler
+    (``sampler(x)``) is equivalent to :meth:`sample`.
 
     Args:
         model (GraphIndex): The graph module the sampler is bound to: a
             :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine` to sample from
-            its parameters, or any :class:`~dwave.plugins.torch.graph.GraphIndex` to sample
-            explicit biases on its graph.
+            its parameters, or any :class:`~dwave.plugins.torch.graph.GraphIndex`, such as an
+            :class:`~dwave.plugins.torch.nn.Ising` layer, to sample explicit biases on its graph.
     """
 
     def __init__(self, model: GraphIndex) -> None:
         super().__init__()
         if not isinstance(model, GraphIndex):
             raise TypeError(
-                "`model` should be a GraphIndex, such as a GraphRestrictedBoltzmannMachine, got "
-                f"{type(model).__name__}."
+                "`model` should be a GraphIndex, such as a GraphRestrictedBoltzmannMachine or an "
+                f"Ising layer, got {type(model).__name__}."
             )
         self.model = model
 

@@ -17,6 +17,7 @@ import unittest
 import torch
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
+from dwave.plugins.torch.nn import Ising
 from dwave.plugins.torch.samplers.base import TorchSampler
 from dwave.plugins.torch.graph import GraphIndex
 
@@ -96,6 +97,10 @@ class TestTorchSampler(unittest.TestCase):
                 sampler.complete(torch.ones(1, 3))
             with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
                 sampler._validate_conditional_input(torch.ones(1, 3))
+
+        with self.subTest("An Ising layer is a graph module"):
+            layer = Ising(list("abc"), [("a", "b")])
+            self.assertIs(layer, ConstantSampler(layer).model)
 
     def test_complete(self):
         model = GRBM(list("abc"), [("a", "b"), ("b", "c")], hidden_nodes=["b"])
