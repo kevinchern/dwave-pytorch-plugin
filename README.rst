@@ -38,7 +38,11 @@ The package provides the following components.
   the effective inverse temperature of a set of samples. Through ``gumbel_spins`` and
   ``pseudo_kl_divergence_loss`` of ``dwave.plugins.torch.nn.functional``, a Boltzmann machine
   serves as the prior of a discrete variational autoencoder, whose encoder-spins-decoder wiring
-  is a few lines of PyTorch shown in the examples.
+  is a few lines of PyTorch shown in the examples. The same package provides moment-matched
+  **baselines** of spins with one ``fit`` / ``sample`` interface, against which a candidate
+  model's evaluation score is read: ``UniformBernoulli`` (fair coins), ``IndependentBernoulli``
+  (the data's per-spin means) and ``DichotomizedGaussian`` (the signs of a latent Gaussian
+  matched exactly to the data's means and pairwise correlations).
 
 * **Samplers** (``dwave.plugins.torch.samplers``). Samplers are ``torch.nn.Module`` objects that
   hold the model they sample from, so moving or saving a sampler moves or saves the model and the
