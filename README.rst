@@ -35,8 +35,10 @@ The package provides the following components.
   supports hidden units,
   exact conditional expectations of hidden units that are not adjacent to each other, a
   quasi-objective whose gradient is the gradient of the negative log likelihood, and estimation of
-  the effective inverse temperature of a set of samples. ``DiscreteVariationalAutoencoder`` wires
-  an encoder, a discretisation map and a decoder together around such a prior.
+  the effective inverse temperature of a set of samples. Through ``gumbel_spins`` and
+  ``pseudo_kl_divergence_loss`` of ``dwave.plugins.torch.nn.functional``, a Boltzmann machine
+  serves as the prior of a discrete variational autoencoder, whose encoder-spins-decoder wiring
+  is a few lines of PyTorch shown in the examples.
 
 * **Samplers** (``dwave.plugins.torch.samplers``). Samplers are ``torch.nn.Module`` objects that
   hold the model they sample from, so moving or saving a sampler moves or saves the model and the
@@ -58,7 +60,9 @@ The package provides the following components.
   provided. The estimator itself,
   ``dwave.plugins.torch.nn.functional.expectation``, takes any graph module, which is how a
   Boltzmann machine prior is trained by the maximum mean discrepancy. Also included is a
-  ``MaximumMeanDiscrepancyLoss`` for matching encoder samples to prior samples.
+  ``MaximumMeanDiscrepancyLoss`` for matching encoder samples to prior samples, and, in
+  ``dwave.plugins.torch.nn.functional``, the functional losses and the Gumbel-softmax sampling
+  of spins from encoder logits.
 
 * **Graph core** (``dwave.plugins.torch.graph``). ``GraphIndex``, the graph module that models,
   layers and samplers are built on, and random spin generation. It imports nothing but PyTorch.
@@ -101,7 +105,8 @@ Complete scripts are in the repository's
 `examples directory <https://github.com/dwavesystems/dwave-pytorch-plugin/tree/main/examples>`_.
 The Boltzmann machine example fits a model on a Zephyr graph with a classical sampler or a QPU,
 and the restricted Boltzmann machine example trains a bipartite model with a two-block Gibbs
-sampler.
+sampler. The discrete variational autoencoder example trains an autoencoder with a Boltzmann
+machine prior sampled by a ``BlockSampler``.
 
 Training a Boltzmann machine
 ----------------------------

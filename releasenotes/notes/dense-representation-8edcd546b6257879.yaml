@@ -79,6 +79,10 @@ features:
     the same call. ``GraphIndex.statistics`` returns the sufficient statistics of spins, and
     ``Mean(graph.statistics)`` is the layer of sufficient statistics.
   - |
+    ``dwave.plugins.torch.nn.functional.gumbel_spins`` samples spins from encoder logits with the
+    straight-through Gumbel-softmax estimator. It is the discretisation step of the discrete
+    variational autoencoder of ``examples/discrete_variational_autoencoder.py``.
+  - |
     ``dwave.plugins.torch.nn`` exports the kernels, losses and Ising modules.
 upgrade:
   - |
@@ -142,13 +146,21 @@ upgrade:
     ``edge_idx_i``/``edge_idx_j``, ``num_nodes``/``num_edges`` are renamed
     ``n_nodes``/``n_edges``, and ``nodes`` and ``edges`` are tuples.
   - |
+    ``pseudo_kl_divergence_loss`` moved from ``dwave.plugins.torch.models.losses`` to
+    ``dwave.plugins.torch.nn.functional`` and the ``models.losses`` package is removed.
     ``randspin`` moved from ``dwave.plugins.torch.tensor`` to ``dwave.plugins.torch.graph`` and
     the ``tensor`` module is removed. ``dwave.plugins.torch.nn.modules.ising`` is a module holding
     ``Ising``; the statistics ``Mean`` and ``SquaredMMD`` are in
     ``dwave.plugins.torch.nn.modules.statistics``. All of these remain exported by
     ``dwave.plugins.torch.nn``.
   - |
-    ``dwave-hybrid`` is no longer a dependency.
+    ``DiscreteVariationalAutoencoder`` is removed from ``dwave.plugins.torch.models``: it wired
+    an encoder, a discretisation map and a decoder together and had nothing specific to Ising
+    models. ``examples/discrete_variational_autoencoder.py`` defines the same module in a few
+    lines and trains it with ``gumbel_spins``, ``pseudo_kl_divergence_loss`` and a Boltzmann
+    machine prior sampled by a ``BlockSampler``.
+  - |
+    ``dwave-hybrid`` and ``einops`` are no longer dependencies.
 fixes:
   - |
     The random initialisation of the quadratic biases of ``GraphRestrictedBoltzmannMachine`` put
@@ -167,6 +179,9 @@ fixes:
     Conditional sampling of hidden units did not scale the effective fields by ``prefactor`` and
     ignored ``num_occurrences``; sampling the hidden units for the quasi-objective failed with the
     default arguments.
+  - |
+    ``pseudo_kl_divergence_loss`` averaged the encoder entropy over spins instead of summing it,
+    under-weighting the entropy by the number of spins.
   - |
     The ``Ising`` layer ignored ``num_occurrences`` of aggregated sample sets, which a QPU returns
     by default, so repeated reads counted once in its outputs and gradients, and it failed when
