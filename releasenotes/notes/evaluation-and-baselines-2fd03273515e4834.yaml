@@ -1,6 +1,22 @@
 ---
 features:
   - |
+    New subpackage ``dwave.plugins.torch.evaluation`` for evaluating generative models of spins
+    from samples alone: kernel scores by interaction order. ``blocked_scores`` is an exactly
+    unbiased, blocked U-statistic estimate of the squared maximum mean discrepancy (MMD) of any
+    number of models against the same blocks of a reference sample, under a battery of
+    Hamming-isotropic kernels read off one Hamming-distance histogram per block pair; ``UNIFORM``
+    scores the analytic uniform distribution without a sample. ``Evaluator(train, val, test,
+    block_size)`` holds three data splits and serves ``score`` and ``uniform_score`` (per-profile
+    estimates with standard errors over blocks: entry 0 the headline kernel, entry ``k`` the
+    order-``k`` kernel, whose score is the mean squared error per order-``k`` parity
+    coefficient), ``blocked`` (several models at once), ``calibrate`` (two-level kernel weights
+    on the orders a test-sized sample can measure, fitted on the calibration splits alone and
+    returned as a ``Calibration`` record), and ``compute_loss`` (the differentiable training
+    loss against a batch of a split). ``dwave.plugins.torch.evaluation.visualize`` draws the
+    Fourier weight by interaction order and the kernels' Walsh spectra with matplotlib, an
+    optional dependency.
+  - |
     New module ``dwave.plugins.torch.kernels``: the Hamming-isotropic kernel battery on spins.
     ``kernel_profiles(dim)`` is the table whose row 0 is the Gaussian kernel ``exp(-d_H /
     sqrt(dim))`` (the Gaussian radial-basis-function kernel at the bandwidth ``sqrt(dim)``, on
@@ -38,6 +54,9 @@ upgrade:
     headline is ``expectation(...)[..., 0]`` (or ``loss[0]`` for the functional and the module).
     The ``Ising`` layer with a ``SquaredMMD`` statistic therefore outputs ``dim + 1`` values per
     model.
+  - |
+    ``matplotlib`` is a test requirement; it is needed at run time only by
+    ``dwave.plugins.torch.evaluation.visualize`` and the figures of the examples.
 fixes:
   - |
     The score-function gradient of ``expectation`` with a ``SquaredMMD`` statistic is now

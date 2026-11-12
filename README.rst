@@ -56,13 +56,22 @@ The package provides the following components.
   expectation with respect to the biases. The statistic is any module of the set of samples:
   ``Mean`` (the default, the mean spins or the mean of any per-sample transform, whose parameters
   are trained through the layer) and ``SquaredMMD`` (the squared maximum mean discrepancy to a
-  reference sample, under every kernel of the battery of ``dwave.plugins.torch.kernels``) are
-  provided. The estimator itself,
+  reference sample, under every kernel of the battery below) are provided. The estimator itself,
   ``dwave.plugins.torch.nn.functional.expectation``, takes any graph module, which is how a
   Boltzmann machine prior is trained by the maximum mean discrepancy. Also included is a
   ``MaximumMeanDiscrepancyLoss`` for matching encoder samples to prior samples, and, in
   ``dwave.plugins.torch.nn.functional``, the functional losses and the Gumbel-softmax sampling
   of spins from encoder logits.
+
+* **Evaluation** (``dwave.plugins.torch.evaluation`` and ``dwave.plugins.torch.kernels``). A
+  generative model of spins is judged by its samples alone with kernel scores: exactly unbiased
+  estimates of the squared maximum mean discrepancy, with standard errors, under a battery of
+  Hamming-isotropic kernels whose entries decompose the mismatch by **interaction order** (the
+  per-spin means, the pairwise correlations, the ``k``-way parities), read against the data's own
+  distance from the uniform distribution. ``Evaluator`` holds three data splits and serves the
+  evaluation score, a headline kernel calibrated to the orders the data demonstrably carry, and
+  the differentiable training loss; ``blocked_scores`` scores many models against the same
+  blocks; ``evaluation.visualize`` draws the results.
 
 * **Graph core** (``dwave.plugins.torch.graph``). ``GraphIndex``, the graph module that models,
   layers and samplers are built on, and random spin generation. It imports nothing but PyTorch.
