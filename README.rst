@@ -42,7 +42,7 @@ The package provides the following components.
   **baselines** of spins with one ``fit`` / ``sample`` interface, against which a candidate
   model's evaluation score is read: ``UniformBernoulli`` (fair coins), ``IndependentBernoulli``
   (the data's per-spin means) and ``DichotomizedGaussian`` (the signs of a latent Gaussian
-  matched exactly to the data's means and pairwise correlations).
+  matched exactly to the data's means and pairwise correlations); see ``docs/baselines.md``.
 
 * **Samplers** (``dwave.plugins.torch.samplers``). Samplers are ``torch.nn.Module`` objects that
   hold the model they sample from, so moving or saving a sampler moves or saves the model and the
@@ -75,7 +75,7 @@ The package provides the following components.
   distance from the uniform distribution. ``Evaluator`` holds three data splits and serves the
   evaluation score, a headline kernel calibrated to the orders the data demonstrably carry, and
   the differentiable training loss; ``blocked_scores`` scores many models against the same
-  blocks; ``evaluation.visualize`` draws the results.
+  blocks; ``evaluation.visualize`` draws the results. See ``docs/evaluation.md``.
 
 * **Graph core** (``dwave.plugins.torch.graph``). ``GraphIndex``, the graph module that models,
   layers and samplers are built on, and random spin generation. It imports nothing but PyTorch.
@@ -118,7 +118,9 @@ Complete scripts are in the repository's
 `examples directory <https://github.com/dwavesystems/dwave-pytorch-plugin/tree/main/examples>`_;
 the Boltzmann machine example additionally requires the ``dwave-graphs`` package. The discrete
 variational autoencoder example trains an autoencoder with a Boltzmann machine prior sampled by
-a ``BlockSampler``.
+a ``BlockSampler``. The evaluation and baselines examples score Boltzmann machines and the
+baselines against samples of a known model by interaction order, and draw the figures of
+``docs/evaluation.md`` and ``docs/baselines.md`` (which requires ``matplotlib``).
 
 Training a Boltzmann machine
 ----------------------------
@@ -248,6 +250,37 @@ mismatch of the ``k``-spin parities alone.
 
 The ``Ising`` layer is the same estimator for biases produced by another network:
 ``Ising(nodes, edges, statistic)(linear, quadratic, spins, *inputs)``.
+
+Evaluating a model by interaction order
+---------------------------------------
+
+Samples of a model are scored against held-out data with ``Evaluator``: exactly unbiased
+estimates of the squared maximum mean discrepancy with standard errors over blocks, one entry
+per kernel of the battery, read against the data's own distance from the uniform distribution.
+The baselines say how much of the data's structure is cheap: whatever the dichotomized Gaussian,
+matched to the means and pairwise correlations, already captures, a candidate cannot claim as
+learned.
+
+.. code-block:: python
+
+    from dwave.plugins.torch.evaluation import Evaluator
+    from dwave.plugins.torch.models import DichotomizedGaussian
+
+    # Floating spin matrices in {-1, +1} of shape (rows, n_nodes), cut into blocks of 512 rows
+    evaluator = Evaluator(x_train, x_val, x_test, block_size=512)
+    data, _ = evaluator.uniform_score("test")  # the data's Fourier weight per interaction order
+
+    baseline = DichotomizedGaussian(grbm.n_nodes)
+    baseline.fit(x_train)
+    for name, samples in {"baseline": baseline.sample(x_test.shape[0]), "model": s_model}.items():
+        scores, se = evaluator.score(samples.to(x_test.dtype), "test")  # (n_nodes + 1,) each
+        print(name, "captured at order 2:", 1 - scores[2] / data[2])  # 1 = all, 0 = nothing
+
+    evaluator.calibrate()  # the headline now weighs the orders the test split can measure
+    print(evaluator.score(s_model, "test")[0][0] / evaluator.uniform_score("test")[0][0])
+
+``docs/evaluation.md`` and ``docs/baselines.md`` describe the kernels, the estimator, the
+calibration and the baselines, with derivations and references.
 
 License
 =======
