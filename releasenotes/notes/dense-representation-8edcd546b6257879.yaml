@@ -146,6 +146,12 @@ upgrade:
     ``edge_idx_i``/``edge_idx_j``, ``num_nodes``/``num_edges`` are renamed
     ``n_nodes``/``n_edges``, and ``nodes`` and ``edges`` are tuples.
   - |
+    The generic neural-network utilities ``Affine``, ``SkipLinear``, ``LinearBlock`` and
+    ``store_config`` are removed from ``dwave.plugins.torch.nn``; ``torch.nn`` provides the
+    building blocks they were composed of. The conversions ``bit2spin_soft`` and ``spin2bit_soft``
+    are removed from ``dwave.plugins.torch.nn.functional``; they were ``2 * b - 1`` and
+    ``(s + 1) / 2`` with a range check.
+  - |
     ``pseudo_kl_divergence_loss`` moved from ``dwave.plugins.torch.models.losses`` to
     ``dwave.plugins.torch.nn.functional`` and the ``models.losses`` package is removed.
     ``randspin`` moved from ``dwave.plugins.torch.tensor`` to ``dwave.plugins.torch.graph`` and
@@ -160,7 +166,9 @@ upgrade:
     lines and trains it with ``gumbel_spins``, ``pseudo_kl_divergence_loss`` and a Boltzmann
     machine prior sampled by a ``BlockSampler``.
   - |
-    ``dwave-hybrid`` and ``einops`` are no longer dependencies.
+    ``dwave-hybrid`` and ``einops`` are no longer dependencies, and ``dwave-graphs`` is required only
+    by the tests and examples. Package discovery is restricted to the ``dwave`` namespace, and the
+    ``setup.py`` shim is removed in favour of ``pyproject.toml``.
 fixes:
   - |
     The random initialisation of the quadratic biases of ``GraphRestrictedBoltzmannMachine`` put

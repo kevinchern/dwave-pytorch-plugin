@@ -102,11 +102,10 @@ Examples
 ========
 
 Complete scripts are in the repository's
-`examples directory <https://github.com/dwavesystems/dwave-pytorch-plugin/tree/main/examples>`_.
-The Boltzmann machine example fits a model on a Zephyr graph with a classical sampler or a QPU,
-and the restricted Boltzmann machine example trains a bipartite model with a two-block Gibbs
-sampler. The discrete variational autoencoder example trains an autoencoder with a Boltzmann
-machine prior sampled by a ``BlockSampler``.
+`examples directory <https://github.com/dwavesystems/dwave-pytorch-plugin/tree/main/examples>`_;
+the Boltzmann machine example additionally requires the ``dwave-graphs`` package. The discrete
+variational autoencoder example trains an autoencoder with a Boltzmann machine prior sampled by
+a ``BlockSampler``.
 
 Training a Boltzmann machine
 ----------------------------
