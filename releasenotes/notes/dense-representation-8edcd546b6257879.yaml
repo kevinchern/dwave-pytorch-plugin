@@ -128,8 +128,17 @@ fixes:
     by default, so repeated reads counted once in its outputs and gradients, and it failed when
     the numbers of distinct samples differed between batch elements.
   - |
-    ``TorchSampler.to()`` no longer leaves the original sampler half-moved;
-    ``tests/test_samplers`` is now collected by test discovery.
+    ``TorchSampler.to()`` no longer leaves the original sampler half-moved; ``GaussianKernel`` no
+    longer produces zero bandwidths for integer ``factor``; ``tests/test_samplers`` is now
+    collected by test discovery.
+  - |
+    A ``Kernel`` no longer requires at least two items per input; that requirement belongs to the
+    maximum mean discrepancy and is enforced by ``maximum_mean_discrepancy_loss``. Kernels take
+    ``(..., n, F)`` tensors of ``F``-dimensional items, with broadcasting batch dimensions, and
+    return ``(..., n_x, n_y)`` kernel matrices; items with several feature dimensions are
+    flattened by the caller, as ``maximum_mean_discrepancy_loss`` does. The docstrings of
+    ``Kernel`` and ``GaussianKernel`` describe what is computed: ``exp(-d^2 / sigma_i)`` with the
+    base bandwidth the mean squared distance between distinct items, estimated per batch element.
   - |
     A seeded ``BlockSampler`` drew its initial states and its first sweep from two generators with
     the same seed, and reseeded from scratch whenever it changed device. All draws now descend from

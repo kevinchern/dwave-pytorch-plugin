@@ -23,7 +23,6 @@ from dwave.plugins.torch.models.discrete_variational_autoencoder import \
     DiscreteVariationalAutoencoder as DVAE
 from dwave.plugins.torch.models.losses.kl_divergence import pseudo_kl_divergence_loss
 from dwave.plugins.torch.nn.functional import maximum_mean_discrepancy_loss as mmd_loss
-from dwave.plugins.torch.nn.modules.kernels import GaussianKernel
 from dwave.plugins.torch.nn.modules.loss import MaximumMeanDiscrepancyLoss as MMDLoss
 from dwave.plugins.torch.samplers import DimodSampler
 from dwave.samplers import SimulatedAnnealingSampler
@@ -141,7 +140,6 @@ class TestDiscreteVariationalAutoencoder(unittest.TestCase):
         """Test training the encoder of the DVAE with MMD loss and fixed decoder and GRBM prior."""
         dvae = self.dvae_with_trainable_encoder
         optimiser = torch.optim.SGD(dvae.encoder.parameters(), lr=0.01, momentum=0.9)
-        kernel = GaussianKernel(n_kernels=5, factor=2.0, bandwidth=None)
         # Before training, the encoder will not map data points to the correct spin strings:
         expected_set = {(1.0, 1.0), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)}
         _, discretes, _ = dvae(self.data, n_samples=1)
@@ -160,10 +158,10 @@ class TestDiscreteVariationalAutoencoder(unittest.TestCase):
             ).sample().to(discretes.device)
             if use_mmd_loss_class:
                 if mmd_loss_module is None:
-                    mmd_loss_module = MMDLoss(kernel)
-                mmd = mmd_loss_module(discretes, prior_samples)
+                    mmd_loss_module = MMDLoss()
+                mmd = mmd_loss_module(discretes, prior_samples)[0]
             else:
-                mmd = mmd_loss(discretes, prior_samples, kernel)
+                mmd = mmd_loss(discretes, prior_samples)[0]
             mmd.backward()
             optimiser.step()
         # After training, the encoder should map data points to spin strings that match the samples

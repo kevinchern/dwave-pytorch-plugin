@@ -1,0 +1,38 @@
+---
+features:
+  - |
+    New module ``dwave.plugins.torch.kernels``: the Hamming-isotropic kernel battery on spins.
+    ``kernel_profiles(dim)`` is the table whose row 0 is the Gaussian kernel ``exp(-d_H /
+    sqrt(dim))`` (the Gaussian radial-basis-function kernel at the bandwidth ``sqrt(dim)``, on
+    which the Hamming distance concentrates) and whose row ``k`` is the order-``k`` kernel
+    ``K_k(d_H) / C(dim, k)``, the average parity agreement of the ``C(dim, k)`` parities of order
+    ``k`` (``K_k`` the Kravchuk polynomial), computed by a normalized recurrence and its exact
+    reflection so that every order is representable at any dimension; ``uniform_kernel_mean``
+    is a kernel's mean against the uniform distribution in closed form; ``KravchukSums`` sums the
+    order kernels at real distances with a hand-written backward pass whose memory does not
+    grow with the dimension, and ``kernel_means`` builds the per-profile kernel means of every
+    loss from it.
+  - |
+    ``maximum_mean_discrepancy_loss(x, y, alpha=None, block_size=None)`` and
+    ``MaximumMeanDiscrepancyLoss(alpha=None, block_size=None)`` now estimate the squared MMD under
+    every kernel of the battery at once and return one unbiased estimate per profile (entry 0 the
+    headline, entry ``k`` the order-``k`` kernel), evaluated at the real distance
+    ``(dim - <x, y>) / 2`` so that hard spins give the exact estimate and soft spins in ``[-1, 1]``
+    a smooth surrogate with gradients to both samples. Kernel weights ``alpha`` over the orders
+    make the headline the corresponding alpha row; they are a buffer of the modules.
+upgrade:
+  - |
+    ``Kernel`` and ``GaussianKernel`` (the Euclidean Gaussian kernel with a data-dependent
+    bandwidth) and the module ``dwave.plugins.torch.nn.modules.kernels`` are removed; the
+    kernels are the fixed Hamming-isotropic battery of ``dwave.plugins.torch.kernels``, whose
+    Gaussian bandwidth ``sqrt(dim)`` is set by the dimension. ``maximum_mean_discrepancy_loss``
+    no longer takes a kernel: it takes two ``(n, dim)`` samples of hard or soft spins in
+    ``[-1, 1]`` (items with several feature dimensions are flattened by the caller) and returns a
+    ``(dim + 1,)`` tensor instead of a scalar, so a loss on its headline is ``loss[0]``;
+    ``MaximumMeanDiscrepancyLoss(kernel)`` becomes
+    ``MaximumMeanDiscrepancyLoss(alpha=None, block_size=None)``.
+fixes:
+  - |
+    The maximum mean discrepancy of identical samples is finite (zero for a point mass): the
+    removed ``GaussianKernel`` divided by a zero data-dependent bandwidth and returned ``NaN``
+    kernels and losses for collapsed samples.

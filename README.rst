@@ -50,8 +50,9 @@ The package provides the following components.
 * **Neural network modules** (``dwave.plugins.torch.nn``). An ``Ising`` layer takes the biases
   of a batch of Ising models, samples them with a dimod sampler and returns the expected
   statistic of the samples, with an estimate of its gradient with respect to the biases. Also
-  included are a ``GaussianKernel`` and a ``MaximumMeanDiscrepancyLoss`` for matching encoder
-  samples to prior samples.
+  included is a ``MaximumMeanDiscrepancyLoss`` for matching encoder samples to prior samples
+  under the battery of Hamming-isotropic kernels of ``dwave.plugins.torch.kernels``, whose
+  entries decompose the mismatch by interaction order.
 
 * **Graph core** (``dwave.plugins.torch.graph``). ``GraphIndex``, the graph module that models,
   layers and samplers are built on, and random spin generation. It imports nothing but PyTorch.
