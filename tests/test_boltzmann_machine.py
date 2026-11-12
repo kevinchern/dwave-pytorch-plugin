@@ -19,9 +19,10 @@ import unittest
 import torch
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
+from dwave.plugins.torch.samplers import BlockSampler, TorchSampler
 from dwave.plugins.torch.utils import to_bqm
 from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
-from tests.helper_functions import model_to_bqm, randspins, set_weights
+from tests.helper_functions import RecordedBernoulli, model_to_bqm, randspins, set_weights
 
 
 def random_model(n: int, p: float, n_hidden: int = 0, seed: int = 0, connect_hidden=False) -> GRBM:
@@ -40,6 +41,23 @@ def random_model(n: int, p: float, n_hidden: int = 0, seed: int = 0, connect_hid
         torch.randn(len(edges), generator=generator),
     )
     return model
+
+
+class FixedHiddenSampler(TorchSampler):
+    """A sampler that fills the hidden units with a fixed set of samples."""
+
+    def __init__(self, model, hidden_samples):
+        super().__init__(model)
+        self.hidden_samples = torch.as_tensor(hidden_samples, dtype=torch.float32)
+
+    def sample(self, x=None):
+        x, _, batch_shape = self._validate_conditional_input(x)
+        out = x.unsqueeze(-2).repeat_interleave(len(self.hidden_samples), -2)
+        out[..., self.model.hidden_idx] = self.hidden_samples
+        return out.reshape(*batch_shape, -1, self.model.n_nodes)
+
+    def sample_biases(self, linear, quadratic):
+        raise NotImplementedError
 
 
 class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
@@ -573,11 +591,9 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
                   {(1, 2): 0.2, (1, 3): 0.3, (2, 3): 0.6})
         s_observed = torch.tensor([[1.0]])
         s_model = torch.tensor([[1.0, -1.0, 1.0]])
-        # The hidden units are connected, so their expectations given the data are not exact:
-        # fill them in with samples conditioned on v3=1 for (v1, v2), here a fixed set of three
-        s_data = bm.pad_visible(s_observed).expand(3, -1).clone()
-        s_data[:, bm.hidden_idx] = torch.tensor([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0]])
-        bm.quasi_objective(s_data, s_model).backward()
+        # Hidden samples conditioned on v3=1 for (v1, v2)
+        sampler = FixedHiddenSampler(bm, [[-1, -1], [-1, 1], [1, -1]])
+        bm.quasi_objective(sampler.complete(s_observed), s_model).backward()
 
         t_cond_samples = torch.tensor(
             [
@@ -590,6 +606,40 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         grad = t_cond_samples.mean(0) - t_model
         grad_auto = torch.cat([bm.linear.grad, bm.quadratic.grad])
         torch.testing.assert_close(grad, grad_auto)
+
+    def test_complete_draws_exact_conditional_samples(self):
+        # Sampling disconnected hidden units with one block-Gibbs sweep draws them from their exact
+        # conditional distributions: every hidden spin is +1 with probability (1 + E[s | data]) / 2
+        model = random_model(7, 0.6, n_hidden=3, seed=11)
+        s_observed = randspins(4, 4, seed=12)
+        sampler = BlockSampler(model)
+        with RecordedBernoulli() as bernoulli:
+            s_data = sampler.complete(s_observed, num_samples=2)
+        self.assertEqual((4, 2, 7), tuple(s_data.shape))
+
+        expectation = model.conditional_expectation(model.pad_visible(s_observed))
+        expected = ((1 + expectation) / 2).repeat_interleave(2, 0)  # one row per (observation, sample)
+        for block, probabilities in zip(sampler.partition, bernoulli.probabilities, strict=True):
+            hidden = torch.isin(block, model.hidden_idx)
+            if hidden.any():
+                torch.testing.assert_close(probabilities[:, hidden], expected[:, block[hidden]])
+
+        with self.subTest("Visible spins are the observations and hidden spins are the draws"):
+            torch.testing.assert_close(
+                s_data[..., model.visible_idx], s_observed.unsqueeze(1).expand(-1, 2, -1)
+            )
+            self.assertTrue(torch.all(s_data[..., model.hidden_idx].abs() == 1))
+
+    def test_quasi_objective_sampling_gradient_wrt_observations(self):
+        bm = GRBM([1, 2, 3], [(1, 3), (2, 3)], [3], {1: 0.2, 2: 0.2, 3: 0.3},
+                  {(1, 3): 0.3, (2, 3): 0.6})
+        s_observed = torch.tensor([[1.0, -1.0], [-1.0, -1.0]], requires_grad=True)
+        s_model = torch.tensor([[1.0, -1.0, 1.0]])
+        sampler = FixedHiddenSampler(bm, [[1.0], [-1.0], [-1.0]])
+        bm.quasi_objective(sampler.complete(s_observed), s_model).backward()
+        # Average hidden spin is -1/3; d/ds1 = (h1 + J13 <s3>) / 2, d/ds2 = (h2 + J23 <s3>) / 2
+        expected = torch.tensor([[0.2 - 0.3 / 3, 0.2 - 0.6 / 3]] * 2) / 2
+        torch.testing.assert_close(s_observed.grad, expected)
 
     # ------------------------------------------------------------------ misc ------------------
 

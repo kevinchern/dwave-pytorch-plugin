@@ -16,124 +16,148 @@ import unittest
 
 import torch
 
+from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.base import TorchSampler
+from dwave.plugins.torch.graph import GraphIndex
+
+
+class ConstantSampler(TorchSampler):
+    """Returns the all-ones state."""
+
+    def sample(self, x=None, num_samples=1):
+        if x is None:
+            return torch.ones(num_samples, self.model.n_nodes)
+        x, clamp_mask, batch_shape = self._validate_conditional_input(x)
+        completed = torch.where(clamp_mask, x, torch.ones_like(x))
+        completed = completed.unsqueeze(-2).repeat_interleave(num_samples, -2)
+        return completed.reshape(*batch_shape, num_samples, -1)
+
+    def sample_biases(self, linear, quadratic, num_samples=1):
+        batch_shape = self._validate_biases(linear, quadratic)
+        return torch.ones(*batch_shape, num_samples, self.model.n_nodes)
 
 
 class TestTorchSampler(unittest.TestCase):
     """Test TorchSampler base class."""
 
+    def setUp(self) -> None:
+        self.model = GRBM(list("abc"), [("a", "b"), ("b", "c")])
+
     def test_subclass_without_sample(self):
-        """Test creating a new subclass."""
-
         class EmptySubClass(TorchSampler):
-            """Empty subclass without any methods."""
-
             def something_else(self):
                 pass
 
         with self.assertRaises(TypeError):
-            EmptySubClass()  # type: ignore
+            EmptySubClass(self.model)  # type: ignore
+
+        class OnlySample(TorchSampler):
+            def sample(self, x=None):
+                return torch.ones(1, 3)
+
+        with self.assertRaises(TypeError):
+            OnlySample(self.model)  # type: ignore
+
+    def test_requires_graph(self):
+        with self.assertRaisesRegex(TypeError, "GraphIndex"):
+            ConstantSampler(torch.nn.Linear(3, 3))
 
     def test_simple_subclass(self):
-        """Test creating a new subclass."""
+        sampler = ConstantSampler(self.model)
+        torch.testing.assert_close(sampler.sample(), torch.ones(1, 3))
+        with self.subTest("Calling the sampler is equivalent to sampling"):
+            torch.testing.assert_close(sampler(), torch.ones(1, 3))
+            x = torch.tensor([[-1.0, float("nan"), -1.0]])
+            torch.testing.assert_close(sampler(x), torch.tensor([[[-1.0, 1.0, -1.0]]]))
 
-        expected_sample = torch.Tensor([1, 2, 3])
+    def test_model_is_submodule(self):
+        sampler = ConstantSampler(self.model)
+        self.assertIsInstance(sampler, torch.nn.Module)
+        self.assertIs(self.model, sampler.model)
+        self.assertListEqual([self.model], list(sampler.children()))
+        self.assertSetEqual({"model.linear", "model.quadratic"}, set(sampler.state_dict()))
+        self.assertEqual(len(list(self.model.parameters())), len(list(sampler.parameters())))
 
-        class SimpleSubClass(TorchSampler):
-            """Simple subclass with a dummy sample method."""
+        with self.subTest("Moving the sampler moves the model"):
+            result = sampler.to(torch.device("meta"))
+            self.assertIs(sampler, result)
+            self.assertEqual(torch.device("meta"), self.model.linear.device)
+            self.assertEqual(torch.device("meta"), self.model.edge_idx_i.device)
 
-            def sample(self, x: torch.Tensor | None = None):
-                return x or expected_sample
+    def test_graph_bound_sampler(self):
+        graph = GraphIndex(list("abc"), [("a", "b"), ("b", "c")])
+        sampler = ConstantSampler(graph)
+        self.assertIs(graph, sampler.model)
+        spins = sampler.sample_biases(torch.zeros(2, 3), torch.zeros(2, 2))
+        self.assertEqual((2, 1, 3), tuple(spins.shape))
 
-        simple_obj = SimpleSubClass()
+        with self.subTest("Methods that need parameters require a Boltzmann machine"):
+            with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
+                sampler.complete(torch.ones(1, 3))
+            with self.assertRaisesRegex(TypeError, "GraphRestrictedBoltzmannMachine"):
+                sampler._validate_conditional_input(torch.ones(1, 3))
 
-        torch.testing.assert_close(simple_obj.sample(), expected_sample)
+    def test_complete(self):
+        model = GRBM(list("abc"), [("a", "b"), ("b", "c")], hidden_nodes=["b"])
+        sampler = ConstantSampler(model)
+        x = torch.tensor([[1.0, -1.0], [-1.0, -1.0]], requires_grad=True)
+        completed = sampler.complete(x)
+        self.assertEqual((2, 1, 3), tuple(completed.shape))
+        torch.testing.assert_close(completed[:, 0, [0, 2]], x.detach())
+        self.assertTrue(torch.all(completed[..., 1] == 1))
 
-    def test_parameters(self):
-        """Test that parameters are correctly."""
-        init_device = torch.device("cpu")
+        with self.subTest("Gradients propagate to the observations"):
+            completed.sum().backward()
+            torch.testing.assert_close(x.grad, torch.ones(2, 2))
 
-        parameters = {
-            "param_0": torch.nn.Parameter(torch.Tensor([2, 4, 8], device=init_device)),
-            "param_1": torch.Tensor([1, 1, 2], device=init_device),
-        }
+        with self.subTest("Keyword arguments are passed on to sample"):
+            completed = sampler.complete(x.detach().reshape(2, 1, 2), num_samples=3)
+            self.assertEqual((2, 1, 3, 3), tuple(completed.shape))
+            self.assertTrue(torch.all(completed[..., [0, 2]] == x.detach().reshape(2, 1, 1, 2)))
+            self.assertTrue(torch.all(completed[..., 1] == 1))
 
-        class SubClassWithParameters(TorchSampler):
-            """Simple subclass with a dummy sample method."""
+        with self.subTest("Wrong number of visible units"):
+            with self.assertRaisesRegex(ValueError, "number of visible units"):
+                sampler.complete(torch.ones(2, 3))
 
-            def __init__(self) -> None:
-                self.param_0 = parameters["param_0"]
-                self.param_1 = parameters["param_1"]
+    def test_validate_conditional_input(self):
+        sampler = ConstantSampler(self.model)
 
-                # refresh parameters
-                super().__init__(refresh=True)
+        with self.subTest("Valid input"):
+            x = torch.tensor([[1.0, float("nan"), -1.0], [float("nan"), float("nan"), 1.0]])
+            out, clamp_mask, batch_shape = sampler._validate_conditional_input(x)
+            torch.testing.assert_close(out, x, equal_nan=True)
+            self.assertListEqual(clamp_mask.tolist(), [[True, False, True], [False, False, True]])
+            self.assertEqual((2,), tuple(batch_shape))
 
-            def sample(self, x: torch.Tensor | None = None):  # type: ignore
-                pass
+        with self.subTest("Batch dimensions are flattened and integer inputs are accepted"):
+            out, clamp_mask, batch_shape = sampler._validate_conditional_input(
+                torch.ones(2, 5, 3, dtype=torch.int64)
+            )
+            self.assertEqual((10, 3), tuple(out.shape))
+            self.assertEqual((2, 5), tuple(batch_shape))
+            self.assertEqual(self.model.linear.dtype, out.dtype)
+            self.assertTrue(clamp_mask.all())
 
-        params_obj = SubClassWithParameters()
+        with self.subTest("Wrong shape"):
+            with self.assertRaisesRegex(ValueError, r"x must have shape \(\.\.\., 3\)"):
+                sampler._validate_conditional_input(torch.ones(2, 2))
 
-        self.assertDictEqual(params_obj._parameters, parameters)
+        with self.subTest("Non-spin values"):
+            with self.assertRaisesRegex(ValueError, "only ±1 or NaN"):
+                sampler._validate_conditional_input(torch.tensor([[0.5, 1.0, float("nan")]]))
 
-        with self.subTest("set device to meta"):
-            params_obj = params_obj.to(torch.device("meta"))
+    def test_validate_biases(self):
+        sampler = ConstantSampler(self.model)
+        self.assertEqual(
+            (2, 5), tuple(sampler._validate_biases(torch.zeros(2, 5, 3), torch.zeros(2, 5, 2)))
+        )
+        self.assertEqual((), tuple(sampler._validate_biases(torch.zeros(3), torch.zeros(2))))
+        with self.assertRaisesRegex(ValueError, r"linear must have shape \(\.\.\., 3\)"):
+            sampler._validate_biases(torch.zeros(2, 4), torch.zeros(2, 2))
+        with self.assertRaisesRegex(ValueError, r"quadratic must have shape \(\.\.\., 2\)"):
+            sampler._validate_biases(torch.zeros(2, 3), torch.zeros(2))
 
-            for p in params_obj.parameters():
-                self.assertEqual(p.device, torch.device("meta"))
 
-            self.assertIs(params_obj.param_0, list(params_obj.parameters())[0])
-            self.assertIs(params_obj.param_1, list(params_obj.parameters())[1])
-
-        with self.subTest("add new parameter on cpu"):
-            cpu_param = torch.Tensor([4, 2, 0], device=torch.device("cpu"))
-            setattr(params_obj, "cpu_param", cpu_param)
-
-            # check that new param is _not_ part of parameters unless refreshed
-            self.assertNotIn(cpu_param, list(params_obj.parameters()))
-
-            # refresh parameters and check again
-            params_obj.refresh_parameters()
-            self.assertIn(cpu_param, list(params_obj.parameters()))
-
-            # check that new param has different device
-            self.assertEqual(params_obj._parameters["cpu_param"].device, torch.device("cpu"))
-            self.assertEqual(params_obj._parameters["param_0"].device, torch.device("meta"))
-            self.assertEqual(params_obj._parameters["param_1"].device, torch.device("meta"))
-
-            # finally, check that setting 'params_obj' to meta device again works
-            params_obj = params_obj.to(torch.device("meta"))
-            for p in params_obj.parameters():
-                self.assertEqual(p.device, torch.device("meta"))
-
-    def test_module_parameters(self):
-        """Test that modules are correctly set."""
-        init_device = torch.device("cpu")
-
-        param = torch.nn.Conv2d(1, 20, 5).to(init_device)
-
-        class SubClassWithModule(TorchSampler):
-            """Simple subclass with a dummy sample method."""
-
-            def __init__(self) -> None:
-                self.param = param
-
-                # refresh parameters
-                super().__init__(refresh=True)
-
-            def sample(self, x: torch.Tensor | None = None):  # type: ignore
-                pass
-
-        module_obj = SubClassWithModule()
-
-        self.assertEqual(type(next(module_obj.modules())), type(param))
-
-        with self.subTest("set device to meta"):
-            res_device = torch.device("meta")
-            res_module = next(module_obj.modules())
-
-            # set all modules to device, recursively setting all the
-            # modules parameters to device
-            module_obj = module_obj.to(res_device)
-
-            # assert that modules parameters have set device (just check one param)
-            self.assertEqual(next(res_module.parameters()).device, res_device)
+if __name__ == "__main__":
+    unittest.main()

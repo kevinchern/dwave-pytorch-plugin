@@ -12,92 +12,193 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import abc
-import copy
 
 import torch
 
+from dwave.plugins.torch.graph import GraphIndex
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
 
 __all__ = ["TorchSampler"]
 
 
-class TorchSampler(abc.ABC):
-    """Base class for all PyTorch plugin samplers."""
+class TorchSampler(torch.nn.Module, abc.ABC):
+    """Base class for all PyTorch plugin samplers.
 
-    def __init__(self, refresh: bool = True) -> None:
-        self._parameters = {}
-        self._modules = {}
+    A sampler is a :class:`torch.nn.Module` bound to the graph of a
+    :class:`~dwave.plugins.torch.graph.GraphIndex`, which it holds as the submodule
+    :attr:`model`. Consequently :meth:`~torch.nn.Module.to`, :meth:`~torch.nn.Module.cuda`,
+    :meth:`~torch.nn.Module.state_dict` and friends act on the graph module and on the sampler's
+    own state (e.g. persistent Markov chains) together.
 
-        if refresh:
-            self.refresh_parameters()
+    There are two ways to sample. :meth:`sample` draws from the parameters of the model, which
+    therefore has to be a :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine`;
+    it supports conditional sampling of partially observed spins and, through :meth:`complete`,
+    fills in the hidden units of observed data, which is how the positive phase of
+    :meth:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine.quasi_objective` is
+    formed for models with hidden units that cannot be marginalized exactly.
+    :meth:`sample_biases` draws from Ising models on the same graph whose biases are given
+    explicitly, one model per batch element, for example biases produced by another network.
+    Calling the sampler (``sampler(x)``) is equivalent to :meth:`sample`.
 
-    def parameters(self):
-        """Parameters in the sampler."""
-        for p in self._parameters.values():
-            yield p
+    Args:
+        model (GraphIndex): The graph module the sampler is bound to: a
+            :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine` to sample from
+            its parameters, or any :class:`~dwave.plugins.torch.graph.GraphIndex` to sample
+            explicit biases on its graph.
+    """
 
-    def modules(self):
-        """Modules in the sampler."""
-        for m in self._modules.values():
-            yield m
+    def __init__(self, model: GraphIndex) -> None:
+        super().__init__()
+        if not isinstance(model, GraphIndex):
+            raise TypeError(
+                "`model` should be a GraphIndex, such as a GraphRestrictedBoltzmannMachine, got "
+                f"{type(model).__name__}."
+            )
+        self.model = model
 
     @abc.abstractmethod
     def sample(self, x: torch.Tensor | None = None) -> torch.Tensor:
-        """Abstract sample method."""
-
-    def to(self, *args, **kwargs):
-        """Performs Tensor dtype and/or device conversion on sampler parameters.
-
-        See :meth:`torch.Tensor.to` for usage details."""
-        # perform a shallow copy of the sampler to be returned
-        sampler = copy.copy(self)
-        parameters = {}
-        modules = {}
-
-        for name, p in self._parameters.items():
-            new_p = p.to(*args, **kwargs)
-
-            # set attribute and update parameters
-            setattr(sampler, name, new_p)
-            parameters[name] = new_p
-
-        for name, m in self._modules.items():
-            new_m = m.to(*args, **kwargs)
-
-            # set attribute and update modules
-            setattr(sampler, name, new_m)
-            modules[name] = new_m
-
-        sampler._parameters = parameters
-        sampler._modules = modules
-
-        return sampler
-
-    def refresh_parameters(self, replace=True, clear=True):
-        """Refreshes the parameters and modules attributes in-place.
-
-        Searches the sampler for any initialized torch parameters and modules
-        and adds them to the :attr:`TorchSampler_parameters` attribute, which
-        is used to update device or dtype using the
-        :meth:`TorchSampler.to` method.
+        """Draw samples from the model's parameters.
 
         Args:
-            replace: Replace any previous parameters with new values.
-            clear: Clear the parameters attribute before adding new ones.
-        """
-        if clear:
-            self._parameters.clear()
-            self._modules.clear()
+            x (torch.Tensor, optional): If ``None``, samples are drawn from the joint distribution
+                of all model variables and returned with shape ``(num_samples, n_nodes)``.
+                Otherwise ``x`` is a tensor of shape ``(..., n_nodes)`` of partially observed
+                spins: entries equal to ``torch.nan`` are sampled conditioned on the ``±1``
+                entries, which are kept fixed. The result has shape
+                ``(..., num_samples, n_nodes)``.
 
-        for attr_, val in self.__dict__.items():
-            # NOTE: Only refreshes torch parameters and modules, but _not_ any
-            # GRBM models. Can be generalized if plugin gets a baseclass module.
-            if replace or attr_ not in self._parameters:
-                if isinstance(val, torch.Tensor):
-                    self._parameters[attr_] = val
-                elif (
-                    isinstance(val, torch.nn.Module) and
-                    not isinstance(val, GraphRestrictedBoltzmannMachine)
-                ):
-                    self._modules[attr_] = val
+        Raises:
+            TypeError: If :attr:`model` is not a
+                :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine`.
+
+        Returns:
+            torch.Tensor: Spin samples with entries in ``{-1, +1}``.
+        """
+
+    @abc.abstractmethod
+    def sample_biases(self, linear: torch.Tensor, quadratic: torch.Tensor) -> torch.Tensor:
+        """Draw samples from Ising models on the graph of :attr:`model` given by their biases.
+
+        Args:
+            linear (torch.Tensor): Linear biases of shape ``(*batch, n_nodes)``, one model per
+                batch element; ``(n_nodes,)`` for a single model.
+            quadratic (torch.Tensor): Quadratic biases of the edges of shape
+                ``(*batch, n_edges)``, in the order of the graph's edges.
+
+        Returns:
+            torch.Tensor: Spins with entries in ``{-1, +1}`` of shape
+            ``(*batch, num_samples, n_nodes)``, where the number of samples per model is
+            determined by the sampler.
+        """
+
+    def forward(self, x: torch.Tensor | None = None) -> torch.Tensor:
+        """Alias of :meth:`sample`."""
+        return self.sample(x)
+
+    def complete(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Complete observed visible spins with samples of the hidden units.
+
+        For every row of ``x``, the hidden units of the model are sampled conditioned on the
+        observed spins with :meth:`sample`. The result is suitable as the data argument of
+        :meth:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine.quasi_objective`: its
+        visible entries are the observations themselves, so gradients propagate to ``x``, and its
+        hidden entries are samples, which are constants.
+
+        Args:
+            x (torch.Tensor): Observed spins of shape ``(..., n_visible)`` with one column per
+                visible node, in the order of
+                :attr:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine.visible_idx`.
+            **kwargs: Keyword arguments passed on to :meth:`sample`, for example ``num_samples``
+                of :class:`~dwave.plugins.torch.samplers.BlockSampler`.
+
+        Returns:
+            torch.Tensor: Spins of shape ``(..., num_samples, n_nodes)``.
+        """
+        model = self._require_model()
+        padded = model.pad_visible(x)
+        with torch.no_grad():
+            samples = self.sample(padded, **kwargs)
+        samples = samples.reshape(*x.shape[:-1], -1, model.n_nodes).clone()
+        samples[..., model.visible_idx] = x.unsqueeze(-2).to(samples)
+        return samples
+
+    def _require_model(self) -> GraphRestrictedBoltzmannMachine:
+        """The bound model, which must own parameters to be sampled from.
+
+        Raises:
+            TypeError: If :attr:`model` is not a
+                :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine`.
+        """
+        if not isinstance(self.model, GraphRestrictedBoltzmannMachine):
+            raise TypeError(
+                "Sampling from the model's own biases requires a GraphRestrictedBoltzmannMachine; "
+                f"this sampler is bound to a {type(self.model).__name__}. Use `sample_biases` to "
+                "sample from explicit biases."
+            )
+        return self.model
+
+    def _validate_conditional_input(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Size]:
+        """Validate partially observed spins, move them to the model's device and dtype, and
+        flatten their batch dimensions.
+
+        Args:
+            x (torch.Tensor): Tensor of shape ``(..., n_nodes)`` with ``±1`` (observed) and
+                ``torch.nan`` (to be sampled) entries.
+
+        Raises:
+            ValueError: If ``x`` has the wrong trailing dimension or contains values other than
+                ``±1`` and ``torch.nan``.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor, torch.Size]: The validated spins flattened to shape
+            ``(batch, n_nodes)``, a boolean mask of the same shape that is ``True`` where spins
+            are observed (clamped), and the batch shape ``(...)`` of ``x`` with which to restore
+            the leading dimensions of the result.
+        """
+        model = self._require_model()
+        n_nodes = model.n_nodes
+        x = torch.as_tensor(x)
+        if x.ndim < 1 or x.shape[-1] != n_nodes:
+            raise ValueError(
+                f"x must have shape (..., {n_nodes}), got {tuple(x.shape)}."
+            )
+        batch_shape = x.shape[:-1]
+        x = x.to(device=model.linear.device, dtype=model.linear.dtype)
+        x = x.reshape(-1, n_nodes)
+        clamp_mask = ~torch.isnan(x)
+        if not torch.all(x[clamp_mask].abs() == 1):
+            raise ValueError("x must contain only ±1 or NaN values.")
+        return x, clamp_mask, batch_shape
+
+    def _validate_biases(self, linear: torch.Tensor, quadratic: torch.Tensor) -> torch.Size:
+        """Validate the shapes of explicit biases.
+
+        Args:
+            linear (torch.Tensor): Linear biases of shape ``(*batch, n_nodes)``.
+            quadratic (torch.Tensor): Quadratic biases of the edges of shape
+                ``(*batch, n_edges)``.
+
+        Raises:
+            ValueError: If the shapes do not match each other or the graph.
+
+        Returns:
+            torch.Size: The batch shape ``(*batch)``.
+        """
+        n_nodes, n_edges = self.model.n_nodes, self.model.n_edges
+        if linear.ndim < 1 or linear.shape[-1] != n_nodes:
+            raise ValueError(
+                f"linear must have shape (..., {n_nodes}), got {tuple(linear.shape)}."
+            )
+        batch_shape = linear.shape[:-1]
+        if tuple(quadratic.shape) != (*batch_shape, n_edges):
+            raise ValueError(
+                f"quadratic must have shape (..., {n_edges}) = {(*batch_shape, n_edges)}, got "
+                f"{tuple(quadratic.shape)}."
+            )
+        return batch_shape
