@@ -31,7 +31,11 @@ from typing import Hashable, Iterable
 import torch
 
 from dwave.plugins.torch.graph import GraphIndex
-from dwave.plugins.torch.utils import estimate_beta
+from dwave.plugins.torch.pseudolikelihood import (
+    PseudolikelihoodFit,
+    fit_inverse_temperature,
+    fit_pseudolikelihood,
+)
 
 __all__ = ["GraphRestrictedBoltzmannMachine"]
 
@@ -457,14 +461,88 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
     # ------------------------------------------------------------------ temperature --------------
 
     def estimate_beta(self, spins: torch.Tensor) -> float:
-        """Estimate the maximum pseudolikelihood temperature using
-        ``dwave.system.temperatures.maximum_pseudolikelihood_temperature``.
+        """Estimate the inverse temperature at which spins were sampled from the model, by
+        maximum pseudolikelihood.
+
+        The model's biases are the fixed Hamiltonian of
+        :func:`~dwave.plugins.torch.pseudolikelihood.fit_inverse_temperature`, which also returns
+        the standard error of the estimate. Samples of a quantum annealer are rarely Boltzmann at
+        unit inverse temperature; the reciprocal of the estimate is the ``prefactor`` with which
+        a :class:`~dwave.plugins.torch.samplers.DimodSampler` should submit the Hamiltonian.
 
         Args:
-            spins (torch.Tensor): A tensor of shape (b, N) where b is the sample size,
-                and N denotes the number of variables in the model.
+            spins (torch.Tensor): Complete spin configurations of shape (b, N) where b is the
+                sample size and N the number of nodes, in the order of :attr:`nodes`.
+
+        Raises:
+            ValueError: If ``spins`` are not ``±1`` values of that shape, or the effective fields
+                vanish on every configuration, so that the estimate is unidentifiable.
 
         Returns:
-            float: The estimated inverse temperature of the model.
+            float: The estimated inverse temperature; ``inf`` when no spin of the sample is
+            excited against its effective field and ``-inf`` when every spin is.
         """
-        return estimate_beta(self, self.linear, self.quadratic, spins)
+        return float(fit_inverse_temperature(self, self.linear, self.quadratic, spins).beta)
+
+    # ------------------------------------------------------------------ pseudolikelihood ---------
+
+    def fit_pseudolikelihood(
+        self,
+        spins: torch.Tensor,
+        *,
+        max_iter: int = 500,
+        tolerance_grad: float = 1e-7,
+        tolerance_change: float = 0.0,
+        sample_chunk: int | None = 2048,
+        l1: float = 0.0,
+        l2: float = 0.0,
+    ) -> PseudolikelihoodFit:
+        """Fit the biases to spin data by maximum pseudolikelihood, in place.
+
+        The estimate of :func:`~dwave.plugins.torch.pseudolikelihood.fit_pseudolikelihood`,
+        which needs no sampler, replaces :attr:`linear` and :attr:`quadratic` (cast to their
+        dtype), so the biases the model was constructed with are discarded. Only a fully visible
+        model can be fitted: the pseudolikelihood of observations of a model with hidden units
+        would marginalize them, which is not implemented.
+
+        Args:
+            spins (torch.Tensor): ``±1`` configurations of shape (b, N) where b is the sample
+                size and N the number of nodes, in the order of :attr:`nodes`.
+            max_iter (int): Maximum L-BFGS iterations. Defaults to 500.
+            tolerance_grad (float): Termination threshold on the infinity norm of the gradient.
+                Defaults to 1e-7.
+            tolerance_change (float): L-BFGS stagnation threshold; 0 (the default) disables
+                stagnation stops.
+            sample_chunk (int, optional): Rows of ``spins`` processed at once. Defaults to 2048;
+                ``None`` processes the whole sample at once.
+            l1 (float): Strength of the Laplace (lasso) penalty. Defaults to 0.
+            l2 (float): Strength of the Gaussian (ridge) penalty. Defaults to 0, the pure
+                estimate, which refuses degenerate data (a node whose spin, or an edge whose
+                endpoint product, is constant across the sample).
+
+        Raises:
+            ValueError: If the model has hidden units, or as the function raises.
+
+        Returns:
+            PseudolikelihoodFit: The fitted biases, in ``torch.float64``, and the diagnostics of
+            the fit.
+        """
+        if self.hidden_nodes:
+            raise ValueError(
+                f"Maximum pseudolikelihood fits fully visible models; this model has "
+                f"{self.n_hidden} hidden units, whose spins the data does not contain."
+            )
+        fit = fit_pseudolikelihood(
+            self,
+            spins,
+            max_iter=max_iter,
+            tolerance_grad=tolerance_grad,
+            tolerance_change=tolerance_change,
+            sample_chunk=sample_chunk,
+            l1=l1,
+            l2=l2,
+        )
+        with torch.no_grad():
+            self.linear.copy_(fit.linear.to(self.linear.dtype))
+            self.quadratic.copy_(fit.quadratic.to(self.quadratic.dtype))
+        return fit

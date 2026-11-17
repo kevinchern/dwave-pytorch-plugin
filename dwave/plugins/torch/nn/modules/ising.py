@@ -21,7 +21,7 @@ import torch
 from dwave.plugins.torch.graph import GraphIndex
 from dwave.plugins.torch.nn.functional import expectation
 from dwave.plugins.torch.nn.modules.statistics import Mean
-from dwave.plugins.torch.utils import estimate_beta
+from dwave.plugins.torch.pseudolikelihood import fit_inverse_temperature
 
 __all__ = ["Ising"]
 
@@ -139,7 +139,11 @@ class Ising(GraphIndex):
         self, linear: torch.Tensor, quadratic: torch.Tensor, spins: torch.Tensor
     ) -> torch.Tensor:
         """Estimate the inverse temperatures at which spins were sampled from the models, by
-        maximum pseudolikelihood (see :func:`~dwave.plugins.torch.utils.estimate_beta`).
+        maximum pseudolikelihood.
+
+        This is the estimate of
+        :func:`~dwave.plugins.torch.pseudolikelihood.fit_inverse_temperature`, which also returns
+        its standard error, with the given biases as the fixed Hamiltonians.
 
         Args:
             linear (torch.Tensor): Linear biases of shape ``(*batch, n_nodes)`` or ``(n_nodes,)``.
@@ -148,24 +152,12 @@ class Ising(GraphIndex):
             spins (torch.Tensor): Spins of shape ``(*batch, M, n_nodes)``, ``M`` samples per model.
 
         Raises:
-            ValueError: If the shapes are inconsistent.
+            ValueError: If the shapes are inconsistent, or the effective fields of some model
+                vanish on every one of its samples.
 
         Returns:
-            torch.Tensor: The estimated inverse temperature of every model, shape ``(*batch)``.
+            torch.Tensor: The estimated inverse temperature of every model, shape ``(*batch)``,
+            in ``torch.float64``; ``inf`` for a model none of whose sampled spins is excited
+            against its effective field and ``-inf`` for one all of whose spins are.
         """
-        n_nodes, n_edges = self.n_nodes, self.n_edges
-        if spins.ndim < 2 or spins.shape[-1] != n_nodes:
-            raise ValueError(f"spins must have shape (..., M, {n_nodes}), got {tuple(spins.shape)}.")
-        batch_shape = spins.shape[:-2]
-        try:
-            linear = linear.detach().expand(*batch_shape, n_nodes).reshape(-1, n_nodes)
-            quadratic = quadratic.detach().expand(*batch_shape, n_edges).reshape(-1, n_edges)
-        except RuntimeError:
-            raise ValueError(
-                f"linear and quadratic must have shapes ({n_nodes},) and ({n_edges},), or be "
-                f"batched like spins, got {tuple(linear.shape)}, {tuple(quadratic.shape)} and "
-                f"{tuple(spins.shape)}."
-            ) from None
-        samples = spins.reshape(-1, spins.shape[-2], n_nodes)
-        betas = [estimate_beta(self, h, J, s) for h, J, s in zip(linear, quadratic, samples)]
-        return torch.tensor(betas).reshape(batch_shape)
+        return fit_inverse_temperature(self, linear, quadratic, spins).beta

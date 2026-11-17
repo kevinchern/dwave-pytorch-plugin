@@ -424,7 +424,7 @@ class TestIsing(unittest.TestCase):
             ising(linear, quadratic, torch.ones(3, 5, 3))
         with self.assertRaisesRegex(ValueError, r"spins must have shape \(\.\.\., M, 3\)"):
             ising(linear, quadratic, torch.ones(2, 5, 2))
-        with self.assertRaisesRegex(ValueError, "batched like spins"):
+        with self.assertRaisesRegex(ValueError, "batched like the biases"):
             ising.estimate_betas(linear, quadratic, torch.ones(3, 5, 3))
 
     def test_energy(self):
@@ -460,7 +460,8 @@ class TestIsing(unittest.TestCase):
         for h, J, s in zip(linear, quadratic, (s1, s2)):
             bqm = BQM.from_ising(dict(zip("abc", h.tolist())), dict(zip(self.EDGES, J.tolist())))
             dimod_betas.append(1 / float(mple(bqm, (s, list("abc")))[0]))
-        torch.testing.assert_close(torch.tensor(dimod_betas), estimated_betas)
+        self.assertEqual(torch.float64, estimated_betas.dtype)
+        torch.testing.assert_close(torch.tensor(dimod_betas, dtype=torch.float64), estimated_betas)
 
         with self.subTest("Any batch shape, and unbatched biases"):
             self.assertEqual((2, 1), tuple(ising.estimate_betas(linear[:, None], quadratic[:, None], spins[:, None]).shape))

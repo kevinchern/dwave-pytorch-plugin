@@ -34,8 +34,11 @@ The package provides the following components.
   GPUs while parameters, gradients and optimizer state stay the size of the graph. The model
   supports hidden units,
   exact conditional expectations of hidden units that are not adjacent to each other, a
-  quasi-objective whose gradient is the gradient of the negative log likelihood, and estimation of
-  the effective inverse temperature of a set of samples. Through ``gumbel_spins`` and
+  quasi-objective whose gradient is the gradient of the negative log likelihood, estimation of
+  the effective inverse temperature of a set of samples and, for a fully visible model, a fit by
+  maximum pseudolikelihood that needs no sampler at all (``dwave.plugins.torch.pseudolikelihood``,
+  which also scores held-out configurations and estimates inverse temperatures with standard
+  errors). Through ``gumbel_spins`` and
   ``pseudo_kl_divergence_loss`` of ``dwave.plugins.torch.nn.functional``, a Boltzmann machine
   serves as the prior of a discrete variational autoencoder, whose encoder-spins-decoder wiring
   is a few lines of PyTorch shown in the examples. The same package provides moment-matched
@@ -223,6 +226,41 @@ units are adjacent, or with conditional samples drawn by any sampler otherwise.
     s_data = grbm.conditional_expectation(grbm.pad_visible(x))  # exact: hidden units are not adjacent
     s_data = sampler.complete(x)  # alternative: conditional samples, valid for any model
     grbm.quasi_objective(s_data, sampler.sample()).backward()
+
+Fitting a model without sampling
+--------------------------------
+
+A fully visible Boltzmann machine can be fitted by maximum pseudolikelihood, which needs neither
+the partition function nor samples of the model. The negative log-pseudolikelihood of a
+configuration is the sum over the nodes of the negative log probability of each spin given all
+the others, a convex function of the biases that ``fit_pseudolikelihood`` minimizes with L-BFGS.
+Minimized over a single scale of fixed biases instead, the same objective gives the inverse
+temperature at which spins were sampled, the estimate ``estimate_beta`` returns above;
+``fit_inverse_temperature`` returns it with a standard error, for a batch of models at once.
+
+.. code-block:: python
+
+    from dwave.plugins.torch.models import GraphRestrictedBoltzmannMachine
+    from dwave.plugins.torch.pseudolikelihood import fit_inverse_temperature
+    from dwave.plugins.torch.samplers import BlockSampler
+
+    nodes = range(4)
+    edges = [(i, j) for i in nodes for j in nodes if i < j]
+    truth = GraphRestrictedBoltzmannMachine(
+        nodes, edges, linear={i: 0.2 * i for i in nodes}, quadratic={e: 0.5 for e in edges}
+    )
+    # Data: 4000 chains after 100 Gibbs sweeps, a sample of the Boltzmann distribution
+    data = BlockSampler(truth, num_chains=4000, schedule=[1.0] * 100, seed=0).sample()
+
+    grbm = GraphRestrictedBoltzmannMachine(nodes, edges)
+    fit = grbm.fit_pseudolikelihood(data)  # the biases of grbm now hold the estimate
+    print(fit.converged, fit.nlpl)  # True, and the negative log-pseudolikelihood per configuration
+    print(grbm.quadratic.data - truth.quadratic.data)  # sampling noise, of order 0.03
+
+    # The inverse temperature at which the data were sampled from the true model, 1 up to the
+    # sampling error; under the fitted model, the training data are at inverse temperature 1
+    temperature = fit_inverse_temperature(truth, truth.linear, truth.quadratic, data)
+    print(temperature.beta, temperature.beta_stderr)
 
 Training a prior by the maximum mean discrepancy
 ------------------------------------------------

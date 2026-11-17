@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Conversions between tensors and dimod objects, and temperature estimation with dwave-system."""
+"""Conversions between tensors and dimod objects."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Hashable, Sequence
@@ -23,7 +23,7 @@ from dimod import BinaryQuadraticModel, SampleSet
 if TYPE_CHECKING:
     from dwave.plugins.torch.graph import GraphIndex
 
-__all__ = ["estimate_beta", "sampleset_to_tensor", "to_bqm"]
+__all__ = ["sampleset_to_tensor", "to_bqm"]
 
 
 def sampleset_to_tensor(
@@ -116,31 +116,3 @@ def to_bqm(
         linear, interactions, 0.0, "SPIN", variable_order=list(graph.nodes)
     )
 
-
-def estimate_beta(
-    graph: GraphIndex, linear: torch.Tensor, quadratic: torch.Tensor, spins: torch.Tensor
-) -> float:
-    """Maximum pseudolikelihood estimate of the inverse temperature at which spins were sampled
-    from an Ising model.
-
-    Uses ``dwave.system.temperatures.maximum_pseudolikelihood_temperature`` on the binary
-    quadratic model of the given biases; see :func:`to_bqm` for the arguments describing the
-    model. See `Global Warming: Temperature Estimation in Annealers
-    <https://doi.org/10.3389/fict.2016.00023>`_ for more on estimating beta.
-
-    Args:
-        graph (GraphIndex): The graph of the model.
-        linear (torch.Tensor): Linear biases of shape ``(graph.n_nodes,)``.
-        quadratic (torch.Tensor): Quadratic biases of shape ``(graph.n_edges,)``.
-        spins (torch.Tensor): Spins of shape ``(M, graph.n_nodes)`` with one column per node, in
-            the order of ``graph.nodes``.
-
-    Returns:
-        float: The estimated inverse temperature.
-    """
-    # Imported here so that the models, layers and block sampler import without dwave-system
-    from dwave.system.temperatures import maximum_pseudolikelihood_temperature
-
-    bqm = to_bqm(graph, linear, quadratic)
-    samples = torch.as_tensor(spins).detach().cpu().numpy()
-    return float(1 / maximum_pseudolikelihood_temperature(bqm, (samples, list(graph.nodes)))[0])

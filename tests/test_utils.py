@@ -18,8 +18,7 @@ from dimod import SPIN, BinaryQuadraticModel, SampleSet
 from torch import Tensor
 
 from dwave.plugins.torch.graph import GraphIndex
-from dwave.plugins.torch.utils import estimate_beta, sampleset_to_tensor, to_bqm
-from dwave.system.temperatures import maximum_pseudolikelihood_temperature as mple
+from dwave.plugins.torch.utils import sampleset_to_tensor, to_bqm
 
 
 class TestUtils(unittest.TestCase):
@@ -103,17 +102,6 @@ class TestToBqm(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Expected 4 quadratic biases"):
                 to_bqm(graph, linear, torch.zeros(4, 4))
 
-
-class TestEstimateBeta(unittest.TestCase):
-    def test_estimate_beta(self):
-        graph = GraphIndex("dbac", [("a", "b"), ("a", "c"), ("a", "d"), ("b", "c")])
-        linear = torch.tensor([0.0, 1.0, 2.0, 3.0])
-        quadratic = torch.tensor([1.0, 2.0, 3.0, 6.0])
-        spins = torch.tensor([[1, -1, 1, 1], [-1, -1, 1, 1], [1, -1, -1, 1], [1, 1, 1, -1]])
-        beta = estimate_beta(graph, linear, quadratic, spins)
-        self.assertIsInstance(beta, float)
-        bqm = to_bqm(graph, linear, quadratic)
-        self.assertEqual(1.0 / mple(bqm, (spins.numpy(), list(graph.nodes)))[0], beta)
 
 if __name__ == "__main__":
     unittest.main()

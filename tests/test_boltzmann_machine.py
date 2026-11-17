@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import itertools
 import pickle
 import unittest
 
@@ -373,7 +374,42 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         bqm = model_to_bqm(self.bm)
         beta = self.bm.estimate_beta(spins)
         self.assertIsInstance(beta, float)
-        self.assertEqual(1.0 / mple(bqm, (spins.numpy(), "dbac"))[0], beta)
+        self.assertAlmostEqual(1.0 / mple(bqm, (spins.numpy(), "dbac"))[0], beta, places=9)
+
+    def test_fit_pseudolikelihood(self):
+        # Exact samples of a mild model on the graph, by enumeration of its configurations
+        truth = GRBM(
+            self.nodes, self.edges,
+            linear=dict(zip(self.nodes, [0.3, -0.2, 0.1, 0.4])),
+            quadratic={("a", "b"): 0.5, ("a", "c"): -0.4, ("a", "d"): 0.2, ("b", "c"): -0.3},
+        )
+        states = torch.tensor(list(itertools.product([-1.0, 1.0], repeat=4)))
+        with torch.no_grad():
+            probabilities = torch.softmax(-truth(states), 0)
+        generator = torch.Generator().manual_seed(0)
+        spins = states[torch.multinomial(probabilities, 20000, replacement=True, generator=generator)]
+
+        model = GRBM(self.nodes, self.edges)
+        fit = model.fit_pseudolikelihood(spins)
+        self.assertTrue(fit.converged)
+        self.assertEqual(torch.float64, fit.linear.dtype)
+        with self.subTest("The estimate is written into the parameters, in their dtype"):
+            self.assertEqual(torch.float32, model.linear.dtype)
+            torch.testing.assert_close(model.linear.detach(), fit.linear.float())
+            torch.testing.assert_close(model.quadratic.detach(), fit.quadratic.float())
+            torch.testing.assert_close(model.linear.detach(), truth.linear.detach(), rtol=0, atol=0.08)
+            torch.testing.assert_close(model.quadratic.detach(), truth.quadratic.detach(), rtol=0, atol=0.08)
+        with self.subTest("The training data are at unit inverse temperature under the fit"):
+            self.assertAlmostEqual(1.0, model.estimate_beta(spins), places=5)
+        with self.subTest("Options are passed on"):
+            with self.assertRaises(ValueError):
+                model.fit_pseudolikelihood(spins, sample_chunk=0)
+            ridge = model.fit_pseudolikelihood(spins, l2=0.1)
+            self.assertLess(float(ridge.quadratic.norm()), float(fit.quadratic.norm()))
+        with self.subTest("A model with hidden units cannot be fitted"):
+            hidden = GRBM(self.nodes, self.edges, hidden_nodes=["c"])
+            with self.assertRaisesRegex(ValueError, "hidden units"):
+                hidden.fit_pseudolikelihood(spins)
 
     # ------------------------------------------------------------------ learning --------------
 

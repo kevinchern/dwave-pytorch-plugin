@@ -1,282 +1,249 @@
-# Kevin's review NOTE (kept for proof of work): I reviewed the logic and correctness of code, but
-#   haven't checked documentation matches.
-# Review NOTE: Reviewed 2026-09-16
-"""Maximum pseudolikelihood estimation (MPLE) for graph-restricted Boltzmann machines (GRBMs).
+# Copyright 2026 D-Wave
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+r"""Maximum pseudolikelihood estimation of Ising models on a graph.
 
-Fits the linear and quadratic biases of a fully visible
-:class:`dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine` to observed spin data by
-maximizing Besag's pseudolikelihood — the product, over sites, of each spin's conditional
-probability given the rest of its configuration (J. Besag, *Statistical Analysis of Non-Lattice
-Data*, The Statistician 24(3), 1975).
+The pseudolikelihood of a spin configuration under a model is the product, over the nodes, of
+the conditional probability of each spin given all the others (J. Besag, *Statistical Analysis
+of Non-Lattice Data*, The Statistician 24(3), 1975). Under the Ising model on a graph with
+biases :math:`(h, J)`, :math:`P(s) \propto \exp\{-E(s)\}` with
+:math:`E(s) = \sum_i h_i s_i + \sum_{(i, j)} J_{ij} s_i s_j`, the spin of node :math:`i` is
+logistic in its effective field :math:`\theta_i(s) = h_i + \sum_j J_{ij} s_j`
+(:meth:`~dwave.plugins.torch.graph.GraphIndex.effective_field`),
+:math:`P(s_i \mid s_{-i}) = \sigma(-2 s_i \theta_i(s))`, so the negative log-pseudolikelihood
+(NLPL) of a configuration is :math:`\sum_i \mathrm{softplus}(2 s_i \theta_i(s))`. Averaged over
+a sample, the NLPL is convex in the biases and involves neither the partition function nor
+samples of the model, unlike the log likelihood, whose gradient needs equilibrium samples. Its
+minimizer is a consistent estimator of the biases of a fully visible model, at some loss of
+statistical efficiency relative to maximum likelihood.
 
-Model and objective. The GRBM defines the Boltzmann distribution ``P(s) ∝ exp(-H(s))`` over spin
-configurations ``s ∈ {-1, +1}^N`` with Hamiltonian (energy function)
+Three functions share the objective:
 
-.. code-block:: text
+* :func:`negative_log_pseudolikelihood` evaluates it under given biases, for a single model or
+  a batch of models and differentiably in the biases, as a training loss or a held-out score.
+* :func:`fit_pseudolikelihood` minimizes it over all the biases of one model with L-BFGS in
+  float64 and returns the estimate with diagnostics;
+  :meth:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine.fit_pseudolikelihood`
+  writes it into a model.
+* :func:`fit_inverse_temperature` holds the biases fixed as a reference Hamiltonian
+  :math:`E^*` and minimizes it over the single scale :math:`\beta` of the family
+  :math:`P_\beta(s) \propto \exp\{-\beta E^*(s)\}`, the inverse temperature at which the spins
+  were sampled, by Newton's method, for a batch of models at once and with a standard error.
+  :meth:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine.estimate_beta` and
+  :meth:`~dwave.plugins.torch.nn.Ising.estimate_betas` wrap it.
 
-    H(s) = sum_i h_i s_i + sum_{(i,j) in E} J_ij s_i s_j        # = grbm.forward(s)
+The two fits compose: on data drawn at inverse temperature :math:`\beta` from :math:`E^*`, the
+joint fit recovers :math:`\beta E^*` while the one-parameter fit against :math:`E^*` recovers
+:math:`\beta`, and against the joint fit's own estimate it returns exactly 1, the joint optimum
+being stationary along its own ray.
 
-Each site's conditional distribution is logistic in its local field
-``theta_i(s) = h_i + sum_{j : (i,j) in E} J_ij s_j``:
-
-.. code-block:: text
-
-    P(s_i | s_rest) = sigmoid(-2 s_i theta_i(s))
-
-so the negative log-pseudolikelihood (NLPL) of a dataset ``D`` — averaged over samples, summed
-over sites — is
-
-.. code-block:: text
-
-    NLPL(h, J) = (1/|D|) sum_{s in D} sum_i softplus(2 s_i theta_i(s))
-
-Why MPLE: the NLPL is jointly convex in ``(h, J)`` and involves no partition function and no
-model sampling — unlike maximum-likelihood estimation (MLE), whose gradient requires equilibrium
-samples from the model. For fully visible Boltzmann machines MPLE is a consistent estimator (it
-recovers the true parameters as the sample size grows, at some statistical-efficiency cost
-relative to MLE; see ``notes/qubie/pseudolikelihood_sample_complexity.md``).
-
-Two fits share the objective:
-
-* :func:`fit_pseudolikelihood` minimizes the NLPL over every bias ``(h, J)`` with L-BFGS (the
-  limited-memory Broyden–Fletcher–Goldfarb–Shanno quasi-Newton method) in float64 working
-  precision and writes the estimate back into the model's parameters.
-* :func:`fit_inverse_temperature` holds the model's biases fixed as a reference Hamiltonian
-  ``H*`` and minimizes the NLPL over the single scale parameter ``beta`` of the one-parameter
-  family ``P_beta(s) ∝ exp(-beta * H*(s))`` — the inverse temperature, in physics vocabulary —
-  by Newton's method on the NLPL derivative (SciPy's ``root_scalar``); it leaves the model
-  untouched and returns ``beta`` with a standard error.
-
-The two compose: on data drawn at inverse temperature ``beta`` from ``H*``, the joint fit
-recovers ``beta * H*`` while the one-parameter fit against ``H*`` recovers ``beta``, and against
-the joint fit's own estimate it returns exactly 1 (the joint optimum is stationary along its own
-ray).
-
-Scope notes:
-
-* Fully visible models only — a GRBM with hidden nodes raises :class:`ValueError` (the
-  pseudolikelihood of partially observed configurations would require marginalizing the hidden
-  spins, which this module does not implement).
-* Data columns follow ``grbm.nodes`` order, the plugin-wide convention.
-* If the data were drawn at inverse temperature ``beta`` from a target Hamiltonian ``H*``, the
-  joint MPLE recovers ``beta * H*``; rescale the fitted biases by ``1 / beta`` if ``H*`` itself
-  is wanted, or — when ``H*`` is known — estimate ``beta`` alone with
-  :func:`fit_inverse_temperature`.
-* Degenerate (linearly separable) data — a site constant across all samples, or an edge whose
-  endpoint product is constant — makes the MPLE diverge along that coordinate, exactly like
-  logistic regression on separable data. Two routes:
-
-  - **Default (``l2 = 0``)**: the fit **refuses such data** (raises :class:`ValueError`);
-    remove the pinned statistics from the data/graph first (a lossless compression, e.g.
-    prune constant sites, merge perfectly correlated pairs).
-  - **Ridge / lasso (``l2 > 0`` and/or ``l1 > 0``)**: minimize
-    NLPL + ``l1·(‖h‖₁ + ‖J‖₁)`` + ``l2·(‖h‖² + ‖J‖²)`` — the maximum a posteriori
-    (MAP) estimate under a Laplace and/or Gaussian prior (elastic net when combined).
-    The ``l1`` term is non-smooth, so L-BFGS treats it by subgradient — a practical
-    heuristic, not a proximal method (no exact zeros). Either penalty bounds the optimum
-    for **any** data, so separation (and parameter aliasing, e.g. an edge into a frozen
-    site) stops being a special case; with ``l2 > 0`` the objective is strictly convex,
-    making the optimum unique as well. The penalties ride on the *mean-per-sample* NLPL,
-    so ``l2 ≈ 1/num_samples`` corresponds to a fixed unit prior that washes out as the
-    sample grows (consistency preserved); every coordinate shrinks slightly, and
-    ``l1 = l2 = 0`` remains the pure MPLE. (Ridge was removed 2026-08-03 in favor of prune/merge and
-    reinstated 2026-08-21 by Kevin's explicit decision; see
-    ``notes/qubie/pseudolikelihood_separable_data_options.md`` for the design discussion.)
+The functions take complete spin configurations, one column per node of the graph in the order
+of its nodes, like every function of the package. The pseudolikelihood of partially observed
+configurations, which would marginalize the unobserved spins, is not implemented, so a
+:class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine` with hidden units cannot be
+fitted. Degenerate data, a node whose spin is constant across the sample or an edge whose
+endpoint product is, send the joint estimate to infinity along that coordinate, as logistic
+regression diverges on separable data; the pure fit refuses such data, and the penalties ``l1``
+and ``l2`` of :func:`fit_pseudolikelihood` bound the estimate for any data. The effective fields
+are evaluated by a dense product with the coupling matrix of the graph, as elsewhere in the
+package, or, on large sparse graphs, by two scatters over the edges, whichever is cheaper.
 """
-
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
-from dwave.plugins.torch.models import GraphRestrictedBoltzmannMachine
-from scipy.optimize import root_scalar
-from torch.nn import functional as F
+import torch.nn.functional as F
 
-from nimbus.spinbit import require_spin
+if TYPE_CHECKING:
+    from dwave.plugins.torch.graph import GraphIndex
 
 __all__ = [
     "InverseTemperatureFit",
     "PseudolikelihoodFit",
     "fit_inverse_temperature",
     "fit_pseudolikelihood",
-    "local_fields",
     "negative_log_pseudolikelihood",
 ]
 
 
-def _validate_spins(spins: torch.Tensor, grbm: GraphRestrictedBoltzmannMachine) -> None:
-    """Raise :class:`ValueError` unless ``spins`` is a valid (num_samples, n_nodes) spin batch."""
-    # Kevin's review NOTE (kept for proof of work): good checks; can't think of any other
-    #     assumptions to check. For what it's worth, divergence checks take place later.*
-    #     this _validate_spins function is doing good by staying in scope.
-    #     * divergence to mean pinned spins or pinned interaction values causing MPLE to diverge.
-    if grbm.hidden_nodes:
+# ---------------------------------------------------------------------- validation ----------------
+
+
+def _validate_spins(spins: torch.Tensor, n_nodes: int, batch_shape: torch.Size = torch.Size()) -> None:
+    """Raise unless ``spins`` holds ``±1`` configurations of shape ``(*batch_shape, M, n_nodes)``."""
+    if spins.ndim < 2 or spins.shape[-1] != n_nodes:
+        raise ValueError(f"spins must have shape (..., M, {n_nodes}), got {tuple(spins.shape)}.")
+    if batch_shape and spins.shape[:-2] != batch_shape:
         raise ValueError(
-            "Pseudolikelihood requires a fully visible model, but the GRBM has "
-            f"{len(grbm.hidden_nodes)} hidden node(s). Marginalizing hidden spins is out of "
-            "scope for this module."
+            f"spins must have shape {(*batch_shape, 'M', n_nodes)}, batched like the biases, got "
+            f"{tuple(spins.shape)}."
         )
-    if spins.ndim != 2:
-        raise ValueError(f"Expected spins of shape (num_samples, n_nodes), got {spins.shape}")
-    if spins.shape[1] != grbm.n_nodes:
+    if spins.shape[-2] == 0:
+        raise ValueError("At least one sample per model is required, got none.")
+    if not bool((spins.abs() == 1).all()):
+        raise ValueError("spins must hold ±1 values only.")
+
+
+def _validate(
+    graph: GraphIndex, linear: torch.Tensor, quadratic: torch.Tensor, spins: torch.Tensor
+) -> torch.Size:
+    """Raise unless the biases define a batch of models on ``graph`` and ``spins`` are ``±1``
+    configurations of the batch; return the batch shape."""
+    n_nodes, n_edges = graph.n_nodes, graph.n_edges
+    if linear.ndim < 1 or linear.shape[-1] != n_nodes:
         raise ValueError(
-            f"spins has {spins.shape[1]} columns but the model has {grbm.n_nodes} nodes "
-            "(columns must follow `grbm.nodes` order)"
+            f"linear must have shape (*batch, {n_nodes}), one bias per node, got "
+            f"{tuple(linear.shape)}."
         )
-    if spins.shape[0] == 0:
-        raise ValueError("Expected at least one sample, got an empty batch")
-    require_spin(spins)
+    if quadratic.ndim < 1 or quadratic.shape[-1] != n_edges:
+        raise ValueError(
+            f"quadratic must have shape (*batch, {n_edges}), one bias per edge, got "
+            f"{tuple(quadratic.shape)}."
+        )
+    batch_shape = linear.shape[:-1]
+    if quadratic.shape[:-1] != batch_shape:
+        raise ValueError(
+            "linear and quadratic must define the same batch of models, got batch shapes "
+            f"{tuple(batch_shape)} and {tuple(quadratic.shape[:-1])}."
+        )
+    _validate_spins(spins, n_nodes, batch_shape)
+    return batch_shape
+
+
+def _validate_chunk(sample_chunk: int | None) -> None:
+    if sample_chunk is not None and sample_chunk < 1:
+        raise ValueError(f"sample_chunk must be a positive int or None, got {sample_chunk}.")
+
+
+# ---------------------------------------------------------------------- effective fields ----------
 
 
 def _use_dense_fields(n_nodes: int, n_edges: int) -> bool:
-    """Whether the local fields go through a dense ``(N, N)`` coupling matrix (see below).
+    """Whether the effective fields go through the dense coupling matrix rather than two scatters
+    over the edges.
 
-    The edge scatter costs one sequential pass over every (sample, edge) pair — about 30 ns each
-    on CPU — while the dense matmul costs ``N^2`` flops per sample at several GFLOP/s, so the
-    matmul wins once ``N^2`` is within a few hundred times the edge count (a 144-node complete
-    graph: ~100x faster) and loses on the QPU-sized sparse native graphs (thousands of nodes, a
-    few couplers per node), where the scatter stays. Tiny graphs always take the dense path.
+    The scatters cost one pass over every (sample, edge) pair, the dense product ``n_nodes**2``
+    multiply-adds per sample at a far higher throughput, so the product wins once ``n_nodes**2``
+    is within a few hundred times the number of edges, and loses on sparse graphs with thousands
+    of nodes and a few edges per node, such as the working graph of a QPU. Small graphs always
+    take the dense path.
     """
     return n_nodes <= 256 or n_nodes * n_nodes <= 400 * n_edges
 
 
-def _coupling_matrix(
-    quadratic: torch.Tensor, edge_idx_i: torch.Tensor, edge_idx_j: torch.Tensor, n_nodes: int
+def _effective_fields(
+    graph: GraphIndex, spins: torch.Tensor, linear: torch.Tensor, quadratic: torch.Tensor
 ) -> torch.Tensor:
-    """The symmetric ``(N, N)`` coupling matrix ``W[i, j] = W[j, i] = J_ij`` (zero diagonal).
+    """Effective fields of spins of shape ``(..., M, n_nodes)`` under biases batched like them
+    or unbatched, all floating tensors of one dtype and device; differentiable in the biases.
 
-    Built with two non-accumulating ``index_put`` calls, so it stays differentiable in
-    ``quadratic`` (each edge is written exactly once per triangle).
+    The dense path is :meth:`~dwave.plugins.torch.graph.GraphIndex.effective_field`; the sparse
+    path adds the bias of every edge, times the spin at one endpoint, to the field at the other.
     """
-    # Review NOTE: This is a symmetric matrix that should only be used in calculating
-    #   effective / local fields. Not to be interpreted as the J in s'Js (this would double count)
-    w = torch.zeros(n_nodes, n_nodes, dtype=quadratic.dtype, device=quadratic.device)
-    w = w.index_put((edge_idx_i, edge_idx_j), quadratic)
-    return w.index_put((edge_idx_j, edge_idx_i), quadratic)
-
-
-def _local_fields(
-    spins: torch.Tensor,
-    linear: torch.Tensor,
-    quadratic: torch.Tensor,
-    edge_idx_i: torch.Tensor,
-    edge_idx_j: torch.Tensor,
-) -> torch.Tensor:
-    """Local fields ``theta_i(s) = h_i + sum_{e ∋ i} J_e * s_other`` for a (b, N) spin batch.
-
-    All floating tensors must share one dtype and device; each edge contributes to the field of
-    both of its endpoints. Differentiable with respect to ``linear`` and ``quadratic``. Two
-    equivalent evaluations, chosen by :func:`_use_dense_fields`: ``spins @ W`` with the dense
-    coupling matrix, or two ``index_add`` scatters over the edges.
-    """
-    if quadratic.numel() and _use_dense_fields(spins.shape[1], quadratic.shape[0]):
-        w = _coupling_matrix(quadratic, edge_idx_i, edge_idx_j, spins.shape[1])
-        return spins @ w + linear
-    # Kevin's review NOTE (kept for proof of work): why not linear.repeat(bs, 1)?
-    #   on second thought, i like `return fields + linear` because it makes explicit the
-    #   result is linear + neighbour-contributions, whereas linear.repeat is less explicit.
-    #   no strong opinion.
+    if _use_dense_fields(graph.n_nodes, graph.n_edges):
+        return graph.effective_field(spins, linear=linear, quadratic=quadratic)
     fields = torch.zeros_like(spins)
-    # Kevin's review NOTE (kept for proof of work): this is so clean, i love it.
-    #   instinctively i thought this would do some double-counting. gave it more thought and
-    #   walked through the logic. this is great. im getting deprecated fr T_T
-    if quadratic.numel():
-        fields = fields.index_add(1, edge_idx_i, quadratic * spins[:, edge_idx_j])
-        fields = fields.index_add(1, edge_idx_j, quadratic * spins[:, edge_idx_i])
-    return fields + linear
+    if graph.n_edges:
+        edge_biases = quadratic if quadratic.ndim == 1 else quadratic.unsqueeze(-2)
+        fields = fields.index_add(-1, graph.edge_idx_i, edge_biases * spins[..., graph.edge_idx_j])
+        fields = fields.index_add(-1, graph.edge_idx_j, edge_biases * spins[..., graph.edge_idx_i])
+    return fields + (linear if linear.ndim == 1 else linear.unsqueeze(-2))
 
 
-def local_fields(spins: torch.Tensor, grbm: GraphRestrictedBoltzmannMachine) -> torch.Tensor:
-    """Compute every site's local field ``theta_i(s)`` under the model's current parameters.
-
-    The local field of site ``i`` in configuration ``s`` is
-    ``theta_i(s) = h_i + sum_{j : (i,j) in E} J_ij s_j``, so that the conditional distribution of
-    the spin is ``P(s_i | s_rest) = sigmoid(-2 s_i theta_i(s))``.
-
-    Args:
-        spins (torch.Tensor): Spin data of shape (num_samples, n_nodes) with entries ±1, columns
-            in ``grbm.nodes`` order.
-        grbm (GraphRestrictedBoltzmannMachine): A fully visible model.
-
-    Returns:
-        torch.Tensor: Local fields of shape (num_samples, n_nodes), in the model's parameter
-        dtype, differentiable with respect to the model's parameters.
-    """
-    _validate_spins(spins, grbm)
-    s = spins.to(device=grbm.linear.device, dtype=grbm.linear.dtype)
-    return _local_fields(s, grbm.linear, grbm.quadratic, grbm.edge_idx_i, grbm.edge_idx_j)
+# ---------------------------------------------------------------------- the objective -------------
 
 
 def negative_log_pseudolikelihood(
+    graph: GraphIndex,
+    linear: torch.Tensor,
+    quadratic: torch.Tensor,
     spins: torch.Tensor,
-    grbm: GraphRestrictedBoltzmannMachine,
-    *,
     reduction: Literal["mean", "sum", "none"] = "mean",
 ) -> torch.Tensor:
-    """Negative log-pseudolikelihood (NLPL) of spin data under the model's current parameters.
+    r"""Negative log-pseudolikelihood of spins under the Ising models of given biases.
 
-    A configuration's NLPL is the sum over sites of the negative log-probability of each spin
-    conditioned on all others, ``sum_i softplus(2 s_i theta_i(s))`` — see the module docstring.
-    The result is differentiable with respect to the model's parameters, so it can serve directly
-    as a training loss or as a held-out evaluation metric (in nats; lower is better).
-
-    Note: this evaluates in one pass and materializes (num_samples, n_edges) intermediates; chunk
-    the batch externally if that does not fit in memory (:func:`fit_pseudolikelihood` chunks
-    internally via ``sample_chunk``).
+    The negative log-pseudolikelihood of a configuration is the sum over the nodes of the
+    negative log probability of each spin given all the others,
+    :math:`\sum_i \mathrm{softplus}(2 s_i \theta_i(s))` with :math:`\theta` the effective
+    fields (see the module docstring). It is differentiable in the biases, so it serves as a
+    training loss, and, in nats per configuration, as a held-out score (lower is better). The
+    biases define one model or a batch of them, as in
+    :meth:`~dwave.plugins.torch.graph.GraphIndex.energy`; the ``(M, n_edges)``-sized
+    intermediates are materialized in one pass, so chunk a large sample externally.
 
     Args:
-        spins (torch.Tensor): Spin data of shape (num_samples, n_nodes) with entries ±1, columns
-            in ``grbm.nodes`` order.
-        grbm (GraphRestrictedBoltzmannMachine): A fully visible model.
-        reduction (Literal["mean", "sum", "none"]): Reduction over samples — the mean (default) or
-            sum of per-sample NLPLs, or ``"none"`` for the (num_samples,) vector.
-
-    Returns:
-        torch.Tensor: A scalar for ``"mean"``/``"sum"``, or a (num_samples,) tensor for
-        ``"none"``, in the model's parameter dtype.
+        graph (GraphIndex): The graph of the models.
+        linear (torch.Tensor): Linear biases of shape ``(*batch, n_nodes)``, or ``(n_nodes,)``
+            for a single model.
+        quadratic (torch.Tensor): Quadratic biases of the edges of shape ``(*batch, n_edges)``,
+            or ``(n_edges,)``, in the order of the graph's edges.
+        spins (torch.Tensor): ``±1`` configurations of shape ``(*batch, M, n_nodes)``, ``M`` per
+            model, with one column per node in the order of the graph's nodes; or of any shape
+            ``(..., M, n_nodes)`` for a single model.
+        reduction (str): ``"mean"`` (default) or ``"sum"`` over the ``M`` configurations of
+            each model, or ``"none"`` for the value of every configuration.
 
     Raises:
-        ValueError: If the model has hidden nodes, the data is not a 2-D ±1 tensor of width
-            ``grbm.n_nodes``, the batch is empty, or ``reduction`` is not recognized.
+        ValueError: If the biases do not hold one bias per node and per edge or are not batched
+            alike, ``spins`` are not ``±1`` values of the shape above, or ``reduction`` is not
+            recognized.
+
+    Returns:
+        torch.Tensor: The values, of shape ``spins.shape[:-2]`` or, for ``"none"``,
+        ``spins.shape[:-1]``, in the dtype of ``linear``.
     """
     if reduction not in ("mean", "sum", "none"):
-        raise ValueError(f'reduction must be "mean", "sum", or "none", got {reduction!r}')
-    _validate_spins(spins, grbm)
-    s = spins.to(device=grbm.linear.device, dtype=grbm.linear.dtype)
-    theta = _local_fields(s, grbm.linear, grbm.quadratic, grbm.edge_idx_i, grbm.edge_idx_j)
-    # Kevin's review NOTE (kept for proof of work): these three lines above are identical to the
-    #   public `local_fields` function, but it's repeated here because `s` needs to be cast. the
-    #   `local_fields` function only returns theta, so you'd have to cast `s` again anyways.
-    per_sample = F.softplus(2.0 * s * theta).sum(dim=1)
+        raise ValueError(f'reduction must be "mean", "sum" or "none", got {reduction!r}.')
+    _validate(graph, linear, quadratic, spins)
+    spins = spins.to(device=linear.device, dtype=linear.dtype)
+    fields = _effective_fields(graph, spins, linear, quadratic)
+    values = F.softplus(2.0 * spins * fields).sum(-1)
     if reduction == "mean":
-        return per_sample.mean()
+        return values.mean(-1)
     if reduction == "sum":
-        return per_sample.sum()
-    return per_sample
+        return values.sum(-1)
+    return values
+
+
+# ---------------------------------------------------------------------- the joint fit -------------
 
 
 @dataclass(frozen=True)
 class PseudolikelihoodFit:
-    """Diagnostics returned by :func:`fit_pseudolikelihood`.
+    """The estimate of :func:`fit_pseudolikelihood` and its diagnostics.
 
     Attributes:
-        nlpl: Mean per-sample negative log-pseudolikelihood (NLPL) at the fitted parameters, in
-            nats.
-        grad_inf_norm: Infinity norm of the NLPL gradient at the solution — the first-order
-            optimality measure.
-        n_iterations: L-BFGS iterations performed (0 if the initial point already satisfied
-            ``tolerance_grad``).
-        n_function_evals: Objective/gradient evaluations performed inside the L-BFGS step (line
-            searches evaluate more than once per iteration).
-        converged: Whether ``grad_inf_norm <= tolerance_grad``. ``False`` typically means the
-            iteration cap was hit (degenerate/separable data — the one case whose optimum sits at
-            infinity — is rejected upfront with a :class:`ValueError` instead; see the module
-            docstring).
+        linear (torch.Tensor): The fitted linear biases, shape ``(n_nodes,)``, in
+            ``torch.float64`` on the graph's device.
+        quadratic (torch.Tensor): The fitted quadratic biases of the edges, shape ``(n_edges,)``.
+        nlpl (float): The mean negative log-pseudolikelihood per configuration at the estimate,
+            in nats, without the penalties.
+        grad_inf_norm (float): Infinity norm of the gradient of the minimized objective at the
+            estimate, the first-order optimality measure.
+        n_iterations (int): L-BFGS iterations performed; 0 if the origin already satisfied
+            ``tolerance_grad``.
+        n_function_evals (int): Evaluations of the objective and its gradient inside the
+            optimizer; the line search evaluates more than once per iteration.
+        converged (bool): Whether ``grad_inf_norm <= tolerance_grad``. ``False`` means that the
+            iteration cap was reached, or that the line search could make no further progress
+            at the precision of the objective, which is where tolerances below about 1e-9 land.
     """
 
+    linear: torch.Tensor
+    quadratic: torch.Tensor
     nlpl: float
     grad_inf_norm: float
     n_iterations: int
@@ -284,60 +251,41 @@ class PseudolikelihoodFit:
     converged: bool
 
 
-def _raise_if_separable(
-    spins: torch.Tensor,
-    edge_idx_i: torch.Tensor,
-    edge_idx_j: torch.Tensor,
-    n_edges: int,
-    sample_chunk: int,
-    device: torch.device,
-    work_dtype: torch.dtype,
-) -> None:
-    """Raise :class:`ValueError` when the MPLE provably diverges along some coordinate.
+def _raise_if_separable(graph: GraphIndex, spins: torch.Tensor, chunk: int) -> None:
+    """Raise when the maximum pseudolikelihood estimate provably diverges along some bias.
 
-    A site whose spin is constant across all samples (its empirical mean is ±1) or an edge whose
-    endpoint product is constant sends the corresponding bias to ±infinity, exactly as logistic
-    regression diverges on linearly separable data. The check is exact — ±1 values are summed in
-    the float working dtype, where integer sums are exact (up to 2**24 samples even in float32) —
-    so ``|sum| == num_samples`` iff the column is constant.
+    The spin of a node that is constant across the sample, or the product of the endpoint spins
+    of an edge that is, sends the corresponding bias to infinity, as logistic regression diverges
+    on linearly separable data. The check is exact: ``±1`` values are summed in float64, where
+    the sums are integers, so a column is constant iff its sum is ``±num_samples``.
     """
-    num_samples, n_nodes = spins.shape
-    node_spin_sums = torch.zeros(n_nodes, dtype=work_dtype, device=device)
-    edge_product_sums = torch.zeros(n_edges, dtype=work_dtype, device=device)
-    # Kevin's review NOTE (kept for proof of work): `for lo in range...` here `lo` stands for lower?
-    #   bad variable name. what's `sc`? -> refactored `lo` -> `chunk_start` and `sc` -> `spin_chunk`
-    # Kevin's review NOTE (kept for proof of work): CHECKPOINT, START REVIEW HERE
-    for chunk_start in range(0, num_samples, sample_chunk):
-        spin_chunk = spins[chunk_start : chunk_start + sample_chunk].to(
-            device=device, dtype=work_dtype
-        )
-        node_spin_sums += spin_chunk.sum(dim=0)
-        if n_edges:
-            edge_product_sums += (spin_chunk[:, edge_idx_i] * spin_chunk[:, edge_idx_j]).sum(dim=0)
-    # Kevin's review NOTE (kept for proof of work): OK idk why I usually check with mean == +/- 1
-    #   or std == 0, but counting (this implementation) is more reliable. silly me, AI wins again.
-    #   imma get deprecated :c
-    num_constant_nodes = int((node_spin_sums.abs() == num_samples).sum())
-    num_constant_edges = int((edge_product_sums.abs() == num_samples).sum())
-    # Kevin's review NOTE (kept for proof of work): Maybe it's better to raise error instead of
-    #   warn. A simple lossless compression should be warranted if this is the case.
-    #   (Addressed 2026-08-03: warn → raise; l2 escape hatch removed with the l2 option itself.)
-    # Qubie: 2026-08-21: the l2 option is back per Kevin's decision; this check now runs only for
-    #   the pure MPLE, l2 == 0, where divergence is real.
-    if num_constant_nodes or num_constant_edges:
+    num_samples = spins.shape[0]
+    device = graph.edge_idx_i.device
+    node_sums = torch.zeros(graph.n_nodes, dtype=torch.float64, device=device)
+    edge_sums = torch.zeros(graph.n_edges, dtype=torch.float64, device=device)
+    for start in range(0, num_samples, chunk):
+        s = spins[start:start + chunk].to(device=device, dtype=torch.float64)
+        node_sums += s.sum(0)
+        if graph.n_edges:
+            edge_sums += (s[:, graph.edge_idx_i] * s[:, graph.edge_idx_j]).sum(0)
+    constant_nodes = node_sums.abs() == num_samples
+    constant_edges = edge_sums.abs() == num_samples
+    if constant_nodes.any() or constant_edges.any():
+        nodes = [graph.nodes[k] for k in constant_nodes.nonzero().flatten().tolist()]
+        edges = [graph.edges[k] for k in constant_edges.nonzero().flatten().tolist()]
         raise ValueError(
-            f"Data is degenerate: {num_constant_nodes} node(s) have a constant spin and "
-            f"{num_constant_edges} edge(s) have a constant endpoint product across all "
-            f"{num_samples} samples, so the maximum pseudolikelihood estimate diverges along "
-            "those coordinates (as for separable logistic regression). Remove the pinned "
-            "statistics from the data/graph first — a lossless compression (e.g. prune constant "
-            "sites, merge perfectly correlated pairs) — and refit."
+            f"The data is degenerate: the spins of nodes {nodes} and the products of the "
+            f"endpoint spins of edges {edges} are constant across all {num_samples} samples, so "
+            "the maximum pseudolikelihood estimate diverges along those biases, as logistic "
+            "regression does on separable data. Remove the constant statistics from the data "
+            "and the graph (prune constant nodes, merge perfectly correlated pairs), or set l1 "
+            "or l2 > 0 to bound the estimate."
         )
 
 
 def fit_pseudolikelihood(
+    graph: GraphIndex,
     spins: torch.Tensor,
-    grbm: GraphRestrictedBoltzmannMachine,
     *,
     max_iter: int = 500,
     tolerance_grad: float = 1e-7,
@@ -346,450 +294,349 @@ def fit_pseudolikelihood(
     l1: float = 0.0,
     l2: float = 0.0,
 ) -> PseudolikelihoodFit:
-    """Fit a GRBM to spin data by maximum pseudolikelihood, updating the model in place.
+    r"""Fit the biases of an Ising model on a graph to spin data by maximum pseudolikelihood.
 
-    Minimizes the mean-per-sample negative log-pseudolikelihood (NLPL; see the module docstring)
-    over the model's linear and quadratic biases. The objective is convex, so the optimizer
-    always starts from the origin (the optimum is initialization-independent) and is minimized
-    with a full-batch L-BFGS (strong-Wolfe line search) on float64 working copies of the
-    parameters; the solution is then written back into ``grbm.linear`` and ``grbm.quadratic``
-    (cast to their existing dtype), so the initialization the model was constructed with is
-    discarded. The working precision is always float64, so torch backends without float64
-    support (e.g. Apple's Metal Performance Shaders, MPS) are not supported.
+    Minimizes the mean negative log-pseudolikelihood of the sample (see the module docstring)
+    over the linear and quadratic biases. The objective is convex, so the optimizer starts from
+    the origin, where the estimate is independent of any initialization, and runs a full-batch
+    L-BFGS with a strong-Wolfe line search on float64 copies of the biases; backends without
+    float64, such as Apple's MPS, are not supported. The sample is processed in chunks of
+    ``sample_chunk`` rows, each chunk backpropagated before the next, so the peak intermediate
+    is ``sample_chunk`` times the number of edges (or, on the dense path, the number of nodes,
+    plus the coupling matrix) rather than the size of the whole sample; the chunking is exact.
+    The fit is deterministic.
 
-    Memory is bounded by processing the batch in ``sample_chunk``-row chunks (backpropagating each
-    chunk before the next), so the peak intermediate is O(``sample_chunk`` × ``n_edges``) on the
-    edge-scatter path, or O(``sample_chunk`` × ``n_nodes`` + ``n_nodes``²) on the dense
-    coupling-matrix path taken for dense graphs (:func:`_use_dense_fields`), rather than
-    O(``num_samples`` × ``n_edges``); the chunking is exact, not an approximation. The fit is
-    deterministic given the data (no sampling anywhere).
+    With ``l1`` or ``l2`` positive, the objective is the penalized
+    :math:`\mathrm{NLPL} + l_1 (\|h\|_1 + \|J\|_1) + l_2 (\|h\|^2 + \|J\|^2)`, the maximum a
+    posteriori estimate under a Laplace and a Gaussian prior, which is bounded for any data
+    and, with ``l2 > 0``, strictly convex, so the estimate is unique. The penalties ride on the
+    mean per-configuration NLPL, so ``l2 ~ 1 / num_samples`` is a fixed unit prior that washes
+    out as the sample grows. The ``l1`` term is non-smooth and L-BFGS treats it by subgradient,
+    a practical shrinkage rather than a proximal method: coefficients shrink but are not driven
+    exactly to zero, and the first-order ``converged`` reading is approximate near kinks.
 
     Args:
-        spins (torch.Tensor): Spin data of shape (num_samples, n_nodes) with entries ±1, columns
-            in ``grbm.nodes`` order.
-        grbm (GraphRestrictedBoltzmannMachine): A fully visible model; its parameters are
-            overwritten with the estimate.
-        max_iter (int): Maximum L-BFGS iterations (a single ``LBFGS.step`` call iterates
-            internally).
-        tolerance_grad (float): First-order termination threshold on the gradient infinity norm.
-        tolerance_change (float): L-BFGS stagnation threshold on parameter/loss change. The
-            default 0.0 disables stagnation stops, so termination is by ``tolerance_grad`` or
-            ``max_iter`` and the ``converged`` flag is a genuine first-order-optimality statement.
-            A positive value (torch's own default is 1e-9) permits earlier stops that typically
-            leave the gradient above ``tolerance_grad`` and hence report ``converged=False``.
-        sample_chunk (int | None): Rows per chunk (default 2048); ``None`` processes the whole
-            batch in one chunk.
-        l1 (float): Laplace-prior (lasso) strength: adds ``l1·(‖h‖₁ + ‖J‖₁)`` to the
-            objective. Like ``l2`` it bounds the optimum on separable data (the NLPL flattens
-            along a separating direction while the penalty keeps growing), but the term is
-            **non-smooth**: L-BFGS handles it by subgradient, so treat it as a practical
-            heuristic — coefficients shrink but are not driven exactly to zero (no proximal
-            step), the optimum need not be unique, and the first-order ``converged`` reading
-            is approximate near kinks.
-        l2 (float): Gaussian-prior (ridge) strength. ``0.0`` for both penalties (default) is
-            the pure MPLE and refuses separable data; ``l2 > 0`` adds ``l2·(‖h‖² + ‖J‖²)`` —
-            the MAP estimate, strictly convex and finite for any data (see the module
-            docstring; ``l2 ≈ 1/num_samples`` corresponds to a fixed unit prior). The two
-            penalties combine (elastic net). The reported ``nlpl`` stays the *unpenalized*
-            NLPL at the solution; ``grad_inf_norm`` and ``converged`` describe the penalized
-            objective actually minimized.
-
-    Returns:
-        PseudolikelihoodFit: Final NLPL, gradient norm, iteration/evaluation counts, and a
-        convergence flag.
+        graph (GraphIndex): The graph of the model, for example a
+            :class:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine` whose biases
+            are ignored (:meth:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine.fit_pseudolikelihood`
+            writes the estimate into the model).
+        spins (torch.Tensor): ``±1`` configurations of shape ``(num_samples, n_nodes)``, one
+            column per node in the order of the graph's nodes.
+        max_iter (int): Maximum L-BFGS iterations. Defaults to 500.
+        tolerance_grad (float): Termination threshold on the infinity norm of the gradient.
+            Defaults to 1e-7.
+        tolerance_change (float): L-BFGS stagnation threshold on the change of the biases and
+            of the objective. The default 0 disables stagnation stops, so termination is by
+            ``tolerance_grad`` or ``max_iter`` and ``converged`` is a genuine first-order
+            statement; a positive value, torch's own default being 1e-9, permits earlier stops
+            that typically leave the gradient above ``tolerance_grad``.
+        sample_chunk (int, optional): Rows per chunk. Defaults to 2048; ``None`` processes the
+            whole sample at once.
+        l1 (float): Strength of the Laplace (lasso) penalty. Defaults to 0.
+        l2 (float): Strength of the Gaussian (ridge) penalty. Defaults to 0; the pure maximum
+            pseudolikelihood estimate, which refuses degenerate data.
 
     Raises:
-        ValueError: If the model has hidden nodes, the data is not a 2-D ±1 tensor of width
-            ``grbm.n_nodes``, the batch is empty, an option is invalid, or — with
-            ``l1 == l2 == 0`` only — the data is degenerate (a constant site or a constant
-            edge-endpoint product, where the pure MPLE diverges; see
-            :func:`_raise_if_separable`).
+        ValueError: If ``spins`` are not ``±1`` values of the shape above, an option is invalid,
+            or, with ``l1 == l2 == 0`` only, the data is degenerate: the spin of some node, or
+            the product of the endpoint spins of some edge, is constant across the sample, where
+            the estimate diverges.
+
+    Returns:
+        PseudolikelihoodFit: The fitted biases, in ``torch.float64`` on the graph's device,
+        with the NLPL, gradient norm, iteration and evaluation counts, and a convergence flag.
     """
-    _validate_spins(spins, grbm)
-    if sample_chunk is not None and sample_chunk < 1:
-        raise ValueError(f"sample_chunk must be a positive int or None, got {sample_chunk}")
-    for penalty_name, penalty_value in (("l1", l1), ("l2", l2)):
-        if not (penalty_value >= 0.0) or penalty_value == float("inf"):
-            raise ValueError(f"{penalty_name} must be a finite float >= 0, got {penalty_value}")
+    _validate_spins(spins, graph.n_nodes)
+    if spins.ndim != 2:
+        raise ValueError(
+            "fit_pseudolikelihood fits a single model: spins must have shape "
+            f"(num_samples, {graph.n_nodes}), got {tuple(spins.shape)}."
+        )
+    _validate_chunk(sample_chunk)
+    for name, value in (("l1", l1), ("l2", l2)):
+        if not (0.0 <= value < math.inf):
+            raise ValueError(f"{name} must be a finite float >= 0, got {value}.")
 
-    device = grbm.linear.device
-    # Kevin's review NOTE (kept for proof of work): idk what "MPS" device is. had to look it up.
-    #     it stands for "Metal Performance Shaders". quoting pytorch below
-    #     > MPS device enables high-performance training on GPU for macOS devices ...
-    # Kevin's review NOTE (kept for proof of work): I removed "mps" device check because I
-    #     don't care for no iCaveats LOL.
-    work_dtype = torch.float64
-    num_samples = spins.shape[0]
-    n_edges = grbm.quadratic.shape[0]
-    # Kevin's review NOTE (kept for proof of work): the memory cost of L-BFGS scales linearly in
-    #     dimension*sample_size, so I think it's safe to use a larger default sample_chunk or even
-    #     use a available-memory-based default/parameterization.
+    device, dtype = graph.edge_idx_i.device, torch.float64
+    num_samples, n_edges = spins.shape[0], graph.n_edges
     chunk = num_samples if sample_chunk is None else sample_chunk
-    edge_idx_i = grbm.edge_idx_i
-    edge_idx_j = grbm.edge_idx_j
-
     if l1 == 0.0 and l2 == 0.0:
-        # Pure MPLE only: with a penalty the optimum is finite for any data.
-        _raise_if_separable(spins, edge_idx_i, edge_idx_j, n_edges, chunk, device, work_dtype)
+        # Only the pure estimate can diverge; a penalty bounds it for any data
+        _raise_if_separable(graph, spins, chunk)
 
-    # Kevin's review NOTE (kept for proof of work): do we really need "init"? the objective is
-    #   convex and MPLE with L-BFGS is super linear in convergence.
-    #   (Addressed 2026-08-03: `init` removed — the fit always starts from the origin.)
-    # Kevin's review NOTE (kept for proof of work): this feels a little unnecessary; just set both
-    #   to require grad and that's it.
-    #   (Addressed 2026-08-03: with the `init="model"` construction chain gone, requires_grad can
-    #   be set at creation. The old two-step existed because `.detach().clone().to(dtype)` must
-    #   run before `requires_grad_()` for the tensor to remain an autograd LEAF — see the review
-    #   discussion in the prompt history.)
-    h = torch.zeros(grbm.linear.shape[0], device=device, dtype=work_dtype, requires_grad=True)
-    j = torch.zeros(n_edges, device=device, dtype=work_dtype, requires_grad=n_edges > 0)
-    params = [h] + ([j] if n_edges else [])
-
-    # Kevin's review NOTE (kept for proof of work): should this simply take in **kwargs_lbfgs?
-    opt = torch.optim.LBFGS(
-        params,
+    linear = torch.zeros(graph.n_nodes, dtype=dtype, device=device, requires_grad=True)
+    quadratic = torch.zeros(n_edges, dtype=dtype, device=device, requires_grad=n_edges > 0)
+    biases = [linear, quadratic] if n_edges else [linear]
+    optimizer = torch.optim.LBFGS(
+        biases,
         max_iter=max_iter,
         tolerance_grad=tolerance_grad,
         tolerance_change=tolerance_change,
         line_search_fn="strong_wolfe",
     )
-
-    # Kevin's review NOTE (kept for proof of work): do we really want NLPL? are there theoretical
-    #   guarantees that it will converge to some quantity suitable for model selection?
     last_nlpl = 0.0
 
     def closure() -> torch.Tensor:
-        # The objective is a mean over samples, so per-chunk backward calls accumulate the exact
-        # gradient while each (chunk, n_edges) intermediate is freed before the next chunk.
+        # The objective is a mean over the sample, so the backward passes of the chunks
+        # accumulate its exact gradient while each chunk's intermediates are freed before the next
         nonlocal last_nlpl
-        opt.zero_grad()
-        nlpl = torch.zeros((), device=device, dtype=work_dtype)
-        for lo in range(0, num_samples, chunk):
-            sc = spins[lo : lo + chunk].to(device=device, dtype=work_dtype)
-            theta = _local_fields(sc, h, j, edge_idx_i, edge_idx_j)
-            # Kevin's review NOTE (kept for proof of work):
-            #   p(s | nbr) = exp(-s theta) / (exp(-theta) + exp(theta))
-            #              = 1             / (exp(-theta(1 - s)) + exp(theta(1 + s)))
-            #              = 1             / (exp(-theta(1 - s)) + exp(theta(1 + s)))
-            #   if s = 1
-            #              = 1             /  (1 + exp(2  theta))
-            #   if s = -1
-            #              = 1             / (exp(-2 theta) + 1 )
-            #   so either way,
-            #              = 1             /  (1 + exp(s 2 theta))
-            #   - log(p(s=1 | nbr)) = log1 + log(1 + exp(s 2 theta))
-            #                       =      + log(1 + exp(s 2 theta))
-            #                       = softplus(s 2 theta)
-            chunk_nlpl = F.softplus(2.0 * sc * theta).sum() / num_samples
+        optimizer.zero_grad()
+        nlpl = torch.zeros((), dtype=dtype, device=device)
+        for start in range(0, num_samples, chunk):
+            s = spins[start:start + chunk].to(device=device, dtype=dtype)
+            fields = _effective_fields(graph, s, linear, quadratic)
+            chunk_nlpl = F.softplus(2.0 * s * fields).sum() / num_samples
             chunk_nlpl.backward()
-            nlpl = nlpl + chunk_nlpl.detach()
+            nlpl += chunk_nlpl.detach()
         last_nlpl = float(nlpl)
-        # Kevin's review NOTE (kept for proof of work): I think we can totally remove
-        #   the l2 penalty. we're never really gonna work with it anyways. if statistics
-        #   are pinned, we should remove them by lossless compression.
-        # Qubie NOTE: (Addressed 2026-08-03: `l2` removed; the objective is the pure mean NLPL,
-        #   and pinned statistics are rejected upfront by _raise_if_separable.)
-        # Qubie NOTE: (Reinstated 2026-08-21 per Kevin's explicit decision — prompt 71 in
-        #   exp/c2st_gbdt_benchmark/prompts_log.md: opt-in `l2` MAP/ridge; `last_nlpl` stays the
-        #   pure NLPL, the returned objective and its gradient carry the penalty.)
         objective = nlpl
         if l1 or l2:
-            penalty = torch.zeros((), device=device, dtype=work_dtype)
-            if l1:
-                penalty = penalty + l1 * (h.abs().sum() + (j.abs().sum() if n_edges else 0.0))
-            if l2:
-                penalty = penalty + l2 * (h.square().sum() + (j.square().sum() if n_edges else 0.0))
+            penalty = torch.zeros((), dtype=dtype, device=device)
+            for bias in biases:
+                penalty = penalty + l1 * bias.abs().sum() + l2 * bias.square().sum()
             penalty.backward()
             objective = objective + penalty.detach()
         return objective
 
-    opt.step(closure)
-
-    # One more evaluation at the solution for honest reporting: the final gradient and
-    # the final pure NLPL. Called outside `step`, so it does not inflate the optimizer's counters.
+    optimizer.step(closure)
+    # Evaluated once more at the estimate, outside the step so that the optimizer's counters are
+    # not inflated: the gradient of the objective and the NLPL without the penalties
     closure()
-    # Kevin's review NOTE (kept for proof of work): this last closure call is for collecting
-    #   statistics of the fit. might be worth removing. that should be a separate diagnostic, no?
-    #   I guess it'd be tedious to redefine `closure`.
-    grads = [p.grad.reshape(-1) for p in params if p.grad is not None]
-    grad_inf_norm = float(torch.cat(grads).abs().max()) if grads else 0.0
-    lbfgs_state = opt.state_dict()["state"].get(0, {})
-
-    with torch.no_grad():
-        grbm.linear.copy_(h.to(dtype=grbm.linear.dtype))
-        grbm.quadratic.copy_(j.to(dtype=grbm.quadratic.dtype))
-
+    grad_inf_norm = max(float(bias.grad.abs().max()) for bias in biases)
+    state = optimizer.state_dict()["state"].get(0, {})
     return PseudolikelihoodFit(
+        linear=linear.detach(),
+        quadratic=quadratic.detach(),
         nlpl=last_nlpl,
         grad_inf_norm=grad_inf_norm,
-        n_iterations=int(lbfgs_state.get("n_iter", 0)),
-        n_function_evals=int(lbfgs_state.get("func_evals", 0)),
+        n_iterations=int(state.get("n_iter", 0)),
+        n_function_evals=int(state.get("func_evals", 0)),
         converged=grad_inf_norm <= tolerance_grad,
     )
 
 
-# Review NOTE: LGTM
+# ---------------------------------------------------------------------- the temperature fit -------
+
+
 @dataclass(frozen=True)
 class InverseTemperatureFit:
-    """Result of :func:`fit_inverse_temperature`: the estimate, its standard error, a flag.
+    """The estimate of :func:`fit_inverse_temperature`, its standard error and a flag, one entry
+    per model.
 
     Attributes:
-        beta: The maximum pseudolikelihood estimate of the inverse temperature — the scale
-            ``beta`` for which ``P(s) ∝ exp(-beta * H*(s))`` best explains the data, ``H*`` being
-            the model's fixed Hamiltonian. ``inf`` when no sample carries a single-spin excitation
-            (every spin sits in its lower-energy state given its neighbours — the zero-temperature
-            limit) and ``-inf`` when every spin sits in its higher-energy state; see
-            :func:`fit_inverse_temperature`.
-        beta_stderr: Sandwich (Godambe) standard error of ``beta``, treating the samples as
-            independent draws; ``nan`` for an infinite ``beta`` or a single sample.
-        converged: Whether the estimate met ``tolerance`` (an exact infinite limit counts as
-            converged); ``False`` means ``max_iter`` ran out.
+        beta (torch.Tensor): The maximum pseudolikelihood estimate of the inverse temperature,
+            shape ``(*batch)`` in ``torch.float64``: the scale for which
+            :math:`P(s) \\propto \\exp\\{-\\beta E^*(s)\\}` best explains the spins, :math:`E^*`
+            being the fixed Hamiltonian of the given biases. ``inf`` when no spin of the sample
+            is excited against its effective field (every spin in its lower-energy state, the
+            zero-temperature limit) and ``-inf`` when every spin is.
+        beta_stderr (torch.Tensor): Sandwich (Godambe) standard error of ``beta``, treating the
+            configurations as independent draws; ``nan`` for an infinite estimate or a single
+            configuration.
+        converged (torch.Tensor): Whether the estimate met ``tolerance`` (an exact infinite
+            limit counts as converged), as a boolean tensor; ``False`` means that ``max_iter``
+            ran out.
     """
 
-    beta: float
-    beta_stderr: float
-    converged: bool
+    beta: torch.Tensor
+    beta_stderr: torch.Tensor
+    converged: torch.Tensor
 
 
 def _excitation_energies(
+    graph: GraphIndex,
+    linear: torch.Tensor,
+    quadratic: torch.Tensor,
     spins: torch.Tensor,
-    grbm: GraphRestrictedBoltzmannMachine,
-    sample_chunk: int,
-    work_dtype: torch.dtype,
+    chunk: int,
 ) -> torch.Tensor:
-    """Single-spin excitation energies ``eps_i(s) = H(s) - H(s^(i)) = 2 s_i theta_i(s)``.
-
-    ``s^(i)`` is ``s`` with spin ``i`` flipped, so ``eps_i(s) > 0`` means the flip would lower
-    the energy (the spin is excited against its local field) and ``eps_i(s) < 0`` that the spin is
-    relaxed. Evaluated under the model's current parameters without autograd, in
-    ``sample_chunk``-row chunks; the result has the data's shape, in ``work_dtype`` on the model's
-    device.
+    r"""Single-spin excitation energies :math:`\epsilon_i(s) = E(s) - E(s^{(i)}) = 2 s_i
+    \theta_i(s)`, :math:`s^{(i)}` being :math:`s` with spin :math:`i` flipped: positive where the
+    flip would lower the energy (the spin is excited against its field), negative where the spin
+    is relaxed. Evaluated without autograd in float64, in ``chunk``-row chunks; the result has
+    the shape of ``spins``, on the device of the biases.
     """
-    device = grbm.linear.device
-    linear = grbm.linear.detach().to(work_dtype)
-    quadratic = grbm.quadratic.detach().to(work_dtype)
-    energies = torch.empty(spins.shape, dtype=work_dtype, device=device)
+    device, dtype = linear.device, torch.float64
+    linear, quadratic = linear.detach().to(dtype), quadratic.detach().to(dtype)
+    energies = torch.empty(spins.shape, dtype=dtype, device=device)
     with torch.no_grad():
-        for chunk_start in range(0, spins.shape[0], sample_chunk):
-            spin_chunk = spins[chunk_start : chunk_start + sample_chunk].to(
-                device=device, dtype=work_dtype
+        for start in range(0, spins.shape[-2], chunk):
+            s = spins[..., start:start + chunk, :].to(device=device, dtype=dtype)
+            energies[..., start:start + chunk, :] = 2.0 * s * _effective_fields(
+                graph, s, linear, quadratic
             )
-            theta = _local_fields(spin_chunk, linear, quadratic, grbm.edge_idx_i, grbm.edge_idx_j)
-            energies[chunk_start : chunk_start + sample_chunk] = 2.0 * spin_chunk * theta
     return energies
 
 
 def fit_inverse_temperature(
+    graph: GraphIndex,
+    linear: torch.Tensor,
+    quadratic: torch.Tensor,
     spins: torch.Tensor,
-    grbm: GraphRestrictedBoltzmannMachine,
     *,
     max_iter: int = 100,
     tolerance: float = 1e-10,
     sample_chunk: int | None = 2048,
 ) -> InverseTemperatureFit:
-    """Estimate the inverse temperature at which spin data were drawn from the model's Hamiltonian.
+    r"""Estimate the inverse temperature at which spins were sampled from the models of given
+    biases, by maximum pseudolikelihood.
 
-    Holds the model's biases fixed as the reference Hamiltonian ``H*`` and fits the single scale
-    parameter of the one-parameter exponential family ``P_beta(s) ∝ exp(-beta * H*(s))`` — the
-    inverse temperature ``beta``, in physics vocabulary — by maximum pseudolikelihood: the mean
-    per-sample negative log-pseudolikelihood (NLPL; module docstring) restricted to that family,
+    The biases are held fixed as the reference Hamiltonian :math:`E^*` of each model and the
+    single scale :math:`\beta` of the family :math:`P_\beta(s) \propto \exp\{-\beta E^*(s)\}`,
+    the inverse temperature, is fitted by maximum pseudolikelihood: the mean negative
+    log-pseudolikelihood of the sample restricted to that family,
 
-    .. code-block:: text
+    .. math::
 
-        NLPL(beta) = (1/|D|) sum_{s in D} sum_i softplus(beta * eps_i(s)),
-        eps_i(s)   = H*(s) - H*(s with spin i flipped) = 2 s_i theta_i(s),
+        \mathrm{NLPL}(\beta) = \frac{1}{M} \sum_{s} \sum_i
+        \mathrm{softplus}(\beta\, \epsilon_i(s)), \qquad
+        \epsilon_i(s) = E^*(s) - E^*(s^{(i)}) = 2 s_i \theta_i(s),
 
-    is minimized over ``beta``. The ``eps_i(s)`` are the single-spin excitation energies under
-    ``H*``: positive when flipping spin ``i`` would lower the energy (the spin is excited against
-    its local field ``theta_i``), negative when the spin is relaxed. The NLPL is a sum of softplus
-    terms of a linear function of ``beta``, hence convex — strictly so once any ``eps_i(s)`` is
-    nonzero — so the estimate is unique and needs no initialization. This is the temperature
-    estimator of Raymond, Yarkoni and Andriyash (*Global warming: Temperature estimation in
-    annealers*, Frontiers in ICT 3, 2016) — a logistic regression of every spin on its own local
-    field with one shared slope — and the torch-native counterpart of Ocean's
-    :func:`dwave.system.temperatures.maximum_pseudolikelihood_temperature`, which the plugin's
-    ``GraphRestrictedBoltzmannMachine.estimate_beta`` wraps: same objective and estimate, but
-    torch-native (runs on the model's device, exact chunking) with a standard error alongside.
-    Ocean's effective-field computation loops over samples in Python, so at QPU scale this fit is
-    orders of magnitude faster (measured ratios in ``nimbus/README.md``).
+    is minimized over :math:`\beta`. The :math:`\epsilon_i(s)` are the single-spin excitation
+    energies under :math:`E^*`, positive where flipping spin :math:`i` would lower the energy
+    (the spin is excited against its effective field :math:`\theta_i`) and negative where the
+    spin is relaxed. The NLPL is a sum of softplus terms of a linear function of :math:`\beta`,
+    hence convex, strictly so once any :math:`\epsilon_i(s)` is nonzero, so the estimate is
+    unique and needs no initialization. This is the temperature estimator of Raymond, Yarkoni
+    and Andriyash, `Global Warming: Temperature Estimation in Annealers
+    <https://doi.org/10.3389/fict.2016.00023>`_, a logistic regression of every spin on its own
+    effective field with one shared slope, and the estimate of
+    :func:`dwave.system.temperatures.maximum_pseudolikelihood_temperature`, computed in PyTorch
+    on the device of the biases, for a batch of models at once and with a standard error.
 
-    Interpretation. If the data are Boltzmann samples of ``H*`` at some inverse temperature, the
-    estimate is consistent for it. If they are not — annealer reads, a Markov chain that has not
-    equilibrated — ``beta`` measures the rate of single-spin excitations relative to ``H*``, an
-    *effective* inverse temperature, which is the quantity that decides how a model trained on
-    such samples must be rescaled before it is programmed. The model itself is never modified:
-    scale its biases by ``beta`` yourself if the calibrated Hamiltonian is wanted. The sign
-    matters — a negative estimate says the spins are anti-aligned with their fields, usually a
-    sign-convention error upstream.
+    If the spins are Boltzmann samples of :math:`E^*` at some inverse temperature, the estimate
+    is consistent for it. If they are not, such as the reads of a quantum annealer or a Markov
+    chain that has not equilibrated, :math:`\beta` measures the rate of single-spin excitations
+    relative to :math:`E^*`, an *effective* inverse temperature, which is the quantity that
+    decides how a model trained on such samples is to be rescaled before it is programmed: its
+    reciprocal is the ``prefactor`` of a :class:`~dwave.plugins.torch.samplers.DimodSampler`. A
+    negative estimate says that the spins are anti-aligned with their fields, usually a sign
+    convention error upstream.
 
-    Algorithm. The excitation energies do not depend on ``beta``, so one pass over the data
-    builds them (memory: one float64 tensor of the data's shape, plus ``sample_chunk``-bounded
-    intermediates) and every later step is an elementwise pass over that tensor. The derivative
-    ``NLPL'(beta) = (1/|D|) sum eps * sigmoid(beta * eps)`` is increasing in ``beta``, and
-    Newton's method — :func:`scipy.optimize.root_scalar` with ``method="newton"`` and the analytic
-    curvature ``NLPL''`` — finds its zero from ``beta = 0``, where the first step is the moment
-    estimate ``-2 sum eps / sum eps^2``. No bracket or bisection safeguard is needed: each term
-    ``eps * sigmoid(beta * eps)`` has a second derivative in ``beta`` with the sign of ``-beta``,
-    so ``NLPL'`` is convex on ``beta < 0`` and concave on ``beta > 0``, and Newton started at that
-    inflection point approaches the root monotonically from one side — never overshooting — with
-    quadratic convergence near the optimum. (Halley's method would save passes but can overshoot
-    on this objective, forfeiting the guarantee.) Iteration stops once a Newton step is at most
-    ``tolerance * (1 + |beta|)``; the curvature and per-sample scores for the standard error are
-    then evaluated once more, at the returned estimate.
+    The excitation energies do not depend on :math:`\beta`, so one pass over the sample builds
+    them, one float64 tensor of the shape of ``spins`` plus ``sample_chunk``-bounded
+    intermediates, and every later step is an elementwise pass over that tensor. The derivative
+    :math:`\mathrm{NLPL}'(\beta) = \frac{1}{M} \sum \epsilon\, \sigma(\beta \epsilon)` is
+    increasing in :math:`\beta`, and Newton's method with the analytic curvature finds its zero
+    from :math:`\beta = 0`, where the first step is the moment estimate
+    :math:`-2 \sum \epsilon / \sum \epsilon^2`. Each term :math:`\epsilon\, \sigma(\beta
+    \epsilon)` has a second derivative in :math:`\beta` of the sign of :math:`-\beta`, so the
+    derivative is convex on :math:`\beta < 0` and concave on :math:`\beta > 0`, and Newton
+    started at that inflection point approaches the zero monotonically from one side, never
+    overshooting, with quadratic convergence near it; no bracket is needed. The iteration of a
+    model stops once its Newton step is at most ``tolerance * (1 + |beta|)``.
 
-    Limits. The derivative crosses zero only if some ``eps_i(s)`` is positive and some negative.
-    Data with no excitation at all — every spin in its lower-energy state given its neighbours,
-    e.g. a repeated ground state — put the maximizer at ``beta = +inf`` (zero temperature), and
-    data with no relaxed spin at ``-inf``. Unlike the joint fit, which refuses separable data,
-    these limits are returned as the exact estimate (``converged=True``, ``beta_stderr=nan``):
-    they are the complete, physically meaningful answer, and calibration loops must handle them
-    because excitations are rare in low-temperature annealer reads. Data on which ``H*`` has no
-    local field anywhere (``eps ≡ 0``, e.g. an all-zero Hamiltonian) leave ``beta``
-    unidentifiable and raise :class:`ValueError`.
+    The derivative crosses zero only if some :math:`\epsilon_i(s)` is positive and some
+    negative. A sample without any excitation, every spin in its lower-energy state given its
+    neighbours, as a repeated ground state, puts the maximizer at :math:`\beta = +\infty` (zero
+    temperature), and a sample without any relaxed spin at :math:`-\infty`. These limits are
+    returned as the exact estimate, converged and with a ``nan`` standard error: they are the
+    complete, physically meaningful answer, and calibration loops must handle them, because
+    excitations are rare in low-temperature annealer reads. A sample on which :math:`E^*` has
+    no effective field anywhere (:math:`\epsilon \equiv 0`, as under an all-zero Hamiltonian)
+    leaves :math:`\beta` unidentifiable and raises :class:`ValueError`.
 
-    Standard error. The pseudolikelihood is a composite likelihood, so the estimate's sampling
-    variance takes the sandwich (Godambe) form ``Var(u) / (|D| * NLPL''(beta)^2)``, with
-    ``u_s = sum_i eps_i(s) sigmoid(beta * eps_i(s))`` the per-sample score (mean zero at the
-    optimum) and ``NLPL''`` the mean curvature. It treats the samples as independent draws; for an
-    autocorrelated Markov chain, thin the chain or scale by its effective sample size.
+    The pseudolikelihood is a composite likelihood, so the sampling variance of the estimate
+    takes the sandwich form :math:`\mathrm{Var}(u) / (M\, \mathrm{NLPL}''(\beta)^2)` with
+    :math:`u_s = \sum_i \epsilon_i(s)\, \sigma(\beta \epsilon_i(s))` the score of each
+    configuration, of mean zero at the estimate, and :math:`\mathrm{NLPL}''` the mean curvature.
+    It treats the configurations as independent draws; for an autocorrelated Markov chain, thin
+    the chain or scale by its effective sample size.
 
     Args:
-        spins (torch.Tensor): Spin data of shape (num_samples, n_nodes) with entries ±1, columns
-            in ``grbm.nodes`` order.
-        grbm (GraphRestrictedBoltzmannMachine): A fully visible model whose current biases are
-            the fixed reference Hamiltonian ``H*``; left unchanged.
-        max_iter (int): Maximum Newton updates (default=100).
-        tolerance (float): Positive relative stopping tolerance on ``beta`` (default=1e-10): the
-            iteration stops once a Newton step is at most ``tolerance * (1 + |beta|)``.
-        sample_chunk (int | None): Rows per chunk while building the excitation energies and
-            evaluating the derivatives (default=2048); ``None`` processes the whole batch in one
-            chunk.
-
-    Returns:
-        InverseTemperatureFit: The estimate, its standard error, and a convergence flag.
+        graph (GraphIndex): The graph of the models.
+        linear (torch.Tensor): Linear biases of shape ``(*batch, n_nodes)``, or ``(n_nodes,)``
+            for a single model.
+        quadratic (torch.Tensor): Quadratic biases of the edges of shape ``(*batch, n_edges)``,
+            or ``(n_edges,)``, in the order of the graph's edges.
+        spins (torch.Tensor): ``±1`` configurations of shape ``(*batch, M, n_nodes)``, ``M`` per
+            model, with one column per node in the order of the graph's nodes; or of any shape
+            ``(..., M, n_nodes)`` for a single model, one estimate per leading index.
+        max_iter (int): Maximum Newton updates. Defaults to 100.
+        tolerance (float): Relative stopping tolerance on ``beta``. Defaults to 1e-10.
+        sample_chunk (int, optional): Rows per chunk while building the excitation energies and
+            evaluating the derivatives. Defaults to 2048; ``None`` processes the whole sample at
+            once.
 
     Raises:
-        ValueError: If the model has hidden nodes, the data is not a 2-D ±1 tensor of width
-            ``grbm.n_nodes``, the batch is empty, an option is invalid, or the model's local
-            fields vanish on every sample so that ``beta`` is unidentifiable.
+        ValueError: If the biases do not hold one bias per node and per edge or are not batched
+            alike, ``spins`` are not ``±1`` values of the shape above, an option is invalid, or
+            the effective fields of some model vanish on every configuration of its sample, so
+            that its inverse temperature is unidentifiable.
+
+    Returns:
+        InverseTemperatureFit: The estimates, their standard errors and convergence flags, of
+        shape ``spins.shape[:-2]``, in ``torch.float64`` on the device of the biases.
     """
-    _validate_spins(spins, grbm)
-    if sample_chunk is not None and sample_chunk < 1:
-        raise ValueError(f"sample_chunk must be a positive int or None, got {sample_chunk}")
+    _validate(graph, linear, quadratic, spins)
+    _validate_chunk(sample_chunk)
     if max_iter < 1:
-        raise ValueError(f"max_iter must be a positive int, got {max_iter}")
-    if not (tolerance > 0.0) or tolerance == math.inf:
-        raise ValueError(f"tolerance must be a finite float > 0, got {tolerance}")
+        raise ValueError(f"max_iter must be a positive int, got {max_iter}.")
+    if not (0.0 < tolerance < math.inf):
+        raise ValueError(f"tolerance must be a finite float > 0, got {tolerance}.")
 
-    work_dtype = torch.float64
-    num_samples = spins.shape[0]
+    num_samples = spins.shape[-2]
     chunk = num_samples if sample_chunk is None else sample_chunk
-    # Review NOTE: Excitation energies is already 2x the local field.
-    energies = _excitation_energies(spins, grbm, chunk, work_dtype)
-    num_excited = int((energies > 0).sum())
-    num_relaxed = int((energies < 0).sum())
-    if num_excited == 0 and num_relaxed == 0:
+    energies = _excitation_energies(graph, linear, quadratic, spins, chunk)
+    batch_shape, device = energies.shape[:-2], energies.device
+
+    num_excited = (energies > 0).sum((-2, -1))
+    num_relaxed = (energies < 0).sum((-2, -1))
+    unidentifiable = (num_excited == 0) & (num_relaxed == 0)
+    if unidentifiable.any():
         raise ValueError(
-            "The model's local fields vanish on every sample (every single-spin excitation energy "
-            "is zero, e.g. an all-zero Hamiltonian), so the pseudolikelihood does not depend on "
-            "beta and the inverse temperature is unidentifiable."
+            "The effective fields vanish on every configuration of the sample of model(s) "
+            f"{unidentifiable.nonzero().tolist()} (every single-spin excitation energy is zero, "
+            "as under an all-zero Hamiltonian), so the pseudolikelihood does not depend on beta "
+            "and the inverse temperature is unidentifiable."
         )
-    if num_excited == 0 or num_relaxed == 0:
-        # NLPL'(beta) keeps one sign on the whole line, so the pseudolikelihood is maximized only
-        # in the limit beta -> +inf (no excitation) or -inf (no relaxed spin).
-        return InverseTemperatureFit(
-            beta=math.inf if num_excited == 0 else -math.inf, beta_stderr=math.nan, converged=True
-        )
+    finite = (num_excited > 0) & (num_relaxed > 0)
 
-    def derivatives(beta: float) -> tuple[float, float, torch.Tensor]:
-        """``NLPL'(beta)``, ``NLPL''(beta)`` and the per-sample scores, which sum to ``NLPL'``."""
-        # Review NOTE: LGTM
-        grad = 0.0
-        curvature = 0.0
-        scores = torch.empty(num_samples, dtype=work_dtype, device=energies.device)
-        for chunk_start in range(0, num_samples, chunk):
-            eps = energies[chunk_start : chunk_start + chunk]
-            z = beta * eps
-            sig = torch.sigmoid(z)
-            # Review NOTE: 1st derivative LGTM (= chunk_scores)
-            #   crap name tbh, should just be derivative
-            chunk_scores = (eps * sig).sum(dim=1)
-            scores[chunk_start : chunk_start + chunk] = chunk_scores
-            # Review NOTE: grad LGTM too
-            grad += float(chunk_scores.sum())
+    def derivatives(beta: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """``NLPL'(beta)`` and ``NLPL''(beta)`` of every model, and the scores of the
+        configurations, whose means are the first derivatives."""
+        gradient = torch.zeros(batch_shape, dtype=torch.float64, device=device)
+        curvature = torch.zeros(batch_shape, dtype=torch.float64, device=device)
+        scores = torch.empty((*batch_shape, num_samples), dtype=torch.float64, device=device)
+        scale = beta.unsqueeze(-1).unsqueeze(-1)
+        for start in range(0, num_samples, chunk):
+            eps = energies[..., start:start + chunk, :]
+            z = scale * eps
+            sigmoid = torch.sigmoid(z)
+            chunk_scores = (eps * sigmoid).sum(-1)
+            scores[..., start:start + chunk] = chunk_scores
+            gradient += chunk_scores.sum(-1)
             # sigmoid(z) * sigmoid(-z) is the logistic variance, accurate where 1 - sigmoid(z)
-            # would cancel.
-            # Review NOTE: 2nd derivative LGTM
-            curvature += float((eps.square() * sig * torch.sigmoid(-z)).sum())
-        # Review NOTE: summed in loop, correctly average by sample size
-        return grad / num_samples, curvature / num_samples, scores
+            # would cancel
+            curvature += (eps.square() * sigmoid * torch.sigmoid(-z)).sum((-2, -1))
+        return gradient / num_samples, curvature / num_samples, scores
 
-    # Review NOTE: LGTM
-    def newton_derivatives(beta: float) -> tuple[float, float]:
-        """The ``(f, fprime)`` pair for SciPy's Newton: ``NLPL'`` and ``NLPL''`` at ``beta``."""
-        grad, curvature, _ = derivatives(beta)
-        return grad, curvature
+    # Newton's method from zero on the models with a finite estimate; the others are held at zero
+    # while the iteration runs and receive their limits afterwards
+    beta = torch.zeros(batch_shape, dtype=torch.float64, device=device)
+    converged = ~finite
+    active = finite.clone()
+    for _ in range(max_iter):
+        gradient, curvature, _ = derivatives(beta)
+        # A vanishing curvature means saturated sigmoids; such a model cannot be advanced
+        stuck = active & (curvature <= 0)
+        active &= ~stuck
+        step = torch.where(active, gradient / curvature.clamp_min(torch.finfo(torch.float64).tiny), 0.0)
+        beta = beta - step
+        done = active & (step.abs() <= tolerance * (1 + beta.abs()))
+        converged |= done
+        active &= ~done
+        if not active.any():
+            break
 
-    result = root_scalar(
-        newton_derivatives,
-        x0=0.0,
-        fprime=True,
-        method="newton",
-        xtol=tolerance,
-        rtol=tolerance,
-        maxiter=max_iter,
-    )
-    beta = float(result.root)
-    _, curvature, scores = derivatives(beta)  # at the returned root, for the standard error
+    _, curvature, scores = derivatives(beta)
     if num_samples < 2:
-        beta_stderr = math.nan
-    elif curvature > 0.0:
-        beta_stderr = math.sqrt(float(scores.var(correction=1)) / num_samples) / curvature
+        beta_stderr = torch.full(batch_shape, math.nan, dtype=torch.float64, device=device)
     else:
-        beta_stderr = math.inf
+        beta_stderr = (scores.var(-1, correction=1) / num_samples).sqrt() / curvature
+    limits = torch.where(num_excited == 0, math.inf, -math.inf)
     return InverseTemperatureFit(
-        beta=beta, beta_stderr=beta_stderr, converged=bool(result.converged)
+        beta=torch.where(finite, beta, limits),
+        beta_stderr=torch.where(finite, beta_stderr, math.nan),
+        converged=converged,
     )
-
-
-if __name__ == "__main__":
-
-    def demo():
-        # Smoke demo (unseeded — runs differ in the last digits by design): recover a planted
-        # Hamiltonian on the complete 4-node graph from exact Boltzmann samples (enumerate all 16
-        # configurations, sample from softmax(-H)); then hold the planted Hamiltonian fixed and
-        # recover the inverse temperature of a second draw taken at beta = 1.7.
-        nodes = list(range(4))
-        edges = [(a, b) for a in nodes for b in nodes if a < b]
-        h_true = 0.5 * (2 * torch.rand(len(nodes)) - 1)
-        j_true = 1.0 * (2 * torch.rand(len(edges)) - 1)
-        truth = GraphRestrictedBoltzmannMachine(
-            nodes,
-            edges,
-            linear={n: float(v) for n, v in zip(nodes, h_true, strict=True)},
-            quadratic={e: float(v) for e, v in zip(edges, j_true, strict=True)},
-        )
-
-        ints = torch.arange(2 ** len(nodes))
-        configs = ((ints.unsqueeze(1) >> torch.arange(len(nodes))) & 1).float() * 2 - 1
-        with torch.no_grad():
-            energies = truth(configs)
-        data = configs[torch.multinomial(torch.softmax(-energies, dim=0), 50_000, replacement=True)]
-
-        model = GraphRestrictedBoltzmannMachine(nodes, edges)
-        result = fit_pseudolikelihood(data, model)
-        h_mae = float((model.linear.detach() - h_true).abs().mean())
-        j_mae = float((model.quadratic.detach() - j_true).abs().mean())
-        print(f"fit: {result}")
-        print(f"mean absolute error: linear {h_mae:.4f}, quadratic {j_mae:.4f}")
-
-        beta_true = 1.7
-        cold_probs = torch.softmax(-beta_true * energies, dim=0)
-        cold = configs[torch.multinomial(cold_probs, 50_000, replacement=True)]
-        temperature = fit_inverse_temperature(cold, truth)
-        print(f"inverse temperature: {temperature}")
-        print(
-            f"planted beta {beta_true}, estimate {temperature.beta:.4f} ± {temperature.beta_stderr:.4f}"
-        )
-
-    demo()
