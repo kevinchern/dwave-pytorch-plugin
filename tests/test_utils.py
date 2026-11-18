@@ -1,4 +1,4 @@
-# Copyright 2025 D-Wave
+# Copyright 2026 D-Wave
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -76,7 +76,7 @@ class TestToBqm(unittest.TestCase):
             )
 
         with self.subTest("Prefactor"):
-            bqm = to_bqm(graph, linear, quadratic, prefactor=2.0)
+            bqm = to_bqm(graph, linear, quadratic, scalar=2.0)
             self.assertListEqual(
                 [bqm.get_linear(v) for v in graph.nodes], (2 * linear).detach().tolist()
             )

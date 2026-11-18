@@ -1,4 +1,4 @@
-# Copyright 2025 D-Wave
+# Copyright 2026 D-Wave
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ import numpy as np
 import torch
 from dimod import BinaryQuadraticModel
 
-from dwave.plugins.torch.graph import randspin
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
+from dwave.plugins.torch.samplers.block_spin_sampler import BlockSampler
 from dwave.plugins.torch.utils import to_bqm
 
 
@@ -38,7 +38,8 @@ def model_to_bqm(bm: GRBM) -> BinaryQuadraticModel:
 
 def randspins(*shape, seed: int = 0) -> torch.Tensor:
     """Random spins of the given shape, drawn from a generator seeded with ``seed``."""
-    return randspin(shape, generator=torch.Generator().manual_seed(seed)).float()
+    generator = torch.Generator().manual_seed(seed)
+    return (2 * torch.randint(0, 2, shape, generator=generator) - 1).float()
 
 
 def enumerate_walsh(n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -91,11 +92,11 @@ class RecordedBernoulli:
 
 
 def constant_randspin(value: float = 1.0):
-    """Patches the block sampler's random spin initialization to return spins equal to ``value``."""
-    return unittest.mock.patch(
-        "dwave.plugins.torch.samplers.block_spin_sampler.randspin",
-        side_effect=lambda size, **kwargs: torch.full(tuple(size), value),
-    )
+    """Patches the block sampler's random spin draws to return spins equal to ``value``."""
+    def constant_spins(self, *shape, device=None, dtype=torch.float32):
+        return torch.full(shape, value, dtype=dtype, device=device)
+
+    return unittest.mock.patch.object(BlockSampler, "_random_spins", new=constant_spins)
 
 
 def exact_update_probabilities(graph, x, linear, quadratic, block, beta, criterion) -> torch.Tensor:

@@ -278,7 +278,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
         dense = bm.dense_quadratic(bm.quadratic)
         torch.testing.assert_close(dense[bm.edge_idx_i, bm.edge_idx_j], bm.quadratic)
         self.assertEqual(4, int((dense != 0).sum()))
-        symmetric = bm.symmetric_coupling(bm.quadratic)
+        symmetric = bm.symmetric_quadratic(bm.quadratic)
         torch.testing.assert_close(symmetric, symmetric.T)
         torch.testing.assert_close(symmetric.diagonal(), torch.zeros(4))
         torch.testing.assert_close(symmetric[bm.edge_idx_i, bm.edge_idx_j], bm.quadratic)
@@ -286,7 +286,7 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
 
         with self.subTest("Couplings of other quadratic biases"):
             torch.testing.assert_close(bm.dense_quadratic(2 * bm.quadratic), 2 * dense)
-            torch.testing.assert_close(bm.symmetric_coupling(2 * bm.quadratic), 2 * symmetric)
+            torch.testing.assert_close(bm.symmetric_quadratic(2 * bm.quadratic), 2 * symmetric)
 
         with self.subTest("Only the per-edge biases are stored"):
             self.assertEqual(bm.n_nodes + bm.n_edges, sum(p.numel() for p in bm.parameters()))
@@ -308,11 +308,13 @@ class TestGraphRestrictedBoltzmannMachine(unittest.TestCase):
             torch.testing.assert_close(self.bm.effective_field(spins, idx=idx), expected[:, [2, 0]])
 
         with self.subTest("Precomputed coupling matrix"):
-            coupling = self.bm.symmetric_coupling(self.bm.quadratic)
+            coupling = self.bm.symmetric_quadratic(self.bm.quadratic)
             torch.testing.assert_close(self.bm.effective_field(spins, coupling=coupling), expected)
             torch.testing.assert_close(
                 self.bm.effective_field(spins, idx=idx, coupling=coupling), expected[:, [2, 0]]
             )
+            with self.assertRaisesRegex(ValueError, "not both"):
+                self.bm.effective_field(spins, quadratic=self.bm.quadratic, coupling=coupling)
 
         with self.subTest("Explicit biases override the parameters"):
             torch.testing.assert_close(

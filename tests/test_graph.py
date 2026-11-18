@@ -1,4 +1,4 @@
-# Copyright 2025 D-Wave
+# Copyright 2026 D-Wave
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,27 +17,9 @@ import unittest
 
 import torch
 
-from dwave.plugins.torch.graph import GraphIndex, randspin
+from dwave.plugins.torch.graph import GraphIndex
 from dwave.plugins.torch.utils import to_bqm
 from tests.helper_functions import randspins
-
-
-class TestRandspin(unittest.TestCase):
-    def test_randspin(self):
-        spins = randspin((2000,), generator=torch.Generator().manual_seed(0))
-        self.assertEqual(torch.int64, spins.dtype)
-        self.assertSetEqual({-1, 1}, set(spins.unique().tolist()))
-
-        with self.subTest("Keyword arguments reach torch.randint"):
-            spins = randspin((3, 4), dtype=torch.float32, device="meta")
-            self.assertEqual((3, 4), tuple(spins.shape))
-            self.assertEqual(torch.float32, spins.dtype)
-            self.assertEqual("meta", spins.device.type)
-
-        with self.subTest("Seeded draws are reproducible"):
-            first = randspin((5, 5), generator=torch.Generator().manual_seed(3))
-            second = randspin((5, 5), generator=torch.Generator().manual_seed(3))
-            self.assertTrue(torch.equal(first, second))
 
 
 class TestGraphIndex(unittest.TestCase):
@@ -125,7 +107,7 @@ class TestGraphIndex(unittest.TestCase):
 
         with self.subTest("Subsets of nodes and precomputed couplings"):
             idx = torch.tensor([2, 0])
-            coupling = graph.symmetric_coupling(quadratic)
+            coupling = graph.symmetric_quadratic(quadratic)
             torch.testing.assert_close(
                 graph.effective_field(spins, linear=linear, coupling=coupling, idx=idx), fields[..., idx]
             )
@@ -157,6 +139,8 @@ class TestGraphIndex(unittest.TestCase):
         with self.subTest("Couplings are required"):
             with self.assertRaisesRegex(ValueError, "`quadratic` or `coupling`"):
                 graph.effective_field(spins, linear=linear)
+            with self.assertRaisesRegex(ValueError, "not both"):
+                graph.effective_field(spins, linear=linear, quadratic=quadratic, coupling=coupling)
 
     def test_edgeless(self):
         graph = GraphIndex([0, 1], [])
@@ -174,6 +158,10 @@ class TestGraphIndex(unittest.TestCase):
             GraphIndex("ab", [("a", "a")])
         with self.assertRaisesRegex(ValueError, "Duplicate edges"):
             GraphIndex("ab", [("a", "b"), ("b", "a")])
+        with self.assertRaisesRegex(TypeError, "Nodes must be hashable"):
+            GraphIndex([[0], [1]], [])
+        with self.assertRaisesRegex(TypeError, "Edge endpoints must be hashable"):
+            GraphIndex([0, 1], [([0], 1)])
 
 
 if __name__ == "__main__":

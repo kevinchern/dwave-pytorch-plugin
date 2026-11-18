@@ -23,7 +23,7 @@ from parameterized import parameterized
 
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine as GRBM
 from dwave.plugins.torch.samplers.block_spin_sampler import BlockSampler
-from dwave.plugins.torch.graph import GraphIndex, randspin
+from dwave.plugins.torch.graph import GraphIndex
 from dwave.plugins.torch.utils import sampleset_to_tensor
 from tests.helper_functions import (RecordedBernoulli, constant_randspin, exact_update_probabilities,
                                     model_to_bqm, replay_sweep, set_weights)
@@ -233,7 +233,7 @@ class TestBlockSampler(unittest.TestCase):
         model = five_cycle_with_chord()
         sampler = BlockSampler(model, None, 1, [1.0], criterion)
         linear, quadratic = model.linear.detach(), model.quadratic.detach()
-        coupling = model.symmetric_coupling(model.quadratic).detach()
+        coupling = model.symmetric_quadratic(model.quadratic).detach()
 
         x = SPINS.clone()
         with RecordedBernoulli() as bernoulli:
@@ -269,7 +269,7 @@ class TestBlockSampler(unittest.TestCase):
 
             bss2 = BlockSampler(grbm, crayon, 10, [1.0], pac, seed=1)
             for beta in schedule:
-                bss2._step(beta, bss2.state, grbm.linear, grbm.symmetric_coupling(grbm.quadratic))
+                bss2._step(beta, bss2.state, grbm.linear, grbm.symmetric_quadratic(grbm.quadratic))
 
             self.assertListEqual(bss1.state.tolist(), bss2.state.tolist())
             self.assertListEqual(samples.tolist(), bss1.state.tolist())
@@ -443,7 +443,7 @@ class TestBlockSampler(unittest.TestCase):
         sampler = BlockSampler(model, None, 4, [1.0], seed=11)
         generator = torch.Generator().manual_seed(11)
         with self.subTest("The initial states are the first draws of the seeded generator"):
-            expected = randspin((4, model.n_nodes), generator=generator).float()
+            expected = (2 * torch.randint(0, 2, (4, model.n_nodes), generator=generator) - 1).float()
             torch.testing.assert_close(sampler.state, expected)
         with self.subTest("Sweeps continue that stream instead of restarting it from the seed"):
             torch.testing.assert_close(

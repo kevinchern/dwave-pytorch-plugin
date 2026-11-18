@@ -1,4 +1,4 @@
-# Copyright 2025 D-Wave
+# Copyright 2026 D-Wave
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,15 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Integer indexing of graphs and Ising energies under explicit biases: the base of the models,
-layers and samplers."""
+"""Integer indexing of graphs and evaluation of Ising energies given biases: the base of the
+models, layers and samplers."""
 from __future__ import annotations
 
-from typing import Hashable, Iterable, Sequence
+from typing import Hashable, Iterable
 
 import torch
 
-__all__ = ["GraphIndex", "randspin"]
+__all__ = ["GraphIndex"]
 
 
 class GraphIndex(torch.nn.Module):
@@ -42,6 +42,7 @@ class GraphIndex(torch.nn.Module):
         edges (Iterable[tuple[Hashable, Hashable]]): Edges of the graph.
 
     Raises:
+        TypeError: If a node or an edge endpoint is not hashable.
         ValueError: If ``nodes`` contains duplicates, an edge references an unknown node, an
             edge is a self-loop, or an edge is duplicated (in either orientation).
 
@@ -68,7 +69,10 @@ class GraphIndex(torch.nn.Module):
         super().__init__()
         self.nodes = tuple(nodes)
         self.edges = tuple(tuple(edge) for edge in edges)
-        self.node_to_idx = {node: idx for idx, node in enumerate(self.nodes)}
+        try:
+            self.node_to_idx = {node: idx for idx, node in enumerate(self.nodes)}
+        except TypeError:
+            raise TypeError("Nodes must be hashable.") from None
         if len(self.node_to_idx) != self.n_nodes:
             raise ValueError("`nodes` contains duplicate entries.")
         try:
@@ -76,7 +80,11 @@ class GraphIndex(torch.nn.Module):
                 [[self.node_to_idx[u], self.node_to_idx[v]] for u, v in self.edges],
                 dtype=torch.long,
             ).reshape(-1, 2)
+        except TypeError:
+            raise TypeError("Edge endpoints must be hashable.") from None
         except KeyError as err:
+            # The lookup is an implementation detail: `from None` keeps the KeyError out of
+            # the traceback
             raise ValueError(f"Edge endpoint {err.args[0]!r} is not a node.") from None
 
         loops = endpoints[:, 0] == endpoints[:, 1]
@@ -85,9 +93,11 @@ class GraphIndex(torch.nn.Module):
                 f"Self-loops are not allowed. Edges with self-loops: "
                 f"{[self.edges[k] for k in loops.nonzero().flatten().tolist()]}"
             )
+        # Both orientations of every edge are keys
         self.edge_to_idx = {
             edge: k for k, (u, v) in enumerate(self.edges) for edge in ((u, v), (v, u))
         }
+        # Twice the number of edges, as both orientations are keys, unless an edge is repeated
         if len(self.edge_to_idx) != 2 * self.n_edges:
             raise ValueError("Duplicate edges are not allowed.")
 
@@ -95,6 +105,7 @@ class GraphIndex(torch.nn.Module):
         self.register_buffer("edge_idx_j", endpoints.max(1).values, persistent=False)
 
     def extra_repr(self) -> str:
+        """The numbers of nodes and edges, shown in the representation of the module."""
         return f"n_nodes={self.n_nodes}, n_edges={self.n_edges}"
 
     @property
@@ -141,7 +152,7 @@ class GraphIndex(torch.nn.Module):
         coupling[..., self.edge_idx_i, self.edge_idx_j] = quadratic
         return coupling
 
-    def symmetric_coupling(self, quadratic: torch.Tensor) -> torch.Tensor:
+    def symmetric_quadratic(self, quadratic: torch.Tensor) -> torch.Tensor:
         """The symmetrized coupling matrix :math:`J + J^T` of per-edge quadratic biases, whose
         row ``k`` holds the couplings of node ``k`` to every other node.
 
@@ -201,7 +212,7 @@ class GraphIndex(torch.nn.Module):
             torch.Tensor: Energies of shape ``x.shape[:-1]``.
         """
         self._check_linear(linear, quadratic.shape[:-1])
-        x, squeeze = self._align_spins(x, linear)
+        x, squeeze = self._align_shapes(x, linear)
         coupling = self.dense_quadratic(quadratic)
         energy = (x @ linear.unsqueeze(-1)).squeeze(-1) + ((x @ coupling) * x).sum(-1)
         return energy.squeeze(-1) if squeeze else energy
@@ -230,13 +241,13 @@ class GraphIndex(torch.nn.Module):
                 :attr:`edges`. Required unless ``coupling`` is given.
             idx (torch.Tensor, optional): Indices of the nodes whose fields are returned. If
                 ``None``, the fields of all nodes are returned. Defaults to ``None``.
-            coupling (torch.Tensor, optional): The :meth:`symmetric_coupling` of ``quadratic``,
+            coupling (torch.Tensor, optional): The :meth:`symmetric_quadratic` of ``quadratic``,
                 which a caller evaluating the fields of several blocks of nodes can pass to avoid
                 rebuilding it. Defaults to ``None``, i.e. it is built from ``quadratic``.
 
         Raises:
-            ValueError: If neither ``quadratic`` nor ``coupling`` is given, ``linear`` does not
-                hold one bias per node, or the biases are not batched alike.
+            ValueError: If neither or both of ``quadratic`` and ``coupling`` are given, ``linear``
+                does not hold one bias per node, or the biases are not batched alike.
 
         Returns:
             torch.Tensor: Effective fields of shape ``(..., n_nodes)`` or ``(..., len(idx))``.
@@ -244,9 +255,11 @@ class GraphIndex(torch.nn.Module):
         if coupling is None:
             if quadratic is None:
                 raise ValueError("Either `quadratic` or `coupling` is required.")
-            coupling = self.symmetric_coupling(quadratic)
+            coupling = self.symmetric_quadratic(quadratic)
+        elif quadratic is not None:
+            raise ValueError("Give either `quadratic` or `coupling`, not both.")
         self._check_linear(linear, coupling.shape[:-2])
-        x, squeeze = self._align_spins(x, linear)
+        x, squeeze = self._align_shapes(x, linear)
         spins = torch.nan_to_num(x, nan=0.0)
         fields = linear if linear.ndim == 1 else linear.unsqueeze(-2)
         if idx is not None:
@@ -280,8 +293,11 @@ class GraphIndex(torch.nn.Module):
             )
 
     @staticmethod
-    def _align_spins(x: torch.Tensor, linear: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    def _align_shapes(x: torch.Tensor, linear: torch.Tensor) -> tuple[torch.Tensor, bool]:
         """Insert a sample dimension into ``x`` when it holds one configuration per batched model.
+
+        This handles the case of the docstring of :meth:`energy` where the ``M`` dimension is
+        missing, i.e. ``M = 1`` with spins of shape ``(*batch, n_nodes)``.
 
         Returns:
             tuple[torch.Tensor, bool]: The spins with a sample dimension, and whether one was
@@ -290,18 +306,3 @@ class GraphIndex(torch.nn.Module):
         if linear.ndim > 1 and x.ndim == linear.ndim:
             return x.unsqueeze(-2), True
         return x, False
-
-
-def randspin(size: Sequence[int], **kwargs) -> torch.Tensor:
-    """Random spins, i.e. ``±1`` values drawn uniformly and independently.
-
-    Args:
-        size (Sequence[int]): Shape of the output tensor.
-        **kwargs: Keyword arguments of :func:`torch.randint`, such as ``generator``, ``device``
-            and ``dtype``.
-
-    Returns:
-        torch.Tensor: A tensor of ``±1`` values of the given shape, of ``torch.int64`` unless
-        ``dtype`` is given.
-    """
-    return 2 * torch.randint(0, 2, size, **kwargs) - 1

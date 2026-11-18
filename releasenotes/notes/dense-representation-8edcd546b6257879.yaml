@@ -42,7 +42,7 @@ features:
     ``GraphRestrictedBoltzmannMachine`` and ``Ising``. It validates the graph and provides the
     graph attributes ``nodes``, ``edges``, ``node_to_idx``, ``edge_to_idx``, ``n_nodes`` and
     ``n_edges``, the buffers ``edge_idx_i`` and ``edge_idx_j``, the coupling matrices
-    ``dense_quadratic`` and ``symmetric_coupling`` of per-edge biases, and the Ising ``energy``
+    ``dense_quadratic`` and ``symmetric_quadratic`` of per-edge biases, and the Ising ``energy``
     and ``effective_field`` of spins under explicitly given per-edge biases, for a single model or
     a batch of models on the graph. ``dwave.plugins.torch.graph`` holds the graph core and
     imports nothing but PyTorch, and ``dwave.plugins.torch.utils`` holds the dimod conversions.
@@ -151,8 +151,8 @@ upgrade:
   - |
     ``pseudo_kl_divergence_loss`` moved from ``dwave.plugins.torch.models.losses`` to
     ``dwave.plugins.torch.nn.functional`` and the ``models.losses`` package is removed.
-    ``randspin`` moved from ``dwave.plugins.torch.tensor`` to ``dwave.plugins.torch.graph`` and
-    the ``tensor`` module is removed. ``dwave.plugins.torch.nn.modules.ising`` is a module holding
+    ``randspin`` and the ``dwave.plugins.torch.tensor`` module are removed; it was
+    ``2 * torch.randint(0, 2, size) - 1``. ``dwave.plugins.torch.nn.modules.ising`` is a module holding
     ``Ising``; the statistics ``Mean`` and ``SquaredMMD`` are in
     ``dwave.plugins.torch.nn.modules.statistics``. All of these remain exported by
     ``dwave.plugins.torch.nn``.

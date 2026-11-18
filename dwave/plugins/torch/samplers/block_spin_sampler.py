@@ -20,7 +20,7 @@ from typing import Literal
 import networkx as nx
 import torch
 
-from dwave.plugins.torch.graph import GraphIndex, randspin
+from dwave.plugins.torch.graph import GraphIndex
 from dwave.plugins.torch.models.boltzmann_machine import GraphRestrictedBoltzmannMachine
 from dwave.plugins.torch.samplers.base import TorchSampler
 
@@ -206,7 +206,7 @@ class BlockSampler(TorchSampler):
         """
         n_nodes = self.model.n_nodes
         if initial_states is None:
-            return randspin((num_chains, n_nodes), generator=self._generator).float()
+            return self._random_spins(num_chains, n_nodes, device="cpu")
 
         initial_states = torch.as_tensor(initial_states)
         if tuple(initial_states.shape) != (num_chains, n_nodes):
@@ -235,6 +235,18 @@ class BlockSampler(TorchSampler):
     def seed(self) -> int | None:
         """Seed of the sampler's random number generator, or ``None``."""
         return self._seed
+
+    def _random_spins(
+        self,
+        *shape: int,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        """Uniformly random ``±1`` spins of the given shape on ``device``, drawn with the
+        sampler's generator for that device (see :meth:`_rng`), in ``dtype``.
+        """
+        spins = torch.randint(0, 2, shape, generator=self._rng(device), device=device)
+        return (2 * spins - 1).to(dtype)
 
     def _rng(self, device: torch.device | None = None) -> torch.Generator | None:
         """The sampler's random number generator for draws on ``device`` (by default the device of
@@ -367,7 +379,7 @@ class BlockSampler(TorchSampler):
             of shape ``(..., num_samples, n_nodes)``.
         """
         model = self._require_model()
-        linear, coupling = model.linear, model.symmetric_coupling(model.quadratic)
+        linear, coupling = model.linear, model.symmetric_quadratic(model.quadratic)
         if x is None:
             for beta in self.schedule:
                 self._step(beta, self.state, linear, coupling)
@@ -379,7 +391,7 @@ class BlockSampler(TorchSampler):
         x = x.repeat_interleave(num_samples, 0)
         clamp_mask = clamp_mask.repeat_interleave(num_samples, 0)
 
-        random_spins = randspin(x.shape, generator=self._rng(x.device), device=x.device).to(x.dtype)
+        random_spins = self._random_spins(*x.shape, device=x.device, dtype=x.dtype)
         state = torch.where(clamp_mask, x, random_spins)
         for beta in self.schedule:
             self._step(beta, state, linear, coupling, clamp_mask, x)
@@ -412,12 +424,10 @@ class BlockSampler(TorchSampler):
             raise ValueError("`num_samples` should be a positive integer.")
         batch_shape = self._validate_biases(linear, quadratic)
         linear = linear.detach()
-        coupling = self.model.symmetric_coupling(quadratic.detach())
-        state = randspin(
-            (*batch_shape, num_samples, self.model.n_nodes),
-            generator=self._rng(linear.device),
-            device=linear.device,
-        ).to(linear.dtype)
+        coupling = self.model.symmetric_quadratic(quadratic.detach())
+        state = self._random_spins(
+            *batch_shape, num_samples, self.model.n_nodes, device=linear.device, dtype=linear.dtype
+        )
         for beta in self.schedule:
             self._step(beta, state, linear, coupling)
         return state

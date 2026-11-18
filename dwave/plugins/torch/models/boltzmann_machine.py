@@ -282,24 +282,25 @@ class GraphRestrictedBoltzmannMachine(GraphIndex):
             idx (torch.Tensor, optional): Indices of the nodes whose fields are returned. If
                 ``None``, the fields of all nodes are returned. Defaults to ``None``.
             coupling (torch.Tensor, optional): The
-                :meth:`~dwave.plugins.torch.graph.GraphIndex.symmetric_coupling` matrix of the
+                :meth:`~dwave.plugins.torch.graph.GraphIndex.symmetric_quadratic` matrix of the
                 quadratic biases, which a caller evaluating the fields of several blocks of nodes
                 can pass to avoid rebuilding it. Defaults to ``None``, i.e. it is built.
 
         Raises:
-            ValueError: If explicitly given biases do not hold one bias per node or per edge, or
-                are not batched like the biases they are combined with, e.g. a batch of
-                ``linear`` biases with the model's single set of quadratic biases.
+            ValueError: If explicitly given biases do not hold one bias per node or per edge, are
+                not batched like the biases they are combined with, e.g. a batch of ``linear``
+                biases with the model's single set of quadratic biases, or both ``quadratic``
+                and ``coupling`` are given.
 
         Returns:
             torch.Tensor: Effective fields of shape (..., N) or (..., ``len(idx)``).
         """
+        if linear is None:
+            linear = self.linear
+        if quadratic is None and coupling is None:
+            quadratic = self.quadratic
         return super().effective_field(
-            x,
-            linear=self.linear if linear is None else linear,
-            quadratic=self.quadratic if quadratic is None else quadratic,
-            idx=idx,
-            coupling=coupling,
+            x, linear=linear, quadratic=quadratic, idx=idx, coupling=coupling
         )
 
     def sufficient_statistics(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
