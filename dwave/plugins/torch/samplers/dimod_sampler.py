@@ -40,8 +40,8 @@ class DimodSampler(TorchSampler):
     :meth:`sample_biases` one call per model.
 
     Args:
-        model (GraphIndex): The model to sample from, or the graph module on whose graph explicit
-            biases are sampled.
+        model (GraphIndex): The model to sample from, or the graph module (for example an Ising
+            layer) on whose graph explicit biases are sampled.
         sampler (dimod.Sampler): Dimod sampler.
         prefactor (float): The prefactor for which the Hamiltonian is scaled by. This quantity
             is typically the temperature at which the sampler operates at. Standard CPU-based

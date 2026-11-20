@@ -41,8 +41,8 @@ class BlockSampler(TorchSampler):
     returns them. Conditional sampling (:meth:`sample` with partially observed spins) runs on a
     temporary state and leaves the persistent chains untouched. :meth:`sample_biases` samples a
     batch of Ising models given by their biases on the same graph with one matrix product per
-    block for the whole batch, and is available whatever the sampler is bound to, for example a
-    bare :class:`~dwave.plugins.torch.graph.GraphIndex`.
+    block for the whole batch, and is available whatever the sampler is bound to, for example an
+    :class:`~dwave.plugins.torch.nn.Ising` layer.
 
     Block-Gibbs and Block-Metropolis obey detailed balance and are ergodic methods at finite
     nonzero temperature which, at fixed parameters, converge upon Boltzmann distributions.
@@ -51,8 +51,8 @@ class BlockSampler(TorchSampler):
     condition can be slower. Block-Gibbs represents best practice for independent sampling.
 
     Args:
-        model (GraphIndex): The model to sample from, or the graph module on whose graph explicit
-            biases are sampled.
+        model (GraphIndex): The model to sample from, or the graph module (for example an Ising
+            layer) on whose graph explicit biases are sampled.
         colouring (Callable[[Hashable], Hashable], optional): A function mapping every node of
             ``model`` to its colour; nodes of one colour form a block and adjacent nodes must
             have different colours. If ``None``, a greedy colouring is computed. Defaults to

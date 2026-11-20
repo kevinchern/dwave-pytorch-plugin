@@ -25,6 +25,8 @@ features:
     fits a fully visible model in place. See ``examples/pseudolikelihood.py``.
 upgrade:
   - |
-    ``GraphRestrictedBoltzmannMachine.estimate_beta`` is computed by ``fit_inverse_temperature``
-    and no longer calls ``dwave.system.temperatures``; the estimate is the same, computed in
-    float64 on the model's device.
+    ``GraphRestrictedBoltzmannMachine.estimate_beta`` and ``Ising.estimate_betas`` are computed
+    by ``fit_inverse_temperature`` and no longer call ``dwave.system.temperatures``; the
+    estimates are the same, computed in float64 on the model's device, for all models of a batch
+    at once. ``Ising.estimate_betas`` returns a ``torch.float64`` tensor and ``inf`` or ``-inf``
+    for a model none or all of whose sampled spins are excited against their effective fields.

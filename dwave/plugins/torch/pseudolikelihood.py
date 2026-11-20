@@ -39,7 +39,8 @@ Three functions share the objective:
   :math:`E^*` and minimizes it over the single scale :math:`\beta` of the family
   :math:`P_\beta(s) \propto \exp\{-\beta E^*(s)\}`, the inverse temperature at which the spins
   were sampled, by Newton's method, for a batch of models at once and with a standard error.
-  :meth:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine.estimate_beta` wraps it.
+  :meth:`~dwave.plugins.torch.models.GraphRestrictedBoltzmannMachine.estimate_beta` and
+  :meth:`~dwave.plugins.torch.nn.Ising.estimate_betas` wrap it.
 
 The two fits compose: on data drawn at inverse temperature :math:`\beta` from :math:`E^*`, the
 joint fit recovers :math:`\beta E^*` while the one-parameter fit against :math:`E^*` recovers

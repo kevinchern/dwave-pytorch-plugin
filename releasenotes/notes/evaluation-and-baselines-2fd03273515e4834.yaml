@@ -13,13 +13,17 @@ features:
     grow with the dimension, and ``kernel_means`` builds the per-profile kernel means of every
     loss from it.
   - |
-    ``maximum_mean_discrepancy_loss(x, y, alpha=None, block_size=None)`` and
-    ``MaximumMeanDiscrepancyLoss(alpha=None, block_size=None)`` now estimate the squared MMD under
-    every kernel of the battery at once and return one unbiased estimate per profile (entry 0 the
-    headline, entry ``k`` the order-``k`` kernel), evaluated at the real distance
-    ``(dim - <x, y>) / 2`` so that hard spins give the exact estimate and soft spins in ``[-1, 1]``
-    a smooth surrogate with gradients to both samples. Kernel weights ``alpha`` over the orders
-    make the headline the corresponding alpha row; they are a buffer of the modules.
+    ``maximum_mean_discrepancy_loss(x, y, alpha=None, block_size=None)``,
+    ``MaximumMeanDiscrepancyLoss(alpha=None, block_size=None)`` and the ``SquaredMMD(alpha=None)``
+    statistic of the ``Ising`` layer now estimate the squared MMD under every kernel of the
+    battery at once and return one unbiased estimate per profile (entry 0 the headline, entry
+    ``k`` the order-``k`` kernel), evaluated at the real distance ``(dim - <x, y>) / 2`` so that
+    hard spins give the exact estimate and soft spins in ``[-1, 1]`` a smooth surrogate with
+    gradients to both samples. Kernel weights ``alpha`` over the orders make the headline the
+    corresponding alpha row; they are a buffer of the modules. ``SquaredMMD`` accepts a soft
+    reference sample and batches of sample sets, and its leave-one-out values are closed form in
+    the row means of the kernel matrices, so the score-function gradient of ``expectation`` costs
+    one sweep of ``KravchukSums``.
 upgrade:
   - |
     ``Kernel`` and ``GaussianKernel`` (the Euclidean Gaussian kernel with a data-dependent
@@ -28,11 +32,20 @@ upgrade:
     Gaussian bandwidth ``sqrt(dim)`` is set by the dimension. ``maximum_mean_discrepancy_loss``
     no longer takes a kernel: it takes two ``(n, dim)`` samples of hard or soft spins in
     ``[-1, 1]`` (items with several feature dimensions are flattened by the caller) and returns a
-    ``(dim + 1,)`` tensor instead of a scalar, so a loss on its headline is ``loss[0]``;
-    ``MaximumMeanDiscrepancyLoss(kernel)`` becomes
-    ``MaximumMeanDiscrepancyLoss(alpha=None, block_size=None)``.
+    ``(dim + 1,)`` tensor instead of a scalar; ``MaximumMeanDiscrepancyLoss(kernel)`` becomes
+    ``MaximumMeanDiscrepancyLoss(alpha=None, block_size=None)``, and ``SquaredMMD(kernel)``
+    becomes ``SquaredMMD(alpha=None)`` and returns ``(..., dim + 1)`` values, so a loss on its
+    headline is ``expectation(...)[..., 0]`` (or ``loss[0]`` for the functional and the module).
+    The ``Ising`` layer with a ``SquaredMMD`` statistic therefore outputs ``dim + 1`` values per
+    model.
 fixes:
+  - |
+    The score-function gradient of ``expectation`` with a ``SquaredMMD`` statistic is now
+    unbiased for every kernel of the battery: the removed ``GaussianKernel`` estimated its
+    bandwidth from the pooled samples, so the leave-one-out values held a bandwidth that still
+    depended on the left-out sample and the gradient was biased by several percent even in
+    expectation over exact enumeration; the battery's bandwidth is fixed by the dimension.
   - |
     The maximum mean discrepancy of identical samples is finite (zero for a point mass): the
     removed ``GaussianKernel`` divided by a zero data-dependent bandwidth and returned ``NaN``
-    kernels and losses for collapsed samples.
+    kernels, losses and prior gradients for collapsed samples.
