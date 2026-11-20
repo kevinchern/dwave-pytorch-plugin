@@ -36,8 +36,6 @@ __all__ = [
     "leave_one_out",
     "maximum_mean_discrepancy_loss",
     "pseudo_kl_divergence_loss",
-    "bit2spin_soft",
-    "spin2bit_soft",
 ]
 
 
@@ -348,41 +346,3 @@ def expectation(
     energy = graph.energy(spins, linear, quadratic)
     surrogate = -(weights * energy.unsqueeze(-1)).sum(-2)
     return value + surrogate - surrogate.detach()
-
-
-def bit2spin_soft(b: torch.Tensor) -> torch.Tensor:
-    """Maps input :math:`b` to :math:`2b-1`.
-
-    The mapping does not require :math:`b` to be binary, only that it is in the interval :math:`[0, 1]`.
-
-    Args:
-        b (torch.Tensor): Input tensor of values in :math:`[0, 1]`.
-
-    Raises:
-        ValueError: If not all ``b`` values are in :math:`[0, 1]`.
-
-    Returns:
-        torch.Tensor: A tensor with values :math:`2b-1`.
-    """
-    if not ((b >= 0) & (b <= 1)).all():
-        raise ValueError(f"Not all inputs are in [0, 1]: {b}")
-    return b * 2 - 1
-
-
-def spin2bit_soft(s: torch.Tensor) -> torch.Tensor:
-    """Maps input :math:`s` to :math:`(s+1)/2`.
-
-    The mapping does not require :math:`s` to be spin-valued, only that it is in the interval :math:`[-1, 1]`.
-
-    Args:
-        s (torch.Tensor): Input tensor of values in :math:`[-1, 1]`.
-
-    Raises:
-        ValueError: If not all ``s`` values are in `[-1, 1]`.
-
-    Returns:
-        torch.Tensor: A tensor with values :math:`(s+1)/2`.
-    """
-    if (s.abs() > 1).any():
-        raise ValueError(f"Not all inputs are in [-1, 1]: {s}")
-    return (s + 1) / 2

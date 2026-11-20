@@ -16,13 +16,9 @@ import unittest
 
 import torch
 
-from parameterized import parameterized
-
 from dwave.plugins.torch.kernels import kernel_profiles
-from dwave.plugins.torch.nn.functional import bit2spin_soft
 from dwave.plugins.torch.nn.functional import gumbel_spins
 from dwave.plugins.torch.nn.functional import maximum_mean_discrepancy_loss as mmd_loss
-from dwave.plugins.torch.nn.functional import spin2bit_soft
 from tests.helper_functions import randspins
 
 
@@ -159,24 +155,6 @@ class TestGumbelSpins(unittest.TestCase):
         self.assertTrue(torch.all(spins.abs() == 1))
         spins.sum().backward()
         self.assertTrue(torch.all(logits.grad > 0))
-
-
-class TestFunctional(unittest.TestCase):
-
-    def test_spin2bit_soft(self):
-        self.assertListEqual(spin2bit_soft(torch.tensor([-1.0, 1.0, 0.5])).tolist(), [0, 1, 0.75])
-
-    @parameterized.expand([([-1.1, 1.0],), ([-0.5, 1.1],)])
-    def test_spin2bit_raises(self, input):
-        self.assertRaises(ValueError, spin2bit_soft, torch.tensor(input))
-
-    def test_bit2spin_soft(self):
-        self.assertListEqual(bit2spin_soft(torch.tensor([0.0, 1.0, 0.5])).tolist(), [-1, 1, 0])
-
-    @parameterized.expand([([-0.1, 1.0],), ([0.1, 1.1],)])
-    def test_bit2spin_soft_raises(self, input):
-        self.assertRaises(ValueError, bit2spin_soft, torch.tensor(input))
-
 
 if __name__ == "__main__":
     unittest.main()
