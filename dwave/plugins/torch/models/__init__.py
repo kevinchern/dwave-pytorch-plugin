@@ -13,5 +13,4 @@
 # limitations under the License.
 #
 
-from dwave.plugins.torch.models.discrete_variational_autoencoder import *
 from dwave.plugins.torch.models.boltzmann_machine import *
