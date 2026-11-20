@@ -83,6 +83,7 @@ class TestGraphIndex(unittest.TestCase):
             self.assertTupleEqual(graph.nodes, clone.nodes)
             self.assertDictEqual(graph.node_to_idx, clone.node_to_idx)
             self.assertTrue(torch.equal(graph.edge_idx_i, clone.edge_idx_i))
+            self.assertTupleEqual(graph.nodes, pickle.loads(pickle.dumps(graph)).nodes)
             self.assertTupleEqual(graph.edges, pickle.loads(pickle.dumps(graph)).edges)
 
     def test_dense_quadratic(self):
