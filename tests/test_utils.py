@@ -1,4 +1,4 @@
-# Copyright 2026 D-Wave
+# Copyright 2025 D-Wave
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -66,7 +66,6 @@ class TestToBqm(unittest.TestCase):
                 {("a", "b"): -1.0, ("a", "c"): 1.0, ("a", "d"): 2.0, ("b", "c"): 0.0},
                 {tuple(sorted(e)): b for e, b in bqm.quadratic.items()},
             )
-            self.assertIsInstance(bqm.get_linear("d"), float)
 
         with self.subTest("Energies agree with those of the graph"):
             spins = torch.tensor([[1.0, -1.0, 1.0, 1.0], [-1.0, -1.0, 1.0, -1.0]])

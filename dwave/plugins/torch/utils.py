@@ -1,4 +1,4 @@
-# Copyright 2026 D-Wave
+# Copyright 2025 D-Wave
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -99,8 +99,8 @@ def to_bqm(
         dimod.BinaryQuadraticModel: The (scaled and clipped) model in the ``SPIN`` vartype, with
         its variables in the order of ``graph.nodes``.
     """
-    linear = torch.as_tensor(linear).detach()
-    quadratic = torch.as_tensor(quadratic).detach()
+    linear = linear.detach()
+    quadratic = quadratic.detach()
     if tuple(linear.shape) != (graph.n_nodes,):
         raise ValueError(
             f"Expected {graph.n_nodes} linear biases (one per node), got shape "
