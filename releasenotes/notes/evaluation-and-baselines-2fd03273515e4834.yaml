@@ -29,6 +29,17 @@ features:
     grow with the dimension, and ``kernel_means`` builds the per-profile kernel means of every
     loss from it.
   - |
+    New module ``dwave.plugins.torch.models.baselines``, exported by
+    ``dwave.plugins.torch.models``: moment-matched baselines of spins with one ``fit(x)`` /
+    ``sample(n, generator=None)`` interface, weakest first, against which a candidate model's
+    score is read. ``UniformBernoulli`` draws fair coins, ``IndependentBernoulli`` independent
+    spins at the data's per-spin means, and ``DichotomizedGaussian`` the signs of a latent
+    multivariate normal matched exactly to the data's means and pairwise tables by the
+    tetrachoric inversion of the bivariate normal distribution function (Jeffreys-smoothed, with
+    the pairwise solutions projected onto the nearest correlation matrix by Higham's alternating
+    projections; ``fit_info`` carries the diagnostics). ``BASELINES`` maps a name to each
+    constructor.
+  - |
     ``maximum_mean_discrepancy_loss(x, y, alpha=None, block_size=None)``,
     ``MaximumMeanDiscrepancyLoss(alpha=None, block_size=None)`` and the ``SquaredMMD(alpha=None)``
     statistic of the ``Ising`` layer now estimate the squared MMD under every kernel of the
@@ -55,8 +66,8 @@ upgrade:
     The ``Ising`` layer with a ``SquaredMMD`` statistic therefore outputs ``dim + 1`` values per
     model.
   - |
-    ``matplotlib`` is a test requirement; it is needed at run time only by
-    ``dwave.plugins.torch.evaluation.visualize`` and the figures of the examples.
+    ``matplotlib`` and ``scipy`` are test requirements; ``matplotlib`` is needed at run time only
+    by ``dwave.plugins.torch.evaluation.visualize`` and the figures of the examples.
 fixes:
   - |
     The score-function gradient of ``expectation`` with a ``SquaredMMD`` statistic is now
