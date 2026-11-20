@@ -21,4 +21,10 @@ features:
     the sandwich standard error and the exact ``±inf`` limits of a sample without excitations or
     without relaxed spins; it returns an ``InverseTemperatureFit``. The effective fields are
     evaluated by the dense coupling matrix of ``GraphIndex`` or, on large sparse graphs, by two
-    scatters over the edges.
+    scatters over the edges. ``GraphRestrictedBoltzmannMachine.fit_pseudolikelihood(spins, ...)``
+    fits a fully visible model in place. See ``examples/pseudolikelihood.py``.
+upgrade:
+  - |
+    ``GraphRestrictedBoltzmannMachine.estimate_beta`` is computed by ``fit_inverse_temperature``
+    and no longer calls ``dwave.system.temperatures``; the estimate is the same, computed in
+    float64 on the model's device.
